@@ -766,6 +766,60 @@ def _print_json(payload: dict[str, object]) -> None:
     print(json.dumps(payload, sort_keys=True))
 
 
+def _run_event_stream(request_path: Path, stage: str, callback: Any) -> int:
+    """Emit safe NDJSON lifecycle events for an OCTAVE-supervised sync job."""
+    try:
+        job_id = f"strum-{hashlib.sha256(request_path.read_bytes()).hexdigest()[:16]}"
+    except OSError:
+        job_id = "strum-unreadable-request"
+    _print_json(
+        {
+            "protocol_version": PROTOCOL_VERSION,
+            "job_id": job_id,
+            "sequence": 1,
+            "stage": stage,
+            "progress": 0.0,
+            "state": "running",
+            "code": "started",
+        }
+    )
+    try:
+        result = callback()
+    except BundleValidationError:
+        code, message = "model_bundle_invalid", "model bundle failed validation"
+    except CatalogValidationError:
+        code, message = "catalog_invalid", "catalog failed validation"
+    except WorkerRequestError:
+        code, message = "request_invalid", "worker request is invalid"
+    else:
+        _print_json(
+            {
+                "protocol_version": PROTOCOL_VERSION,
+                "job_id": job_id,
+                "sequence": 2,
+                "stage": stage,
+                "progress": 1.0,
+                "state": "succeeded",
+                "code": "completed",
+                "result": result,
+            }
+        )
+        return 0
+    _print_json(
+        {
+            "protocol_version": PROTOCOL_VERSION,
+            "job_id": job_id,
+            "sequence": 2,
+            "stage": stage,
+            "progress": 1.0,
+            "state": "failed",
+            "code": code,
+            "message": message,
+        }
+    )
+    return 2
+
+
 def _pipeline_by_id(pipeline_id: str) -> PipelineDescriptor:
     for pipeline in PIPELINES:
         if pipeline.id == pipeline_id:
@@ -1014,11 +1068,16 @@ def _parse_args() -> argparse.Namespace:
     prepare = dataset_commands.add_parser("prepare", help="materialize one catalog task view")
     prepare.add_argument("--request", type=Path, required=True)
     prepare.add_argument("--json", action="store_true")
+    prepare.add_argument("--json-events", action="store_true")
     training = commands.add_parser("train", help="run worker-managed training")
     training_commands = training.add_subparsers(dest="training_command", required=True)
     training_run = training_commands.add_parser("run", help="run one synchronous training job")
     training_run.add_argument("--request", type=Path, required=True)
     training_run.add_argument("--json", action="store_true")
+    training_run.add_argument("--json-events", action="store_true")
+    training_start = training_commands.add_parser("start", help="start one OCTAVE-supervised training job")
+    training_start.add_argument("--request", type=Path, required=True)
+    training_start.add_argument("--json-events", action="store_true")
     model = commands.add_parser("model", help="inspect model bundles")
     model_commands = model.add_subparsers(dest="model_command", required=True)
     preflight = model_commands.add_parser("preflight", help="validate a deployable model bundle")
@@ -1072,9 +1131,13 @@ def main() -> int:
             _print_json(inspect_catalog(args.catalog_root, args.pipeline))
             return 0
         if args.command == "dataset" and args.dataset_command == "prepare":
+            if args.json_events:
+                return _run_event_stream(args.request, "dataset_prepare", lambda: prepare_dataset_request(args.request))
             _print_json(prepare_dataset_request(args.request))
             return 0
-        if args.command == "train" and args.training_command == "run":
+        if args.command == "train" and args.training_command in {"run", "start"}:
+            if args.json_events:
+                return _run_event_stream(args.request, "training", lambda: run_training_request(args.request))
             _print_json(run_training_request(args.request))
             return 0
         if args.command == "model" and args.model_command == "preflight":
