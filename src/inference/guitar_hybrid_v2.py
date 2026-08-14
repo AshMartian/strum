@@ -69,8 +69,14 @@ class PitchNote:
         return self.t_end - self.t_start
 
 
-def basic_pitch_predict(audio_path: Path, min_amplitude: float = 0.3,
-                        min_pitch: int = 36, max_pitch: int = 88) -> list[PitchNote]:
+def basic_pitch_predict(
+    audio_path: Path,
+    min_amplitude: float = 0.3,
+    min_pitch: int = 36,
+    max_pitch: int = 88,
+    *,
+    honor_env: bool = True,
+) -> list[PitchNote]:
     """Run basic-pitch on an audio file → filtered note events.
 
     Args:
@@ -80,11 +86,13 @@ def basic_pitch_predict(audio_path: Path, min_amplitude: float = 0.3,
         max_pitch: MIDI 88 = E6, above 24th-fret high E.
             Override via STRUM_BP_MAX_PITCH env (e.g. 108 for piano).
     """
-    import os as _os_bp
-    if _os_bp.environ.get("STRUM_BP_MIN_PITCH"):
-        min_pitch = int(_os_bp.environ["STRUM_BP_MIN_PITCH"])
-    if _os_bp.environ.get("STRUM_BP_MAX_PITCH"):
-        max_pitch = int(_os_bp.environ["STRUM_BP_MAX_PITCH"])
+    if honor_env:
+        import os as _os_bp
+
+        if _os_bp.environ.get("STRUM_BP_MIN_PITCH"):
+            min_pitch = int(_os_bp.environ["STRUM_BP_MIN_PITCH"])
+        if _os_bp.environ.get("STRUM_BP_MAX_PITCH"):
+            max_pitch = int(_os_bp.environ["STRUM_BP_MAX_PITCH"])
     from basic_pitch.inference import predict
     model = _get_basic_pitch_model()
     _, _, raw_events = predict(str(audio_path), model)
@@ -492,14 +500,17 @@ class GuitarHybridV2Charter:
         onset_ckpt: Path,
         config_path: Path = ROOT / "configs" / "guitar_v2.yaml",
         device: Optional[str] = None,
+        *,
+        honor_env: bool = True,
     ):
         self.cfg = yaml.safe_load(open(config_path))
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self.honor_env = honor_env
 
         # V2 onset CRNN
         ocfg = OnsetCRNNConfig(**self.cfg["onset"]["model"])
         self.onset = GuitarOnsetCRNN(ocfg).to(self.device).eval()
-        ck = torch.load(onset_ckpt, map_location=self.device, weights_only=False)
+        ck = torch.load(onset_ckpt, map_location=self.device, weights_only=not honor_env)
         self.onset.load_state_dict(ck["state_dict"])
         self.onset_meta = {"epoch": ck.get("epoch"), "val_f1": ck.get("val_f1")}
 
@@ -528,19 +539,23 @@ class GuitarHybridV2Charter:
 
         Override via env var STRUM_GUITAR_LATENCY_MS (e.g. "0", "25", "-15").
         """
-        if latency_offset_s is None:
+        if latency_offset_s is None and self.honor_env:
             import os as _os
             # Diagnostic on existing charts (May 2026): chart fires ~50ms
             # EARLIER than audio onsets. Default flipped: ADD 25ms instead of
             # subtracting (env value is added to peak time).
             latency_offset_s = -float(_os.environ.get(
                 "STRUM_GUITAR_LATENCY_MS", "25")) / 1000.0
+        if latency_offset_s is None:
+            latency_offset_s = 0.0
         thr = threshold if threshold is not None else self.default_onset_thr
         # Optional onset-threshold env override for sweep tuning
-        import os as _os2
-        env_thr = _os2.environ.get("STRUM_GUITAR_PEAK_THR")
-        if env_thr:
-            thr = float(env_thr)
+        if self.honor_env:
+            import os as _os2
+
+            env_thr = _os2.environ.get("STRUM_GUITAR_PEAK_THR")
+            if env_thr:
+                thr = float(env_thr)
         log_mel = pgw.compute_log_mel(audio)                   # (M, T)
         x = log_mel.unsqueeze(0).unsqueeze(0).to(self.device)  # (1,1,M,T)
         logits = self.onset(x).squeeze(0)
@@ -557,11 +572,16 @@ class GuitarHybridV2Charter:
         audio: np.ndarray,
         audio_path: Path,
         onset_threshold: float | None = None,
+        latency_offset_s: float | None = None,
         snap_window_s: float = 0.075,
         min_pitch_amplitude: float = 0.3,
         sustain_min_duration_s: float = 0.40,
         max_chord_size: int = 3,
         harmonic_collapse: bool = False,
+        min_pitch: int = 36,
+        max_pitch: int = 88,
+        voice_filter: bool | None = None,
+        use_learned_mapper: bool | None = None,
     ) -> list[GuitarEvent]:
         """Full hybrid pipeline.
 
@@ -573,10 +593,18 @@ class GuitarHybridV2Charter:
                 detects root+octave harmonics as separate "notes".
         """
         # Stage 1: onsets
-        onset_times = self.detect_onsets(audio, threshold=onset_threshold)
+        onset_times = self.detect_onsets(
+            audio, threshold=onset_threshold, latency_offset_s=latency_offset_s
+        )
 
         # Stage 2: pitches
-        notes = basic_pitch_predict(audio_path, min_amplitude=min_pitch_amplitude)
+        notes = basic_pitch_predict(
+            audio_path,
+            min_amplitude=min_pitch_amplitude,
+            min_pitch=min_pitch,
+            max_pitch=max_pitch,
+            honor_env=self.honor_env,
+        )
 
         # Stage 3: snap
         buckets = snap_pitches_to_onsets(onset_times, notes, snap_window_s)
@@ -613,7 +641,9 @@ class GuitarHybridV2Charter:
         # voice filter strips chord pitches down to 1-2 notes which causes
         # the MLP to under-predict chords.
         buckets_full = [list(b) for b in buckets]
-        if _os.environ.get("STRUM_GUITAR_VOICE_FILTER", "1") == "1":
+        if voice_filter is None:
+            voice_filter = _os.environ.get("STRUM_GUITAR_VOICE_FILTER", "1") == "1"
+        if voice_filter:
             buckets = filter_dominant_voice(buckets, notes)
 
         # Stage 4: build mapper from all transcribed pitches.
@@ -622,7 +652,11 @@ class GuitarHybridV2Charter:
         # the rule-based PitchToFretMapper. The mapper consumes the same
         # CRNN onsets the rule path uses, so onset count is preserved.
         learned_frets: list[tuple[int, ...]] | None = None
-        if _os.environ.get("STRUM_GUITAR_FRET_MAPPER", "learned").lower() == "learned" and not harmonic_collapse:
+        if use_learned_mapper is None:
+            use_learned_mapper = (
+                _os.environ.get("STRUM_GUITAR_FRET_MAPPER", "learned").lower() == "learned"
+            )
+        if use_learned_mapper and not harmonic_collapse:
             try:
                 learned_frets = _learned_fret_mapping(onset_times, buckets_full)
             except Exception as _e:
@@ -748,6 +782,8 @@ def transcribe_guitar_hybrid(
     device: str | None = None,
     max_chord_size: int | None = None,
     harmonic_collapse: bool | None = None,
+    execution_profile=None,
+    model_bundle=None,
 ):
     """Hybrid V2 (V2 onset CRNN + basic-pitch + rule pitch→fret) → GuitarChart.
 
@@ -791,12 +827,44 @@ def transcribe_guitar_hybrid(
         except Exception:
             tempo_bpm = 120.0
 
-    ch = _get_hybrid_charter(device=device)
+    if execution_profile is None:
+        ch = _get_hybrid_charter(device=device)
+    else:
+        if model_bundle is None:
+            raise ValueError("bundle-backed Guitar transcription requires a model bundle")
+        component = model_bundle.component(execution_profile.onset_component)
+        if component is None or component.checkpoint is None or component.config is None:
+            raise ValueError("bundle-backed Guitar profile has no resolved onset assets")
+        ch = GuitarHybridV2Charter(
+            onset_ckpt=component.checkpoint,
+            config_path=component.config,
+            device=device,
+            honor_env=False,
+        )
+        onset_threshold = execution_profile.onset_threshold
+        max_chord_size = execution_profile.max_chord_size
+        harmonic_collapse = False
     events = ch.transcribe(
         audio, audio_path,
         onset_threshold=onset_threshold,
         max_chord_size=max_chord_size,
         harmonic_collapse=harmonic_collapse,
+        latency_offset_s=-execution_profile.latency_offset_ms / 1000.0
+        if execution_profile is not None
+        else None,
+        min_pitch_amplitude=execution_profile.min_pitch_amplitude
+        if execution_profile is not None
+        else 0.3,
+        min_pitch=execution_profile.min_pitch if execution_profile is not None else 36,
+        max_pitch=execution_profile.max_pitch if execution_profile is not None else 88,
+        snap_window_s=execution_profile.snap_window_ms / 1000.0
+        if execution_profile is not None
+        else 0.075,
+        sustain_min_duration_s=execution_profile.sustain_min_duration_ms / 1000.0
+        if execution_profile is not None
+        else 0.40,
+        voice_filter=execution_profile.voice_filter if execution_profile is not None else None,
+        use_learned_mapper=False if execution_profile is not None else None,
     )
 
     chart = GuitarChart(
