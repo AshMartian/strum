@@ -90,6 +90,9 @@ Documentation = "https://github.com/opria123/strum/blob/main/docs/ARCHITECTURE.m
 Repository = "https://github.com/opria123/strum"
 Issues = "https://github.com/opria123/strum/issues"
 
+[project.scripts]
+strum-worker = "src.worker:main"
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["src*"]

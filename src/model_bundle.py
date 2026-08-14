@@ -9,18 +9,19 @@ When no bundle is selected, :func:`get_active_bundle` exposes the repository's
 historic ``checkpoints/`` layout as a virtual legacy bundle.  This is
 intentional: existing commands and installations continue to work unchanged.
 """
+
 from __future__ import annotations
 
 import argparse
 import hashlib
 import json
 import os
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from src import PROJECT_ROOT, __version__
-
 
 MANIFEST_FILENAME = "strum-model-bundle.json"
 MANIFEST_SCHEMA_VERSION = 1
@@ -39,6 +40,10 @@ class ModelComponent:
     checkpoint: Path | None = None
     config: Path | None = None
     sha256: str | None = None
+    byte_length: int | None = None
+    required: bool = True
+    architecture: str | None = None
+    preprocessing: str | None = None
 
 
 @dataclass(frozen=True)
@@ -98,16 +103,34 @@ class ModelBundle:
 
         if check_files:
             for component in self.components.values():
-                for label, path in (("checkpoint", component.checkpoint), ("config", component.config)):
+                for label, path in (
+                    ("checkpoint", component.checkpoint),
+                    ("config", component.config),
+                ):
                     if path is not None and not path.is_file():
                         errors.append(f"{component.name}: {label} not found: {path}")
-                if verify_hashes and component.sha256 and component.checkpoint and component.checkpoint.is_file():
+                if (
+                    verify_hashes
+                    and component.sha256
+                    and component.checkpoint
+                    and component.checkpoint.is_file()
+                ):
                     actual = _sha256(component.checkpoint)
                     if actual != component.sha256:
                         errors.append(
                             f"{component.name}: checkpoint sha256 mismatch "
                             f"(expected {component.sha256}, got {actual})"
                         )
+                if (
+                    component.byte_length is not None
+                    and component.checkpoint
+                    and component.checkpoint.is_file()
+                    and component.checkpoint.stat().st_size != component.byte_length
+                ):
+                    errors.append(
+                        f"{component.name}: checkpoint byte length mismatch "
+                        f"(expected {component.byte_length}, got {component.checkpoint.stat().st_size})"
+                    )
         return errors
 
     def compatibility_status(self) -> list[str]:
@@ -203,23 +226,59 @@ def _resolve_relative_path(root: Path, value: object, field: str, component: str
 def _parse_component(root: Path, name: str, value: object) -> ModelComponent:
     if not isinstance(value, dict):
         raise BundleValidationError(f"components.{name} must be an object")
-    allowed = {"checkpoint", "config", "sha256"}
+    allowed = {
+        "checkpoint",
+        "config",
+        "sha256",
+        "byte_length",
+        "required",
+        "architecture",
+        "preprocessing",
+    }
     unknown = set(value) - allowed
     if unknown:
-        raise BundleValidationError(f"components.{name} has unknown field(s): {', '.join(sorted(unknown))}")
+        raise BundleValidationError(
+            f"components.{name} has unknown field(s): {', '.join(sorted(unknown))}"
+        )
     sha256 = value.get("sha256")
     if sha256 is not None and (
-        not isinstance(sha256, str) or len(sha256) != 64 or any(ch not in "0123456789abcdef" for ch in sha256)
+        not isinstance(sha256, str)
+        or len(sha256) != 64
+        or any(ch not in "0123456789abcdef" for ch in sha256)
     ):
-        raise BundleValidationError(f"components.{name}.sha256 must be a lowercase SHA-256 hex digest")
+        raise BundleValidationError(
+            f"components.{name}.sha256 must be a lowercase SHA-256 hex digest"
+        )
     if sha256 is not None and value.get("checkpoint") is None:
         raise BundleValidationError(f"components.{name}.sha256 requires a checkpoint path")
+    byte_length = value.get("byte_length")
+    if byte_length is not None and (
+        not isinstance(byte_length, int) or isinstance(byte_length, bool) or byte_length < 0
+    ):
+        raise BundleValidationError(f"components.{name}.byte_length must be a non-negative integer")
+    if byte_length is not None and value.get("checkpoint") is None:
+        raise BundleValidationError(f"components.{name}.byte_length requires a checkpoint path")
+    required = value.get("required", True)
+    if not isinstance(required, bool):
+        raise BundleValidationError(f"components.{name}.required must be a boolean")
+    architecture = value.get("architecture")
+    if architecture is not None and (not isinstance(architecture, str) or not architecture.strip()):
+        raise BundleValidationError(f"components.{name}.architecture must be a non-empty string")
+    preprocessing = value.get("preprocessing")
+    if preprocessing is not None and (
+        not isinstance(preprocessing, str) or not preprocessing.strip()
+    ):
+        raise BundleValidationError(f"components.{name}.preprocessing must be a non-empty string")
     return ModelComponent(
         name=name,
         root=root,
         checkpoint=_resolve_relative_path(root, value.get("checkpoint"), "checkpoint", name),
         config=_resolve_relative_path(root, value.get("config"), "config", name),
         sha256=sha256,
+        byte_length=byte_length,
+        required=required,
+        architecture=architecture,
+        preprocessing=preprocessing,
     )
 
 
@@ -230,7 +289,9 @@ def load_model_bundle(path: str | Path, *, check_files: bool = False) -> ModelBu
     weights, so it is safe for installation and editor discovery flows.
     """
     candidate = Path(path).expanduser().resolve()
-    manifest_path = candidate if candidate.name == MANIFEST_FILENAME else candidate / MANIFEST_FILENAME
+    manifest_path = (
+        candidate if candidate.name == MANIFEST_FILENAME else candidate / MANIFEST_FILENAME
+    )
     if not manifest_path.is_file():
         raise BundleValidationError(f"model bundle manifest not found: {manifest_path}")
     try:
@@ -244,9 +305,13 @@ def load_model_bundle(path: str | Path, *, check_files: bool = False) -> ModelBu
     unknown = set(raw) - allowed
     missing = {"schema_version", "model_id", "compatibility", "components"} - set(raw)
     if unknown:
-        raise BundleValidationError(f"bundle manifest has unknown field(s): {', '.join(sorted(unknown))}")
+        raise BundleValidationError(
+            f"bundle manifest has unknown field(s): {', '.join(sorted(unknown))}"
+        )
     if missing:
-        raise BundleValidationError(f"bundle manifest missing field(s): {', '.join(sorted(missing))}")
+        raise BundleValidationError(
+            f"bundle manifest missing field(s): {', '.join(sorted(missing))}"
+        )
     if not isinstance(raw["schema_version"], int):
         raise BundleValidationError("schema_version must be an integer")
     if not isinstance(raw["model_id"], str) or not raw["model_id"].strip():
@@ -257,7 +322,9 @@ def load_model_bundle(path: str | Path, *, check_files: bool = False) -> ModelBu
         raise BundleValidationError("components must be a non-empty object")
 
     root = manifest_path.parent.resolve()
-    components = {name: _parse_component(root, name, value) for name, value in raw["components"].items()}
+    components = {
+        name: _parse_component(root, name, value) for name, value in raw["components"].items()
+    }
     bundle = ModelBundle(
         root=root,
         model_id=raw["model_id"],
@@ -307,12 +374,17 @@ def legacy_model_bundle(root: Path = PROJECT_ROOT) -> ModelBundle:
         },
         "guitar.onset": {"checkpoint": "checkpoints/guitar_v2/guitar_v2_onset/best.pt"},
     }
-    components = {name: _parse_component(root, name, value) for name, value in component_paths.items()}
+    components = {
+        name: _parse_component(root, name, value) for name, value in component_paths.items()
+    }
     return ModelBundle(
         root=root,
         model_id="legacy-repository-layout",
         schema_version=MANIFEST_SCHEMA_VERSION,
-        compatibility={"manifest_schema": MANIFEST_SCHEMA_VERSION, "strum_version": f">={__version__}"},
+        compatibility={
+            "manifest_schema": MANIFEST_SCHEMA_VERSION,
+            "strum_version": f">={__version__}",
+        },
         components=components,
         legacy=True,
     )
@@ -351,12 +423,18 @@ def discover_model_bundles(root: str | Path) -> list[ModelBundle]:
 
 
 def _main() -> int:
-    parser = argparse.ArgumentParser(description="Inspect STRUM model bundles without loading weights.")
+    parser = argparse.ArgumentParser(
+        description="Inspect STRUM model bundles without loading weights."
+    )
     commands = parser.add_subparsers(dest="command", required=True)
     validate = commands.add_parser("validate", help="validate one bundle manifest")
     validate.add_argument("path", help="bundle directory or manifest path")
-    validate.add_argument("--check-files", action="store_true", help="require declared checkpoint/config files")
-    validate.add_argument("--verify-hashes", action="store_true", help="SHA-256 declared checkpoint files")
+    validate.add_argument(
+        "--check-files", action="store_true", help="require declared checkpoint/config files"
+    )
+    validate.add_argument(
+        "--verify-hashes", action="store_true", help="SHA-256 declared checkpoint files"
+    )
     listing = commands.add_parser("list", help="list valid child bundles in a directory")
     listing.add_argument("path", help="directory containing bundle directories")
     args = parser.parse_args()
