@@ -536,6 +536,28 @@ This verifies compatibility and provenance only: connecting a learned
 difficulty profile to the production auto-chart execution graph remains a
 separate deployment step.
 
+The first chart execution capability is intentionally narrow:
+`guitar.hybrid-v2-rule/v1`. It requires a bundle-verified onset checkpoint and
+model-config fingerprint, a typed profile configuration, and an installed
+Basic Pitch runtime. Its request references an already-validated preflight
+request plus private input/output locations:
+
+```json
+{
+  "preflight_request": "/private/guitar-preflight.json",
+  "audio_path": "/private/guitar-stem.ogg",
+  "output_dir": "/private/chart-run"
+}
+```
+
+Run it with `strum-worker chart run --request /path/to/owned-chart-run.json
+--json`. STRUM writes Expert-only `notes.mid` and `run.json`, recording profile
+and component hashes. It never enables the learned fret mapper, uses no
+`STRUM_GUITAR_*` overrides, and cannot make Hard/Medium/Easy charts unless a
+separate explicit STRUM difficulty profile is selected. Drums and the legacy
+multi-instrument batch pipeline are deliberately not execution handlers yet:
+they still contain undeclared companion/fallback behavior.
+
 ```bash
 python -m src.song_source_catalog /path/to/catalog
 python scripts/build_guitar_catalog_manifest.py /path/to/catalog \

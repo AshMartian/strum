@@ -3,13 +3,16 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
+import mido
 import pytest
 
 from src.model_bundle import MANIFEST_FILENAME, BundleValidationError
 from src.worker import (
     PROTOCOL_VERSION,
     _runtime_payload,
+    _write_expert_guitar_midi,
     inspect_catalog,
     preflight_bundle,
     preflight_chart_request,
@@ -210,3 +213,22 @@ def test_chart_preflight_returns_an_explicit_non_execution_plan(tmp_path: Path) 
     assert plan["status"] == "ready"
     assert plan["execution"] == "not_available"
     assert plan["components"][0]["id"] == "guitar.onset"
+
+
+def test_expert_guitar_export_never_materializes_lower_difficulties(tmp_path: Path) -> None:
+    chart = SimpleNamespace(
+        tempo_bpm=120.0,
+        notes=[SimpleNamespace(time_ms=100.0, duration_ms=200.0, fret=2)],
+        chords=[SimpleNamespace(time_ms=500.0, duration_ms=100.0, frets=[0, 4])],
+    )
+    output = tmp_path / "notes.mid"
+
+    _write_expert_guitar_midi(chart, output)
+
+    note_ons = {
+        message.note
+        for track in mido.MidiFile(output).tracks
+        for message in track
+        if message.type == "note_on" and message.velocity > 0
+    }
+    assert note_ons == {96, 98, 100}

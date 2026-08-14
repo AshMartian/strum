@@ -262,6 +262,14 @@ def _manifest_sha256(bundle: ModelBundle) -> str | None:
     return hashlib.sha256(bundle.manifest_path.read_bytes()).hexdigest()
 
 
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def preflight_bundle(
     path: str | Path,
     *,
@@ -384,7 +392,9 @@ def preflight_chart_request(request_path: Path) -> dict[str, object]:
         profile_configuration_sha256 = typed.configuration_sha256
     return {
         "status": "ready",
-        "execution": "not_available",
+        "execution": "available"
+        if plan["capability"] == "guitar.hybrid-v2-rule/v1"
+        else "not_available",
         "model_id": plan["model_id"],
         "profile_id": plan["profile_id"],
         "capability": plan["capability"],
@@ -394,6 +404,132 @@ def preflight_chart_request(request_path: Path) -> dict[str, object]:
         "manifest_sha256": plan["manifest_sha256"],
         "components": plan["components"],
         "profile_configuration_sha256": profile_configuration_sha256,
+    }
+
+
+def _read_chart_run_request(request_path: Path) -> dict[str, Any]:
+    try:
+        raw = json.loads(request_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise WorkerRequestError("chart run request is unreadable or not valid JSON") from error
+    if not isinstance(raw, dict) or set(raw) != {"preflight_request", "audio_path", "output_dir"}:
+        raise WorkerRequestError("chart run request has unsupported fields")
+    if not all(isinstance(raw[key], str) and raw[key] for key in raw):
+        raise WorkerRequestError("chart run request locations must be non-empty strings")
+    return raw
+
+
+def _write_expert_guitar_midi(chart: Any, output_path: Path) -> None:
+    """Write only Expert Guitar—lower difficulties need an explicit STRUM policy."""
+    import mido  # noqa: PLC0415
+
+    ticks_per_beat = 480
+    tempo = mido.bpm2tempo(float(chart.tempo_bpm))
+    messages: list[tuple[int, bool, int]] = []
+    for note in chart.notes:
+        start = round(float(note.time_ms) / 1000 * ticks_per_beat * 1_000_000 / tempo)
+        end = round(
+            (float(note.time_ms) + float(note.duration_ms))
+            / 1000
+            * ticks_per_beat
+            * 1_000_000
+            / tempo
+        )
+        messages.extend(
+            ((start, True, 96 + int(note.fret)), (max(end, start + 1), False, 96 + int(note.fret)))
+        )
+    for chord in chart.chords:
+        start = round(float(chord.time_ms) / 1000 * ticks_per_beat * 1_000_000 / tempo)
+        end = round(
+            (float(chord.time_ms) + float(chord.duration_ms))
+            / 1000
+            * ticks_per_beat
+            * 1_000_000
+            / tempo
+        )
+        for fret in chord.frets:
+            messages.extend(
+                ((start, True, 96 + int(fret)), (max(end, start + 1), False, 96 + int(fret)))
+            )
+    messages.sort(key=lambda event: (event[0], event[1]))
+    midi = mido.MidiFile(ticks_per_beat=ticks_per_beat)
+    track = mido.MidiTrack()
+    midi.tracks.append(track)
+    track.append(mido.MetaMessage("track_name", name="PART GUITAR", time=0))
+    track.append(mido.MetaMessage("set_tempo", tempo=tempo, time=0))
+    previous = 0
+    for tick, is_on, midi_note in messages:
+        track.append(
+            mido.Message(
+                "note_on" if is_on else "note_off",
+                note=midi_note,
+                velocity=100 if is_on else 0,
+                time=tick - previous,
+            )
+        )
+        previous = tick
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    midi.save(output_path)
+
+
+def run_chart_request(request_path: Path) -> dict[str, object]:
+    """Execute the explicit Guitar hybrid profile and record a safe run result."""
+    request = _read_chart_run_request(request_path)
+    plan = preflight_chart_request(Path(request["preflight_request"]))
+    if plan["execution"] != "available" or plan["capability"] != "guitar.hybrid-v2-rule/v1":
+        raise WorkerRequestError("profile has no worker chart execution handler")
+    try:
+        preflight_raw = json.loads(Path(request["preflight_request"]).read_text(encoding="utf-8"))
+        audio = Path(request["audio_path"])
+        if not audio.is_file():
+            raise WorkerRequestError("chart input audio is unavailable")
+        from src.inference.guitar_hybrid_profile import (
+            load_guitar_hybrid_rule_profile,  # noqa: PLC0415
+        )
+        from src.inference.guitar_hybrid_v2 import transcribe_guitar_hybrid  # noqa: PLC0415
+
+        bundle = load_model_bundle(preflight_raw["model_root"], check_files=True)
+        profile = load_guitar_hybrid_rule_profile(bundle, preflight_raw["profile_id"])
+        chart = transcribe_guitar_hybrid(
+            audio,
+            device=plan["device"],
+            execution_profile=profile,
+            model_bundle=bundle,
+        )
+        output_dir = Path(request["output_dir"])
+        midi_path = output_dir / "notes.mid"
+        _write_expert_guitar_midi(chart, midi_path)
+        run_manifest = {
+            "schema_version": 1,
+            "format": "strum-chart-run/v1",
+            "status": "completed",
+            "model_id": plan["model_id"],
+            "profile_id": plan["profile_id"],
+            "capability": plan["capability"],
+            "difficulty_policy": "expert_only",
+            "components": plan["components"],
+            "profile_configuration_sha256": plan["profile_configuration_sha256"],
+            "artifacts": {"notes_midi": {"name": midi_path.name, "sha256": _sha256(midi_path)}},
+            "stages": {
+                "guitar": {
+                    "status": "succeeded",
+                    "expert_event_count": len(chart.notes) + len(chart.chords),
+                }
+            },
+        }
+        (output_dir / "run.json").write_text(
+            json.dumps(run_manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+    except WorkerRequestError:
+        raise
+    except (BundleValidationError, OSError, ValueError) as error:
+        raise WorkerRequestError("profile chart execution failed") from error
+    return {
+        "status": "completed",
+        "profile_id": plan["profile_id"],
+        "output_name": "notes.mid",
+        "run_manifest_name": "run.json",
+        "expert_event_count": len(chart.notes) + len(chart.chords),
     }
 
 
@@ -683,6 +819,9 @@ def _parse_args() -> argparse.Namespace:
     )
     chart_preflight.add_argument("--request", type=Path, required=True)
     chart_preflight.add_argument("--json", action="store_true")
+    chart_run = chart_commands.add_parser("run", help="execute an explicit chart profile")
+    chart_run.add_argument("--request", type=Path, required=True)
+    chart_run.add_argument("--json", action="store_true")
     return parser.parse_args()
 
 
@@ -740,6 +879,9 @@ def main() -> int:
             return 0
         if args.command == "chart" and args.chart_command == "preflight":
             _print_json(preflight_chart_request(args.request))
+            return 0
+        if args.command == "chart" and args.chart_command == "run":
+            _print_json(run_chart_request(args.request))
             return 0
     except BundleValidationError:
         _print_json(
