@@ -19,15 +19,17 @@ Usage:
       --cache-dir /mnt/ml-data/fret_mapper_cache \
       --max-songs 200 --workers 4
 """
+
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sys
 import time
 import traceback
-from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from pathlib import Path
 
 import numpy as np
 
@@ -38,6 +40,7 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "scripts"))
 
+from src.catalog_task_manifest import resolve_catalog_task_manifest_songs  # noqa: E402
 from src.preprocessing.parsers.guitar_parser import GuitarParser  # noqa: E402
 
 log = logging.getLogger("build_mapper_dataset")
@@ -75,7 +78,7 @@ def featurize_onsets(onsets: list[dict]) -> np.ndarray:
             continue
         pcs = np.array([p % 12 for p in pitches])
         max_per_pc = np.zeros(12, dtype=np.float32)
-        for pc, a in zip(pcs, amps):
+        for pc, a in zip(pcs, amps, strict=False):
             if a > max_per_pc[pc]:
                 max_per_pc[pc] = a
         norm = max_per_pc.max()
@@ -104,7 +107,7 @@ def featurize_onsets(onsets: list[dict]) -> np.ndarray:
         for off in range(-CONTEXT, CONTEXT + 1):
             j = i + off
             if 0 <= j < N:
-                out[i, col:col + per] = feats[j]
+                out[i, col : col + per] = feats[j]
             col += per
     return out
 
@@ -130,9 +133,9 @@ def group_notes_by_onset(notes, window_sec: float = ONSET_GROUP_SEC):
 
 
 # ─────────────────────────── GT chart parsing ───────────────────────────────
-def parse_gt_chart(midi_path: Path) -> list[dict]:
-    """Return list of onset dicts {time_sec, frets:set(0..4)} from PART GUITAR."""
-    chart = GuitarParser().parse(midi_path, instrument="guitar")
+def parse_gt_chart(midi_path: Path, instrument: str = "guitar") -> list[dict]:
+    """Return onset/fret labels from an Expert Guitar or Bass chart track."""
+    chart = GuitarParser().parse(midi_path, instrument=instrument)
     if not chart.notes:
         return []
     by_tick: dict[int, dict] = {}
@@ -142,7 +145,9 @@ def parse_gt_chart(midi_path: Path) -> list[dict]:
     return sorted(by_tick.values(), key=lambda x: x["time_sec"])
 
 
-def match_bp_to_gt(bp_onsets: list[dict], gt_onsets: list[dict], tol_sec: float = MATCH_TOL_MS / 1000.0):
+def match_bp_to_gt(
+    bp_onsets: list[dict], gt_onsets: list[dict], tol_sec: float = MATCH_TOL_MS / 1000.0
+):
     """Greedy nearest match. Returns list of (bp_idx, gt_idx)."""
     pairs = []
     j_start = 0
@@ -167,24 +172,25 @@ def match_bp_to_gt(bp_onsets: list[dict], gt_onsets: list[dict], tol_sec: float 
 
 # ─────────────────────────── Per-song worker ────────────────────────────────
 def process_song(args: tuple) -> dict:
-    song_dir, cache_dir, onset_thr, frame_thr, min_note_len = args
-    song_dir = Path(song_dir)
+    song_id, audio_path, midi_path, cache_dir, onset_thr, frame_thr, min_note_len, instrument = args
+    audio_path = Path(audio_path)
+    midi_path = Path(midi_path)
     cache_dir = Path(cache_dir)
-    out_path = cache_dir / f"{song_dir.parent.name}__{song_dir.name}.npz"
+    out_path = cache_dir / f"{song_id}.npz"
     if out_path.exists():
-        return {"song": song_dir.name, "status": "cached", "n": 0}
-    guitar_wav = song_dir / "guitar.ogg"
-    midi = song_dir / "notes.mid"
-    if not guitar_wav.exists() or not midi.exists():
-        return {"song": song_dir.name, "status": "missing", "n": 0}
+        return {"song": song_id, "status": "cached", "n": 0}
+    if not audio_path.exists() or not midi_path.exists():
+        return {"song": song_id, "status": "missing", "n": 0}
     try:
         # Lazy-import basic_pitch in worker
         import logging as _lg
+
         _lg.getLogger("root").setLevel(_lg.ERROR)
         from basic_pitch.inference import predict
+
         t0 = time.time()
         _, _, raw_notes = predict(
-            str(guitar_wav),
+            str(audio_path),
             onset_threshold=onset_thr,
             frame_threshold=frame_thr,
             minimum_note_length=min_note_len,
@@ -192,12 +198,12 @@ def process_song(args: tuple) -> dict:
         bp_t = time.time() - t0
 
         bp_onsets = group_notes_by_onset(raw_notes)
-        gt_onsets = parse_gt_chart(midi)
+        gt_onsets = parse_gt_chart(midi_path, instrument)
         if not bp_onsets or not gt_onsets:
-            return {"song": song_dir.name, "status": "empty", "n": 0}
+            return {"song": song_id, "status": "empty", "n": 0}
         pairs = match_bp_to_gt(bp_onsets, gt_onsets)
         if not pairs:
-            return {"song": song_dir.name, "status": "no_match", "n": 0}
+            return {"song": song_id, "status": "no_match", "n": 0}
 
         feats = featurize_onsets(bp_onsets)
         bp_idx = np.array([p[0] for p in pairs])
@@ -212,23 +218,27 @@ def process_song(args: tuple) -> dict:
         out_path.parent.mkdir(parents=True, exist_ok=True)
         np.savez_compressed(
             out_path,
-            X=X, Y=Y,
-            song_id=str(song_dir),
+            X=X,
+            Y=Y,
+            song_id=song_id,
             n_bp=len(bp_onsets),
             n_gt=len(gt_onsets),
             n_matched=len(pairs),
             bp_seconds=bp_t,
         )
-        return {"song": song_dir.name, "status": "ok", "n": len(pairs), "bp_t": bp_t}
+        return {"song": song_id, "status": "ok", "n": len(pairs), "bp_t": bp_t}
     except Exception as e:
-        return {"song": song_dir.name, "status": f"error: {e}", "n": 0,
-                "trace": traceback.format_exc()}
+        return {"song": song_id, "status": f"error: {e}", "n": 0, "trace": traceback.format_exc()}
 
 
 # ─────────────────────────── Main ───────────────────────────────────────────
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--songs-root", required=True, type=Path)
+    ap.add_argument("--songs-root", type=Path, help="legacy raw-song directory tree")
+    ap.add_argument("--catalog-manifest", type=Path, help="STRUM fret-mapper catalog task view")
+    ap.add_argument(
+        "--catalog-root", type=Path, help="OCTAVE catalog root for runtime revalidation"
+    )
     ap.add_argument("--cache-dir", required=True, type=Path)
     ap.add_argument("--max-songs", type=int, default=0, help="0 = all")
     ap.add_argument("--workers", type=int, default=2)
@@ -237,21 +247,52 @@ def main():
     ap.add_argument("--min-note-length", type=int, default=11)
     args = ap.parse_args()
 
-    # Find all <pack>/<song>/ dirs that have guitar.ogg + notes.mid
-    candidates: list[Path] = []
-    for guitar in args.songs_root.rglob("guitar.ogg"):
-        if (guitar.parent / "notes.mid").exists():
-            candidates.append(guitar.parent)
-    candidates.sort()
+    using_catalog = args.catalog_manifest is not None or args.catalog_root is not None
+    if using_catalog and (args.catalog_manifest is None or args.catalog_root is None):
+        ap.error("--catalog-manifest and --catalog-root must be used together")
+    if using_catalog and args.songs_root is not None:
+        ap.error("choose either legacy --songs-root or a catalog task manifest")
+    if not using_catalog and args.songs_root is None:
+        ap.error("--songs-root is required without a catalog task manifest")
+
+    if using_catalog:
+        manifest = json.loads(args.catalog_manifest.read_text(encoding="utf-8"))
+        task = manifest.get("task")
+        if not isinstance(task, dict) or task.get("kind") not in {
+            "fret_mapper_guitar",
+            "fret_mapper_bass",
+        }:
+            ap.error("catalog manifest must use fret_mapper_guitar or fret_mapper_bass")
+        instrument = task["instrument"]
+        candidates = [
+            (song["source_id"], Path(song["audio_path"]), Path(song["midi_path"]))
+            for song in resolve_catalog_task_manifest_songs(manifest, args.catalog_root)
+        ]
+    else:
+        instrument = "guitar"
+        candidates = [
+            (f"{path.parent.parent.name}__{path.parent.name}", path, path.parent / "notes.mid")
+            for path in args.songs_root.rglob("guitar.ogg")
+            if (path.parent / "notes.mid").exists()
+        ]
+    candidates.sort(key=lambda candidate: candidate[0])
     if args.max_songs:
         candidates = candidates[: args.max_songs]
     log.info(f"Found {len(candidates)} candidate songs")
 
     args.cache_dir.mkdir(parents=True, exist_ok=True)
     payloads = [
-        (str(d), str(args.cache_dir), args.onset_threshold,
-         args.frame_threshold, args.min_note_length)
-        for d in candidates
+        (
+            song_id,
+            str(audio_path),
+            str(midi_path),
+            str(args.cache_dir),
+            args.onset_threshold,
+            args.frame_threshold,
+            args.min_note_length,
+            instrument,
+        )
+        for song_id, audio_path, midi_path in candidates
     ]
 
     n_ok = n_err = n_cached = n_skip = 0
@@ -275,8 +316,12 @@ def main():
                 n_cached += r["status"] == "cached"
                 n_skip += r["status"] in ("missing", "empty", "no_match")
                 if i % 25 == 0:
-                    log.info(f"  progress: {i}/{len(futures)}  ok={n_ok} err={n_err} cached={n_cached} skip={n_skip}")
-    log.info(f"Done in {time.time()-t0:.1f}s — ok={n_ok} err={n_err} cached={n_cached} skip={n_skip}")
+                    log.info(
+                        f"  progress: {i}/{len(futures)}  ok={n_ok} err={n_err} cached={n_cached} skip={n_skip}"
+                    )
+    log.info(
+        f"Done in {time.time() - t0:.1f}s — ok={n_ok} err={n_err} cached={n_cached} skip={n_skip}"
+    )
 
 
 def _tally(r, log):
