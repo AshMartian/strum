@@ -487,7 +487,8 @@ STRUM treats OCTAVE's `octave-song-source-catalog/v1` as its common local
 training-source boundary. OCTAVE imports source packages, makes the rights
 decision, and materializes managed assets. STRUM then validates asset hashes
 and selects only `training_use: allowed` records for a task view; it does not
-parse external package formats or persist original source paths.
+parse `.sng`, `.rb3con`, ZIP, or source-folder packages, or persist original
+source paths.
 
 ```bash
 python -m src.song_source_catalog /path/to/catalog
@@ -566,6 +567,34 @@ These task views make each family catalog-ready. They do not invent missing
 trainers: Bass currently reuses the Guitar/Bass chart representation, while
 Keys, Vocals, and Pro-instrument learned trainer architectures still need to
 be implemented before their task views can produce checkpoints.
+### Catalog-backed chart-transform tasks
+
+The `chart_transform.five_lane/v1` pipeline learns Expert → Hard, Medium, or
+Easy chart pairs for Guitar, Bass, Keys, or Drums. It consumes only `allowed`
+catalog records containing both Expert and the requested target difficulty;
+OCTAVE remains the importer and curation boundary.
+
+```bash
+python scripts/prepare_catalog_chart_pairs.py \
+  --catalog-root /run/media/ash/portable-ai/strum/catalogs/octave-curated-catalog \
+  --output-dir /run/media/ash/portable-ai/strum/tasks/guitar-expert-hard-v1 \
+  --instrument guitar \
+  --target-difficulty Hard
+python scripts/train_chart_transform.py \
+  --config /path/to/chart-transform.yaml \
+  --dataset-manifest /run/media/ash/portable-ai/strum/tasks/guitar-expert-hard-v1/dataset-manifest.json
+```
+
+`--describe-pipeline` prints the stable pipeline descriptor for an OCTAVE
+worker. Each task view records its pipeline ID/version, catalog manifest and
+records hashes, source IDs with `notes.mid` hashes, deterministic source-ID
+split assignments, and preprocessing configuration hash. Training revalidates
+that lineage and preserves it in `training-metadata.json`; neither artifact
+contains original package locations or raw local paths.
+
+`prepare_instrument_chart_pairs.py` remains a local standalone bridge for
+non-catalog experiments. It is not an OCTAVE integration input and must not be
+used by an OCTAVE worker to scan source folders.
 
 ## Development
 
