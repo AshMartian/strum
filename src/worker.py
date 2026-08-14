@@ -694,6 +694,7 @@ def run_chart_request(request_path: Path) -> dict[str, object]:
             "difficulty_policy": plan["difficulty_policy"],
             "components": plan["components"],
             "profile_configuration_sha256": plan["profile_configuration_sha256"],
+            "profile_configuration_byte_length": plan["profile_configuration_byte_length"],
             "artifacts": artifacts,
             "stages": stages,
         }
