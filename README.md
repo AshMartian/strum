@@ -532,9 +532,25 @@ The chart-transform training request names a catalog-generated
 checkpoint paths or audio locations. Its resulting bundle includes a verified
 component hash/byte length, architecture and preprocessing IDs, plus a
 profile that can be checked with `strum-worker inference profile validate`.
-This verifies compatibility and provenance only: connecting a learned
-difficulty profile to the production auto-chart execution graph remains a
-separate deployment step.
+The profile is executable through `strum-worker chart run`: it consumes an
+explicit Expert five-lane `notes.mid` and writes only its declared learned
+target difficulty. This lets OCTAVE compose an Expert chart stage with an
+explicit STRUM difficulty stage, rather than applying a deterministic
+downgrade. A transform request is private to the supervising process:
+
+```json
+{
+  "preflight_request": "/private/transform-preflight.json",
+  "source_midi_path": "/private/expert-notes.mid",
+  "song_path": null,
+  "output_dir": "/private/transform-run",
+  "threshold": 0.5
+}
+```
+
+`song_path` is required only when the selected transform checkpoint is
+audio-conditioned. The output contains `events.json`, one target-difficulty
+`notes.mid`, and a hash-recorded `run.json`; none contain input locations.
 
 The first chart execution capability is intentionally narrow:
 `guitar.hybrid-v2-rule/v1`. It requires a bundle-verified onset checkpoint and

@@ -686,6 +686,7 @@ def train(config: TrainingConfig) -> dict[str, Any]:
     portable_config = asdict(config)
     for local_field in ("dataset_manifest", "output_dir", "audio_manifest", "init_checkpoint"):
         portable_config[local_field] = None
+    portable_config["instrument"] = dataset_manifest["instrument"]
     model_config_path.write_text(
         json.dumps(portable_config, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
@@ -712,6 +713,8 @@ def train(config: TrainingConfig) -> dict[str, Any]:
                 "config": "configs/training-config.json",
                 "sha256": _sha256(weights_path),
                 "byte_length": weights_path.stat().st_size,
+                "config_sha256": _sha256(model_config_path),
+                "config_byte_length": model_config_path.stat().st_size,
                 "architecture": "EventTransformMLP/v1",
                 "preprocessing": "midi-five-lane-events/v1",
             }

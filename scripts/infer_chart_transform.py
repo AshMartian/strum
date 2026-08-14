@@ -24,11 +24,8 @@ from src.models.chart_audio import (
 from src.models.chart_transform import EventTransformMLP
 
 
-def load_source_events(path: Path, lane_count: int) -> tuple[ChartEvent, ...]:
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as error:
-        raise DatasetValidationError(f"invalid source events JSON: {error}") from error
+def parse_source_events(raw: object, lane_count: int) -> tuple[ChartEvent, ...]:
+    """Validate in-memory five-lane source events for worker or CLI inference."""
     events_value = raw.get("source_events") if isinstance(raw, dict) else raw
     if not isinstance(events_value, list) or not events_value:
         raise DatasetValidationError(
@@ -52,6 +49,14 @@ def load_source_events(path: Path, lane_count: int) -> tuple[ChartEvent, ...]:
     return tuple(sorted(events, key=lambda event: event.time_ms))
 
 
+def load_source_events(path: Path, lane_count: int) -> tuple[ChartEvent, ...]:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise DatasetValidationError(f"invalid source events JSON: {error}") from error
+    return parse_source_events(raw, lane_count)
+
+
 def predict(
     checkpoint_path: Path,
     source_events: tuple[ChartEvent, ...],
@@ -62,7 +67,7 @@ def predict(
 ) -> list[dict[str, object]]:
     if not 0 < threshold < 1:
         raise DatasetValidationError("threshold must be between 0 and 1")
-    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
     if not isinstance(checkpoint, dict) or checkpoint.get("model_type") != "EventTransformMLP":
         raise DatasetValidationError("checkpoint is not an EventTransformMLP checkpoint")
     lane_count = checkpoint.get("lane_count")
@@ -138,7 +143,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
+    checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=True)
     lane_count = checkpoint.get("lane_count") if isinstance(checkpoint, dict) else None
     if not isinstance(lane_count, int):
         raise SystemExit("checkpoint has no valid lane_count")

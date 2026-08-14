@@ -8,8 +8,10 @@ from types import SimpleNamespace
 
 import mido
 import pytest
+import torch
 
 from src.model_bundle import MANIFEST_FILENAME, BundleValidationError
+from src.models.chart_transform import EventTransformMLP
 from src.worker import (
     PROTOCOL_VERSION,
     _run_without_legacy_output,
@@ -19,6 +21,7 @@ from src.worker import (
     preflight_bundle,
     preflight_chart_request,
     prepare_dataset_request,
+    run_chart_request,
     validate_inference_profile,
 )
 
@@ -162,6 +165,19 @@ def test_preflight_requires_hash_and_length_for_deployable_components(tmp_path: 
     assert result["manifest_sha256"]
 
 
+def test_preflight_requires_config_fingerprint_when_component_declares_config(tmp_path: Path) -> None:
+    root = _bundle(
+        tmp_path,
+        {"architecture": "GuitarOnsetCRNN/v1", "config": "configs/guitar.json"},
+    )
+    config = root / "configs" / "guitar.json"
+    config.parent.mkdir()
+    config.write_text("{}")
+
+    with pytest.raises(BundleValidationError, match="config requires sha256"):
+        preflight_bundle(root, required_components=["guitar.onset"])
+
+
 def test_preflight_rejects_incomplete_or_missing_components(tmp_path: Path) -> None:
     root = _bundle(tmp_path, {})
     manifest = json.loads((root / MANIFEST_FILENAME).read_text())
@@ -233,6 +249,103 @@ def test_chart_preflight_returns_an_explicit_non_execution_plan(tmp_path: Path) 
     assert plan["status"] == "ready"
     assert plan["execution"] == "not_available"
     assert plan["components"][0]["id"] == "guitar.onset"
+
+
+def test_chart_transform_profile_runs_from_expert_midi_without_path_leaks(tmp_path: Path) -> None:
+    root = tmp_path / "transform-bundle"
+    checkpoint_path = root / "weights" / "chart_transform.pt"
+    checkpoint_path.parent.mkdir(parents=True)
+    model = EventTransformMLP(lane_count=5, hidden_dim=4, audio_feature_dim=0)
+    torch.save(
+        {
+            "model_type": "EventTransformMLP",
+            "lane_count": 5,
+            "hidden_dim": 4,
+            "audio_feature_dim": 0,
+            "model_state_dict": model.state_dict(),
+        },
+        checkpoint_path,
+    )
+    config_path = root / "configs" / "training-config.json"
+    config_path.parent.mkdir()
+    config_path.write_text(json.dumps({"instrument": "guitar", "target_difficulty": "Hard"}))
+    component_id = "chart_transform.guitar.expert_to_hard"
+    (root / MANIFEST_FILENAME).write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "model_id": "transform-fixture",
+                "compatibility": {"manifest_schema": 1, "strum_version": ">=0.1.0"},
+                "components": {
+                    component_id: {
+                        "checkpoint": "weights/chart_transform.pt",
+                        "sha256": hashlib.sha256(checkpoint_path.read_bytes()).hexdigest(),
+                        "byte_length": checkpoint_path.stat().st_size,
+                        "config": "configs/training-config.json",
+                        "config_sha256": hashlib.sha256(config_path.read_bytes()).hexdigest(),
+                        "config_byte_length": config_path.stat().st_size,
+                        "architecture": "EventTransformMLP/v1",
+                        "preprocessing": "midi-five-lane-events/v1",
+                    }
+                },
+                "profiles": {
+                    "difficulty-transform-guitar": {
+                        "capability": "difficulty.transform/v1",
+                        "instruments": ["guitar"],
+                        "required_components": [component_id],
+                        "difficulty_policies": [f"learned:{component_id}"],
+                    }
+                },
+            }
+        )
+    )
+    source_midi = tmp_path / "expert.mid"
+    source = mido.MidiFile(ticks_per_beat=480)
+    track = mido.MidiTrack()
+    source.tracks.append(track)
+    track.append(mido.MetaMessage("track_name", name="PART GUITAR", time=0))
+    track.append(mido.Message("note_on", note=96, velocity=100, time=0))
+    track.append(mido.Message("note_off", note=96, velocity=0, time=120))
+    source.save(source_midi)
+    preflight = tmp_path / "preflight.json"
+    preflight.write_text(
+        json.dumps(
+            {
+                "model_root": str(root),
+                "profile_id": "difficulty-transform-guitar",
+                "difficulty_policy": f"learned:{component_id}",
+                "instruments": ["guitar"],
+                "device": "cpu",
+            }
+        )
+    )
+    output = tmp_path / "result"
+    request = tmp_path / "run.json"
+    request.write_text(
+        json.dumps(
+            {
+                "preflight_request": str(preflight),
+                "source_midi_path": str(source_midi),
+                "song_path": None,
+                "output_dir": str(output),
+                "threshold": 0.01,
+            }
+        )
+    )
+
+    result = run_chart_request(request)
+
+    assert result["status"] == "completed"
+    assert result["difficulty"] == "Hard"
+    manifest = (output / "run.json").read_text()
+    assert str(tmp_path) not in manifest
+    note_ons = {
+        message.note
+        for track in mido.MidiFile(output / "notes.mid").tracks
+        for message in track
+        if message.type == "note_on" and message.velocity > 0
+    }
+    assert note_ons <= {84, 85, 86, 87, 88}
 
 
 def test_expert_guitar_export_never_materializes_lower_difficulties(tmp_path: Path) -> None:
