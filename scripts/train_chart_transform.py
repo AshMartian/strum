@@ -144,6 +144,9 @@ class ChartPair:
     source_events: tuple[ChartEvent, ...]
     target_events: tuple[ChartEvent, ...]
     audio_path: Path | None = None
+    source_id: str | None = None
+    notes_midi_sha256: str | None = None
+    split: str | None = None
 
 
 def load_config(path: str | Path) -> TrainingConfig:
@@ -180,6 +183,7 @@ def load_dataset(config: TrainingConfig) -> tuple[list[ChartPair], dict[str, Any
             "dataset manifest instrument must be a supported five-lane instrument"
         )
     manifest["instrument"] = dataset_instrument
+    task_view = _validate_catalog_task_view(manifest)
     records_value = manifest["records"]
     if not isinstance(records_value, str):
         raise DatasetValidationError("dataset manifest records must be a relative JSONL path")
@@ -203,7 +207,7 @@ def load_dataset(config: TrainingConfig) -> tuple[list[ChartPair], dict[str, Any
             raise DatasetValidationError(
                 f"record {line_number} instrument does not match dataset manifest"
             )
-        pairs.append(_parse_pair(raw_pair, config, line_number))
+        pairs.append(_parse_pair(raw_pair, config, line_number, task_view))
     if not pairs:
         raise DatasetValidationError("dataset has no chart pairs")
     if len({pair.song_id for pair in pairs}) < 2:
@@ -211,6 +215,92 @@ def load_dataset(config: TrainingConfig) -> tuple[list[ChartPair], dict[str, Any
             "dataset requires at least two song_id values for song-level validation"
         )
     return pairs, manifest
+
+
+def _validate_catalog_task_view(manifest: dict[str, Any]) -> dict[str, Any] | None:
+    """Validate optional OCTAVE catalog lineage without accepting local paths."""
+    task_view = manifest.get("task_view")
+    if task_view is None:
+        return None
+    if not isinstance(task_view, dict):
+        raise DatasetValidationError("task_view must be an object")
+    required = {"task_view_id", "pipeline", "catalog", "source_inputs", "split", "preprocessing"}
+    if set(task_view) != required:
+        raise DatasetValidationError("task_view has unsupported or missing fields")
+    pipeline = task_view["pipeline"]
+    if (
+        not isinstance(pipeline, dict)
+        or pipeline.get("id") != "chart_transform.five_lane"
+        or pipeline.get("version") != 1
+    ):
+        raise DatasetValidationError("task_view pipeline is not chart_transform.five_lane/v1")
+    catalog = task_view["catalog"]
+    if not isinstance(catalog, dict) or set(catalog) != {
+        "catalog_id",
+        "manifest_sha256",
+        "records_sha256",
+    }:
+        raise DatasetValidationError("task_view catalog lineage is invalid")
+    if not isinstance(catalog["catalog_id"], str) or not catalog["catalog_id"]:
+        raise DatasetValidationError("task_view catalog_id is invalid")
+    for field in ("manifest_sha256", "records_sha256"):
+        if not _is_sha256(catalog[field]):
+            raise DatasetValidationError(f"task_view catalog {field} is invalid")
+    source_inputs = task_view["source_inputs"]
+    if not isinstance(source_inputs, list) or not source_inputs:
+        raise DatasetValidationError("task_view source_inputs must be a non-empty list")
+    source_ids: set[str] = set()
+    for source in source_inputs:
+        if (
+            not isinstance(source, dict)
+            or set(source) != {"source_id", "notes_midi_sha256"}
+            or not isinstance(source["source_id"], str)
+            or not source["source_id"]
+            or source["source_id"] in source_ids
+            or not _is_sha256(source["notes_midi_sha256"])
+        ):
+            raise DatasetValidationError("task_view source input is invalid")
+        source_ids.add(source["source_id"])
+    split = task_view["split"]
+    if not isinstance(split, dict) or set(split) != {
+        "algorithm",
+        "seed",
+        "validation_fraction",
+        "assignments",
+    }:
+        raise DatasetValidationError("task_view split lineage is invalid")
+    if (
+        split["algorithm"] != "sha256-source-id-rank/v1"
+        or not isinstance(split["seed"], int)
+        or not isinstance(split["validation_fraction"], (int, float))
+        or not 0 < split["validation_fraction"] < 1
+        or not isinstance(split["assignments"], dict)
+        or set(split["assignments"]) != source_ids
+        or set(split["assignments"].values()) - {"train", "validation"}
+    ):
+        raise DatasetValidationError("task_view split assignments are invalid")
+    preprocessing = task_view["preprocessing"]
+    if not isinstance(preprocessing, dict) or not _is_sha256(preprocessing.get("config_sha256")):
+        raise DatasetValidationError("task_view preprocessing lineage is invalid")
+    expected_id = dict(task_view)
+    task_view_id = expected_id.pop("task_view_id")
+    if not _is_sha256(task_view_id) or _canonical_sha256(expected_id) != task_view_id:
+        raise DatasetValidationError("task_view_id does not match task-view contents")
+    return task_view
+
+
+def _is_sha256(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(char in "0123456789abcdef" for char in value)
+    )
+
+
+def _canonical_sha256(value: object) -> str:
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
 
 
 def _resolve_dataset_path(root: Path, relative: str) -> Path:
@@ -269,7 +359,12 @@ def _load_audio_assets(
     return assets, _sha256(manifest_path)
 
 
-def _parse_pair(raw: object, config: TrainingConfig, line_number: int) -> ChartPair:
+def _parse_pair(
+    raw: object,
+    config: TrainingConfig,
+    line_number: int,
+    task_view: dict[str, Any] | None,
+) -> ChartPair:
     if not isinstance(raw, dict):
         raise DatasetValidationError(f"record {line_number} must be an object")
     song_id = raw.get("song_id")
@@ -283,6 +378,25 @@ def _parse_pair(raw: object, config: TrainingConfig, line_number: int) -> ChartP
         raise DatasetValidationError(
             f"record {line_number} target_difficulty does not match config"
         )
+    source_id: str | None = None
+    notes_midi_sha256: str | None = None
+    split: str | None = None
+    if task_view is not None:
+        source_id = raw.get("source_id")
+        notes_midi_sha256 = raw.get("notes_midi_sha256")
+        split = raw.get("split")
+        source_inputs = {
+            source["source_id"]: source["notes_midi_sha256"]
+            for source in task_view["source_inputs"]
+        }
+        assignments = task_view["split"]["assignments"]
+        if (
+            source_id != song_id
+            or source_id not in source_inputs
+            or notes_midi_sha256 != source_inputs[source_id]
+            or split != assignments[source_id]
+        ):
+            raise DatasetValidationError(f"record {line_number} does not match task_view lineage")
     return ChartPair(
         song_id=song_id,
         source_events=_parse_events(
@@ -295,6 +409,9 @@ def _parse_pair(raw: object, config: TrainingConfig, line_number: int) -> ChartP
             "target_events",
             allow_empty=True,
         ),
+        source_id=source_id,
+        notes_midi_sha256=notes_midi_sha256,
+        split=split,
     )
 
 
@@ -368,6 +485,23 @@ def _device_metadata(requested: str, device: torch.device) -> dict[str, Any]:
 def split_by_song(
     pairs: list[ChartPair], seed: int, validation_fraction: float
 ) -> tuple[list[ChartPair], list[ChartPair]]:
+    declared_splits = {pair.split for pair in pairs}
+    if declared_splits != {None}:
+        if None in declared_splits:
+            raise DatasetValidationError(
+                "catalog task view mixes declared and undeclared song splits"
+            )
+        split_by_song_id: dict[str, str] = {}
+        for pair in pairs:
+            assert pair.split is not None
+            previous = split_by_song_id.setdefault(pair.song_id, pair.split)
+            if previous != pair.split:
+                raise DatasetValidationError("one song_id cannot have multiple task-view splits")
+        train = [pair for pair in pairs if pair.split == "train"]
+        validation = [pair for pair in pairs if pair.split == "validation"]
+        if not train or not validation:
+            raise DatasetValidationError("catalog task view requires train and validation songs")
+        return train, validation
     song_ids = sorted({pair.song_id for pair in pairs})
     random.Random(seed).shuffle(song_ids)
     validation_count = min(len(song_ids) - 1, max(1, round(len(song_ids) * validation_fraction)))
@@ -583,6 +717,7 @@ def train(config: TrainingConfig) -> dict[str, Any]:
     (output_dir / MANIFEST_FILENAME).write_text(
         json.dumps(bundle_manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
+    task_view = dataset_manifest.get("task_view")
     metadata = {
         "dataset": {
             "dataset_id": dataset_manifest["dataset_id"],
@@ -590,6 +725,7 @@ def train(config: TrainingConfig) -> dict[str, Any]:
             "provenance": dataset_manifest["provenance"],
             "license": dataset_manifest["license"],
             "instrument": dataset_manifest.get("instrument"),
+            "task_view": task_view,
         },
         "split": {
             "unit": "song_id",
@@ -614,6 +750,14 @@ def train(config: TrainingConfig) -> dict[str, Any]:
         },
         "metrics": metrics,
     }
+    if task_view is not None:
+        metadata["split"].update(
+            {
+                "algorithm": task_view["split"]["algorithm"],
+                "task_view_seed": task_view["split"]["seed"],
+                "task_view_id": task_view["task_view_id"],
+            }
+        )
     if initialization:
         metadata["initialization"] = initialization
     (output_dir / "training-metadata.json").write_text(

@@ -501,6 +501,35 @@ audio asset. Task tokenizers and dataset builders should use the Python API
 `load_catalog()` and `select_training_sources()` rather than reading catalog
 JSONL or source packages directly.
 
+### Catalog-backed chart-transform tasks
+
+The `chart_transform.five_lane/v1` pipeline learns Expert → Hard, Medium, or
+Easy chart pairs for Guitar, Bass, Keys, or Drums. It consumes only `allowed`
+catalog records containing both Expert and the requested target difficulty;
+OCTAVE remains the importer and curation boundary.
+
+```bash
+python scripts/prepare_catalog_chart_pairs.py \
+  --catalog-root /run/media/ash/portable-ai/strum/catalogs/octave-curated-catalog \
+  --output-dir /run/media/ash/portable-ai/strum/tasks/guitar-expert-hard-v1 \
+  --instrument guitar \
+  --target-difficulty Hard
+python scripts/train_chart_transform.py \
+  --config /path/to/chart-transform.yaml \
+  --dataset-manifest /run/media/ash/portable-ai/strum/tasks/guitar-expert-hard-v1/dataset-manifest.json
+```
+
+`--describe-pipeline` prints the stable pipeline descriptor for an OCTAVE
+worker. Each task view records its pipeline ID/version, catalog manifest and
+records hashes, source IDs with `notes.mid` hashes, deterministic source-ID
+split assignments, and preprocessing configuration hash. Training revalidates
+that lineage and preserves it in `training-metadata.json`; neither artifact
+contains original package locations or raw local paths.
+
+`prepare_instrument_chart_pairs.py` remains a local standalone bridge for
+non-catalog experiments. It is not an OCTAVE integration input and must not be
+used by an OCTAVE worker to scan source folders.
+
 ## Development
 
 Developed on NVIDIA DGX Spark (GB10 GPU, CUDA 12.8). Trained on ~5,000 human-authored pro drum charts from the Clone Hero community.
