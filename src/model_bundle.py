@@ -41,6 +41,8 @@ class ModelComponent:
     config: Path | None = None
     sha256: str | None = None
     byte_length: int | None = None
+    config_sha256: str | None = None
+    config_byte_length: int | None = None
     required: bool = True
     architecture: str | None = None
     preprocessing: str | None = None
@@ -148,6 +150,21 @@ class ModelBundle:
                         f"{component.name}: checkpoint byte length mismatch "
                         f"(expected {component.byte_length}, got {component.checkpoint.stat().st_size})"
                     )
+                if (
+                    verify_hashes
+                    and component.config_sha256
+                    and component.config
+                    and component.config.is_file()
+                    and _sha256(component.config) != component.config_sha256
+                ):
+                    errors.append(f"{component.name}: config sha256 mismatch")
+                if (
+                    component.config_byte_length is not None
+                    and component.config
+                    and component.config.is_file()
+                    and component.config.stat().st_size != component.config_byte_length
+                ):
+                    errors.append(f"{component.name}: config byte length mismatch")
         for profile in self.profiles.values():
             for component_name in profile.required_components:
                 if component_name not in self.components:
@@ -258,6 +275,8 @@ def _parse_component(root: Path, name: str, value: object) -> ModelComponent:
         "config",
         "sha256",
         "byte_length",
+        "config_sha256",
+        "config_byte_length",
         "required",
         "architecture",
         "preprocessing",
@@ -285,6 +304,26 @@ def _parse_component(root: Path, name: str, value: object) -> ModelComponent:
         raise BundleValidationError(f"components.{name}.byte_length must be a non-negative integer")
     if byte_length is not None and value.get("checkpoint") is None:
         raise BundleValidationError(f"components.{name}.byte_length requires a checkpoint path")
+    config_sha256 = value.get("config_sha256")
+    if config_sha256 is not None and (
+        not isinstance(config_sha256, str)
+        or len(config_sha256) != 64
+        or any(ch not in "0123456789abcdef" for ch in config_sha256)
+        or value.get("config") is None
+    ):
+        raise BundleValidationError(
+            f"components.{name}.config_sha256 requires a config path and SHA-256"
+        )
+    config_byte_length = value.get("config_byte_length")
+    if config_byte_length is not None and (
+        not isinstance(config_byte_length, int)
+        or isinstance(config_byte_length, bool)
+        or config_byte_length < 0
+        or value.get("config") is None
+    ):
+        raise BundleValidationError(
+            f"components.{name}.config_byte_length requires a config path and non-negative integer"
+        )
     required = value.get("required", True)
     if not isinstance(required, bool):
         raise BundleValidationError(f"components.{name}.required must be a boolean")
@@ -303,6 +342,8 @@ def _parse_component(root: Path, name: str, value: object) -> ModelComponent:
         config=_resolve_relative_path(root, value.get("config"), "config", name),
         sha256=sha256,
         byte_length=byte_length,
+        config_sha256=config_sha256,
+        config_byte_length=config_byte_length,
         required=required,
         architecture=architecture,
         preprocessing=preprocessing,

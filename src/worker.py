@@ -373,6 +373,15 @@ def preflight_chart_request(request_path: Path) -> dict[str, object]:
     )
     if not set(instruments) <= set(plan["instruments"]):
         raise WorkerRequestError("profile does not cover requested instruments")
+    profile_configuration_sha256 = None
+    if plan["capability"] == "guitar.hybrid-v2-rule/v1":
+        from src.inference.guitar_hybrid_profile import (
+            load_guitar_hybrid_rule_profile,  # noqa: PLC0415
+        )
+
+        bundle = load_model_bundle(raw["model_root"], check_files=True)
+        typed = load_guitar_hybrid_rule_profile(bundle, raw["profile_id"])
+        profile_configuration_sha256 = typed.configuration_sha256
     return {
         "status": "ready",
         "execution": "not_available",
@@ -384,6 +393,7 @@ def preflight_chart_request(request_path: Path) -> dict[str, object]:
         "device": raw["device"],
         "manifest_sha256": plan["manifest_sha256"],
         "components": plan["components"],
+        "profile_configuration_sha256": profile_configuration_sha256,
     }
 
 
