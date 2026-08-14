@@ -36,7 +36,13 @@ def test_load_resolves_component_paths_and_checks_hashes(tmp_path: Path) -> None
     digest = hashlib.sha256(checkpoint.read_bytes()).hexdigest()
     write_manifest(
         tmp_path,
-        {"drums.v14_onset": {"checkpoint": "weights/best.pt", "config": "configs/model.yaml", "sha256": digest}},
+        {
+            "drums.v14_onset": {
+                "checkpoint": "weights/best.pt",
+                "config": "configs/model.yaml",
+                "sha256": digest,
+            }
+        },
     )
 
     bundle = load_model_bundle(tmp_path, check_files=True)
@@ -80,7 +86,11 @@ def test_declared_source_revision_is_unverified_without_runtime_revision(
     write_manifest(
         tmp_path,
         {"guitar.onset": {"checkpoint": "weights/best.pt"}},
-        compatibility={"manifest_schema": 1, "strum_version": ">=0.1.0", "strum_revision": "abc123"},
+        compatibility={
+            "manifest_schema": 1,
+            "strum_version": ">=0.1.0",
+            "strum_revision": "abc123",
+        },
     )
 
     bundle = load_model_bundle(tmp_path)
@@ -98,7 +108,11 @@ def test_source_revision_mismatch_is_rejected_when_runtime_revision_is_set(
     write_manifest(
         tmp_path,
         {"guitar.onset": {"checkpoint": "weights/best.pt"}},
-        compatibility={"manifest_schema": 1, "strum_version": ">=0.1.0", "strum_revision": "abc123"},
+        compatibility={
+            "manifest_schema": 1,
+            "strum_version": ">=0.1.0",
+            "strum_revision": "abc123",
+        },
     )
 
     with pytest.raises(BundleValidationError, match="requires STRUM source revision abc123"):
@@ -124,3 +138,29 @@ def test_legacy_bundle_preserves_current_checkpoint_layout(tmp_path: Path) -> No
     assert bundle.legacy
     assert bundle.checkpoint("drums.v14_onset") == tmp_path / "checkpoints/drums_v14/best.pt"
     assert bundle.config("drums.ensemble.v17") == tmp_path / "configs/onset_classifier_v17.yaml"
+
+
+def test_profile_configuration_is_relative_and_checked(tmp_path: Path) -> None:
+    checkpoint = tmp_path / "weights" / "best.pt"
+    checkpoint.parent.mkdir()
+    checkpoint.write_bytes(b"checkpoint")
+    config = tmp_path / "profiles" / "guitar-rule.json"
+    config.parent.mkdir()
+    config.write_text("{}")
+    write_manifest(
+        tmp_path,
+        {"guitar.onset": {"checkpoint": "weights/best.pt"}},
+        profiles={
+            "guitar-rule": {
+                "capability": "guitar.hybrid-v2-rule/v1",
+                "instruments": ["guitar"],
+                "required_components": ["guitar.onset"],
+                "difficulty_policies": ["expert_only"],
+                "configuration": "profiles/guitar-rule.json",
+            }
+        },
+    )
+
+    bundle = load_model_bundle(tmp_path, check_files=True)
+
+    assert bundle.profile("guitar-rule").configuration == config

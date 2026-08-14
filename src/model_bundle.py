@@ -55,6 +55,7 @@ class InferenceProfile:
     instruments: tuple[str, ...]
     required_components: tuple[str, ...]
     difficulty_policies: tuple[str, ...]
+    configuration: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -153,6 +154,10 @@ class ModelBundle:
                     errors.append(
                         f"profile {profile.profile_id} requires undeclared component {component_name}"
                     )
+            if profile.configuration is not None and not profile.configuration.is_file():
+                errors.append(
+                    f"profile {profile.profile_id}: configuration not found: {profile.configuration}"
+                )
         return errors
 
     def compatibility_status(self) -> list[str]:
@@ -304,12 +309,19 @@ def _parse_component(root: Path, name: str, value: object) -> ModelComponent:
     )
 
 
-def _parse_profile(name: str, value: object) -> InferenceProfile:
+def _parse_profile(root: Path, name: str, value: object) -> InferenceProfile:
     if not isinstance(value, dict):
         raise BundleValidationError(f"profiles.{name} must be an object")
-    allowed = {"capability", "instruments", "required_components", "difficulty_policies"}
+    allowed = {
+        "capability",
+        "instruments",
+        "required_components",
+        "difficulty_policies",
+        "configuration",
+    }
     unknown = set(value) - allowed
-    missing = allowed - set(value)
+    required = {"capability", "instruments", "required_components", "difficulty_policies"}
+    missing = required - set(value)
     if unknown:
         raise BundleValidationError(
             f"profiles.{name} has unknown field(s): {', '.join(sorted(unknown))}"
@@ -351,6 +363,9 @@ def _parse_profile(name: str, value: object) -> InferenceProfile:
         instruments=tuple(instruments),
         required_components=tuple(required_components),
         difficulty_policies=tuple(difficulty_policies),
+        configuration=_resolve_relative_path(
+            root, value.get("configuration"), "configuration", f"profiles.{name}"
+        ),
     )
 
 
@@ -401,7 +416,7 @@ def load_model_bundle(path: str | Path, *, check_files: bool = False) -> ModelBu
         name: _parse_component(root, name, value) for name, value in raw["components"].items()
     }
     profiles = {
-        name: _parse_profile(name, value) for name, value in raw.get("profiles", {}).items()
+        name: _parse_profile(root, name, value) for name, value in raw.get("profiles", {}).items()
     }
     bundle = ModelBundle(
         root=root,
