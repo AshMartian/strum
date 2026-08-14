@@ -711,6 +711,17 @@ def train(config: TrainingConfig) -> dict[str, Any]:
                 "checkpoint": "weights/chart_transform.pt",
                 "config": "configs/training-config.json",
                 "sha256": _sha256(weights_path),
+                "byte_length": weights_path.stat().st_size,
+                "architecture": "EventTransformMLP/v1",
+                "preprocessing": "midi-five-lane-events/v1",
+            }
+        },
+        "profiles": {
+            f"difficulty-transform-{_slug(dataset_manifest['instrument'])}": {
+                "capability": "difficulty.transform/v1",
+                "instruments": [dataset_manifest["instrument"]],
+                "required_components": [component_name],
+                "difficulty_policies": [f"learned:{component_name}"],
             }
         },
     }

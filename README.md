@@ -490,6 +490,52 @@ and selects only `training_use: allowed` records for a task view; it does not
 parse `.sng`, `.rb3con`, ZIP, or source-folder packages, or persist original
 source paths.
 
+### Worker contract
+
+OCTAVE calls the installed `strum-worker` interface (or `python -m src.worker`
+for a managed developer checkout), never individual `scripts/*.py` files. The
+worker reports the distinction between a pipeline whose task view can be built
+and one whose trainer can be run through the worker:
+
+```bash
+strum-worker probe --json
+strum-worker pipeline list --json
+strum-worker catalog inspect --catalog-root /path/to/catalog --pipeline guitar.onset-fret/v1 --json
+strum-worker dataset prepare --request /path/to/owned-prepare-request.json --json
+```
+
+The request is a main-process-only file; paths are not echoed in the response.
+For example, a Guitar task-view request is:
+
+```json
+{
+  "catalog_root": "/private/catalog",
+  "pipeline_id": "guitar.onset-fret/v1",
+  "output": "/private/task-views/guitar-v1.json",
+  "options": {"required_difficulty": "expert"}
+}
+```
+
+`guitar.onset-fret/v1` and `drums.onset-classifier/v1` are catalog-ready with
+their existing script-based trainers (`training_status: script_only`). The
+five-lane `chart_transform.five_lane/v1` is also worker-trainable; OCTAVE runs
+the synchronous command below in its own supervised background process. The
+response contains only the bundle/model identity, checksums, and metrics.
+
+```bash
+strum-worker train run --request /path/to/owned-train-request.json --json
+```
+
+The chart-transform training request names a catalog-generated
+`dataset-manifest.json`, an output folder, and bounded configuration such as
+`model_id`, `epochs`, `device`, and `hidden_dim`. It does not accept arbitrary
+checkpoint paths or audio locations. Its resulting bundle includes a verified
+component hash/byte length, architecture and preprocessing IDs, plus a
+profile that can be checked with `strum-worker inference profile validate`.
+This verifies compatibility and provenance only: connecting a learned
+difficulty profile to the production auto-chart execution graph remains a
+separate deployment step.
+
 ```bash
 python -m src.song_source_catalog /path/to/catalog
 python scripts/build_guitar_catalog_manifest.py /path/to/catalog \

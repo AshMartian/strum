@@ -119,7 +119,14 @@ def test_cpu_chart_pair_training_writes_valid_model_bundle(tmp_path: Path) -> No
     metadata = json.loads((output_dir / "training-metadata.json").read_text())
 
     assert bundle.model_id == "test-expert-to-hard"
-    assert bundle.component("chart_transform.bass.expert_to_hard") is not None
+    component_name = "chart_transform.bass.expert_to_hard"
+    component = bundle.component(component_name)
+    assert component is not None
+    assert component.byte_length and component.architecture == "EventTransformMLP/v1"
+    profile = bundle.profile("difficulty-transform-bass")
+    assert profile is not None
+    assert profile.required_components == (component_name,)
+    assert profile.difficulty_policies == (f"learned:{component_name}",)
     assert bundle.validate(check_files=True, verify_hashes=True) == []
     assert metadata["dataset"]["provenance"].startswith("synthetic")
     assert metadata["dataset"]["license"] == "test-only"

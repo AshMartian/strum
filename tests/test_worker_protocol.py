@@ -10,7 +10,9 @@ from src.model_bundle import MANIFEST_FILENAME, BundleValidationError
 from src.worker import (
     PROTOCOL_VERSION,
     _runtime_payload,
+    inspect_catalog,
     preflight_bundle,
+    prepare_dataset_request,
     validate_inference_profile,
 )
 
@@ -44,8 +46,86 @@ def test_probe_declares_versioned_runtime_and_available_pipelines() -> None:
 
     assert payload["protocol_version"] == PROTOCOL_VERSION
     assert payload["python_requires"] == ">=3.11"
-    assert payload["pipelines"] == []
+    assert "guitar.onset-fret/v1" in payload["pipelines"]
+    assert "dataset_prepare" in payload["capabilities"]
     assert "model_bundle_preflight" in payload["capabilities"]
+
+
+def _catalog_asset(root: Path, content: bytes, filename: str) -> dict[str, object]:
+    digest = hashlib.sha256(content).hexdigest()
+    path = root / "assets" / "sha256" / digest / filename
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(content)
+    return {
+        "asset_id": f"sha256:{digest}",
+        "sha256": digest,
+        "relative_path": path.relative_to(root).as_posix(),
+        "byte_length": len(content),
+        "media_type": "audio/midi" if filename.endswith(".mid") else "audio/ogg",
+    }
+
+
+def _guitar_catalog(root: Path) -> None:
+    source_id = "octave-src-aaaaaaaa"
+    record = {
+        "source_id": source_id,
+        "import": {"kind": "sng", "adapter_version": "octave-sng/1", "warnings": []},
+        "rights": {"training_use": "allowed", "provenance": "Reviewed", "license": "test-only"},
+        "metadata": {"name": "Fixture"},
+        "chart": {
+            "notes_midi": _catalog_asset(root, b"midi", "notes.mid"),
+            "instruments": {
+                "guitar": {
+                    "status": "present",
+                    "difficulties": ["expert"],
+                    "track_names": ["PART GUITAR"],
+                }
+            },
+        },
+        "audio": {"guitar": _catalog_asset(root, b"audio", "guitar.ogg")},
+    }
+    (root / "records.jsonl").write_text(json.dumps(record) + "\n")
+    (root / "catalog.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "format": "octave-song-source-catalog/v1",
+                "catalog_id": "worker-fixture",
+                "records": "records.jsonl",
+            }
+        )
+    )
+
+
+def test_catalog_inspect_and_prepare_emit_path_free_task_view(tmp_path: Path) -> None:
+    _guitar_catalog(tmp_path)
+    inspection = inspect_catalog(tmp_path, "guitar.onset-fret/v1")
+    assert inspection == {
+        "status": "ready",
+        "catalog_id": "worker-fixture",
+        "record_count": 1,
+        "allowed_record_count": 1,
+        "pipeline_id": "guitar.onset-fret/v1",
+    }
+    request_path = tmp_path / "request.json"
+    output = tmp_path / "views" / "guitar.json"
+    request_path.write_text(
+        json.dumps(
+            {
+                "catalog_root": str(tmp_path),
+                "pipeline_id": "guitar.onset-fret/v1",
+                "output": str(output),
+                "options": {"required_difficulty": "expert"},
+            }
+        )
+    )
+
+    result = prepare_dataset_request(request_path)
+
+    assert result["status"] == "prepared"
+    assert result["output_name"] == "guitar.json"
+    assert result["record_count"] == 1
+    assert str(tmp_path) not in output.read_text()
 
 
 def test_preflight_requires_hash_and_length_for_deployable_components(tmp_path: Path) -> None:
