@@ -504,6 +504,19 @@ strum-worker catalog inspect --catalog-root /path/to/catalog --pipeline guitar.o
 strum-worker dataset prepare --request /path/to/owned-prepare-request.json --json
 ```
 
+For OCTAVE-supervised background work, use line-delimited lifecycle events
+instead of parsing human output:
+
+```bash
+strum-worker dataset prepare --request /path/to/owned-prepare-request.json --json-events
+strum-worker train start --request /path/to/owned-train-request.json --json-events
+```
+
+Each stream has an opaque request-derived job ID, monotonic sequence numbers,
+stage/progress, and a `succeeded` or `failed` terminal state. OCTAVE owns the
+child process group and cancellation; STRUM does not run a separate mutable
+job daemon that could retain private paths after the supervising process exits.
+
 The request is a main-process-only file; paths are not echoed in the response.
 For example, a Guitar task-view request is:
 
