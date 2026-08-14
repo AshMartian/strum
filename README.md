@@ -527,6 +527,46 @@ Use this lineage when deciding whether a drum checkpoint may be resumed,
 fine-tuned, or deployed for auto-charting. The legacy folder-based manifest is
 still supported for historical data, but must not be used for OCTAVE catalogs.
 
+### Remaining instrument and derived-label task views
+
+`build_catalog_task_manifest.py` is STRUM's shared adapter for catalog-backed
+training data. It supports `bass`, `keys`, `vocals`, `pro_guitar`, `pro_bass`,
+`pro_keys`, `fret_mapper_guitar`, `fret_mapper_bass`, `section_guitar`, and
+`section_bass`. Every view records the versioned pipeline ID, catalog control
+fingerprint, source IDs and input hashes, deterministic split algorithm/seed,
+and a fingerprint of portable preprocessing settings. It never records an
+OCTAVE source path.
+
+```bash
+# Any chart/audio family: only Expert coverage and allowed catalog records.
+python scripts/build_catalog_task_manifest.py /path/to/catalog \
+  --task bass --output /path/to/views/bass-v1.json \
+  --preprocessing-json '{"sample_rate":22050,"window_seconds":5}'
+
+# Derived labels are also catalog-backed. Paths are resolved only while the
+# builder/preprocessor is running, and the label file stores source IDs.
+python scripts/build_catalog_task_manifest.py /path/to/catalog \
+  --task section_guitar --output /path/to/views/section-guitar-v1.json
+python scripts/build_catalog_section_labels.py \
+  --manifest /path/to/views/section-guitar-v1.json \
+  --catalog-root /path/to/catalog --out /path/to/views/section-labels-v1.json
+python scripts/preprocess_section_windows.py \
+  --labels /path/to/views/section-labels-v1.json \
+  --catalog-manifest /path/to/views/section-guitar-v1.json \
+  --catalog-root /path/to/catalog --cache-dir /path/to/cache
+
+# The mapper accepts a mapper task view directly. It persists catalog source
+# IDs in its cache, not paths from imported packages.
+python scripts/build_mapper_dataset.py \
+  --catalog-manifest /path/to/views/fret-mapper-guitar-v1.json \
+  --catalog-root /path/to/catalog --cache-dir /path/to/mapper-cache
+```
+
+These task views make each family catalog-ready. They do not invent missing
+trainers: Bass currently reuses the Guitar/Bass chart representation, while
+Keys, Vocals, and Pro-instrument learned trainer architectures still need to
+be implemented before their task views can produce checkpoints.
+
 ## Development
 
 Developed on NVIDIA DGX Spark (GB10 GPU, CUDA 12.8). Trained on ~5,000 human-authored pro drum charts from the Clone Hero community.

@@ -23,27 +23,35 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 import numpy as np
-import soundfile as sf
-import torch
 
 _SCRIPTS = Path(__file__).resolve().parent
 if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
+_REPOSITORY_ROOT = _SCRIPTS.parent
+if str(_REPOSITORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPOSITORY_ROOT))
 
 from preprocess_guitar_windows import (  # noqa: E402
-    HOP_LENGTH, N_MELS, SAMPLE_RATE, compute_log_mel,
+    HOP_LENGTH,
+    N_MELS,
+    SAMPLE_RATE,
+    compute_log_mel,
+)
+from preprocess_guitar_windows import (  # noqa: E402
     load_audio_mono_22050 as load_audio_mono22k,
 )
+
+from src.catalog_task_manifest import resolve_catalog_task_manifest_songs  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("section_pre")
 
 LABELS = ["silence", "constant_strum", "chord_stab", "lead_line", "single_notes", "mixed"]
-LABEL_TO_IDX = {l: i for i, l in enumerate(LABELS)}
+LABEL_TO_IDX = {label: index for index, label in enumerate(LABELS)}
 
 WINDOW_S = 2.0
 WINDOW_SAMPLES = int(WINDOW_S * SAMPLE_RATE)
-WINDOW_FRAMES = WINDOW_SAMPLES // HOP_LENGTH + 1   # ~87
+WINDOW_FRAMES = WINDOW_SAMPLES // HOP_LENGTH + 1  # ~87
 
 
 def process_split(records: list[dict], split: str, cache_dir: Path) -> None:
@@ -66,7 +74,10 @@ def process_split(records: list[dict], split: str, cache_dir: Path) -> None:
     meta_path = cache_dir / f"{split}_section_meta.json"
 
     mel_mm = np.lib.format.open_memmap(
-        mel_path, mode="w+", dtype=np.float16, shape=(n_total, N_MELS, WINDOW_FRAMES),
+        mel_path,
+        mode="w+",
+        dtype=np.float16,
+        shape=(n_total, N_MELS, WINDOW_FRAMES),
     )
     lab_mm = np.zeros(n_total, dtype=np.int8)
     meta: list[dict] = []
@@ -98,11 +109,13 @@ def process_split(records: list[dict], split: str, cache_dir: Path) -> None:
                 mel = mel[:, :WINDOW_FRAMES]
             mel_mm[cur] = mel.astype(np.float16)
             lab_mm[cur] = LABEL_TO_IDX[r["label"]]
-            meta.append({
-                "song_id": r["song_id"],
-                "t_start_s": t_start,
-                "label": r["label"],
-            })
+            meta.append(
+                {
+                    "song_id": r["song_id"],
+                    "t_start_s": t_start,
+                    "label": r["label"],
+                }
+            )
             cur += 1
 
     # Trim arrays to actual size
@@ -118,7 +131,7 @@ def process_split(records: list[dict], split: str, cache_dir: Path) -> None:
     np.save(lab_path, lab_mm[:cur])
     meta_path.write_text(json.dumps(meta))
 
-    counter = Counter(LABELS[l] for l in lab_mm[:cur])
+    counter = Counter(LABELS[label_index] for label_index in lab_mm[:cur])
     log.info("split=%s saved=%d labels=%s", split, cur, dict(counter))
 
 
@@ -126,12 +139,37 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--labels", default="configs/guitar_section_labels.json")
     ap.add_argument("--cache-dir", default="/mnt/ml-data/guitar_section_cache")
+    ap.add_argument(
+        "--catalog-manifest", type=Path, help="catalog task manifest used to create labels"
+    )
+    ap.add_argument(
+        "--catalog-root", type=Path, help="catalog root for runtime-only asset resolution"
+    )
     args = ap.parse_args()
 
     cache_dir = Path(args.cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
 
     data = json.loads(Path(args.labels).read_text())
+    using_catalog = args.catalog_manifest is not None or args.catalog_root is not None
+    if using_catalog and (args.catalog_manifest is None or args.catalog_root is None):
+        ap.error("--catalog-manifest and --catalog-root must be used together")
+    if using_catalog:
+        manifest = json.loads(args.catalog_manifest.read_text(encoding="utf-8"))
+        task = manifest.get("task")
+        if not isinstance(task, dict) or task.get("kind") not in {"section_guitar", "section_bass"}:
+            ap.error("catalog manifest must use section_guitar or section_bass")
+        resolved = {
+            song["source_id"]: song["audio_path"]
+            for song in resolve_catalog_task_manifest_songs(manifest, args.catalog_root)
+        }
+        if data.get("format") != "strum-section-labels/v1":
+            ap.error("catalog section preprocessing requires strum-section-labels/v1")
+        data["records"] = [
+            {**record, "audio_path": resolved[record["source_id"]]}
+            for record in data.get("records", [])
+            if record.get("source_id") in resolved
+        ]
     records = data["records"]
     log.info("loaded %d records", len(records))
 
