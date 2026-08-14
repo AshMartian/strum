@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from src.inference import guitar_hybrid_profile
 from src.inference.guitar_hybrid_profile import load_guitar_hybrid_rule_profile
 from src.model_bundle import MANIFEST_FILENAME, BundleValidationError, load_model_bundle
 
@@ -33,6 +34,7 @@ def _write_profile_bundle(root: Path, *, max_chord_size: int = 3) -> Path:
                 "sustain_min_duration_ms": 400,
                 "max_chord_size": max_chord_size,
                 "voice_filter": True,
+                "basic_pitch_dependency": "basic-pitch/0.0.0",
             }
         )
     )
@@ -65,7 +67,10 @@ def _write_profile_bundle(root: Path, *, max_chord_size: int = 3) -> Path:
     return root
 
 
-def test_guitar_hybrid_profile_requires_verified_explicit_policy(tmp_path: Path) -> None:
+def test_guitar_hybrid_profile_requires_verified_explicit_policy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(guitar_hybrid_profile.importlib.util, "find_spec", lambda _: object())
     bundle = load_model_bundle(_write_profile_bundle(tmp_path), check_files=True)
 
     profile = load_guitar_hybrid_rule_profile(bundle, "guitar-rule")
@@ -75,7 +80,10 @@ def test_guitar_hybrid_profile_requires_verified_explicit_policy(tmp_path: Path)
     assert profile.configuration_sha256
 
 
-def test_guitar_hybrid_profile_rejects_invalid_execution_setting(tmp_path: Path) -> None:
+def test_guitar_hybrid_profile_rejects_invalid_execution_setting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(guitar_hybrid_profile.importlib.util, "find_spec", lambda _: object())
     bundle = load_model_bundle(_write_profile_bundle(tmp_path, max_chord_size=0), check_files=True)
 
     with pytest.raises(BundleValidationError, match="out of range"):
