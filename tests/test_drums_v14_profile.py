@@ -34,6 +34,14 @@ def _bundle(root: Path, *, postprocess: str = "none") -> Path:
                 "min_distance_ms": 20,
                 "postprocess": postprocess,
                 "class_to_midi": [96, 97, 98, 98, 99, 99, 100, 100],
+                "model_parameters": {
+                    "n_mels": 128, "conv_channels": [64, 128, 256, 512],
+                    "freq_subbands": [32, 64, 96, 128], "subband_proj_dim": 256,
+                    "lstm_hidden": 640, "lstm_layers": 3, "attention_heads": 10,
+                    "attention_type": "flash", "attention_window": 512, "dropout": 0.0,
+                    "onset_detector_hidden": 320, "classifier_hidden": 640,
+                    "num_classes": 8, "predict_velocity": True
+                },
             }
         )
     )
@@ -89,7 +97,7 @@ def test_drums_v14_profile_rejects_legacy_postprocess(tmp_path: Path) -> None:
         load_drums_v14_expert_profile(bundle, "drums-v14-expert")
 
 
-def test_drums_v14_profile_is_preflightable_but_not_legacy_executable(tmp_path: Path) -> None:
+def test_drums_v14_profile_is_preflightable_for_direct_execution(tmp_path: Path) -> None:
     root = _bundle(tmp_path)
     request = tmp_path / "preflight.json"
     request.write_text(
@@ -107,5 +115,5 @@ def test_drums_v14_profile_is_preflightable_but_not_legacy_executable(tmp_path: 
     plan = preflight_chart_request(request)
 
     assert plan["capability"] == "drums.v14-expert/v1"
-    assert plan["execution"] == "not_available"
+    assert plan["execution"] == "available"
     assert plan["profile_configuration_sha256"]

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
+from typing import Mapping
 
 from src.model_bundle import BundleValidationError, ModelBundle
 
@@ -36,6 +37,7 @@ class DrumsV14ExpertProfile:
     segment_duration_seconds: float
     overlap: float
     class_to_midi: tuple[int, ...]
+    model_parameters: Mapping[str, object]
     configuration_sha256: str
 
 
@@ -79,6 +81,7 @@ def load_drums_v14_expert_profile(
         "min_distance_ms",
         "postprocess",
         "class_to_midi",
+        "model_parameters",
     }
     if (
         not isinstance(raw, dict)
@@ -95,7 +98,11 @@ def load_drums_v14_expert_profile(
         isinstance(raw[key], (int, float)) and not isinstance(raw[key], bool) for key in numeric
     ):
         raise BundleValidationError("drums V14 configuration has invalid numeric settings")
-    thresholds, midi_notes = raw["class_thresholds"], raw["class_to_midi"]
+    thresholds, midi_notes, model_parameters = (
+        raw["class_thresholds"],
+        raw["class_to_midi"],
+        raw["model_parameters"],
+    )
     if (
         raw["segment_duration_seconds"] <= 0
         or not 0 <= raw["overlap"] < 1
@@ -112,6 +119,7 @@ def load_drums_v14_expert_profile(
         or not isinstance(midi_notes, list)
         or len(midi_notes) != len(CLASS_NAMES)
         or not all(isinstance(note, int) and 96 <= note <= 100 for note in midi_notes)
+        or not isinstance(model_parameters, dict)
     ):
         raise BundleValidationError("drums V14 configuration settings are out of range")
     return DrumsV14ExpertProfile(
@@ -123,5 +131,6 @@ def load_drums_v14_expert_profile(
         segment_duration_seconds=float(raw["segment_duration_seconds"]),
         overlap=float(raw["overlap"]),
         class_to_midi=tuple(midi_notes),
+        model_parameters=dict(model_parameters),
         configuration_sha256=hashlib.sha256(profile.configuration.read_bytes()).hexdigest(),
     )

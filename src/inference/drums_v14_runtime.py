@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import librosa
 import torch
 import torchaudio
 
@@ -120,7 +121,8 @@ class DrumsV14Runtime:
     def transcribe_audio_file(self, audio_path: str | Path) -> list[DrumsV14Event]:
         """Load a managed catalog audio asset and return only Expert Drums events."""
         try:
-            audio, sample_rate = torchaudio.load(str(audio_path))
+            samples, sample_rate = librosa.load(str(audio_path), sr=None, mono=True)
+            audio = torch.from_numpy(samples)
         except Exception as error:
             raise DrumsV14RuntimeError("unable to read managed Drums audio") from error
         return self.transcribe_tensor(audio, sample_rate)

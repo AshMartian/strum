@@ -425,7 +425,8 @@ def preflight_chart_request(request_path: Path) -> dict[str, object]:
     return {
         "status": "ready",
         "execution": "available"
-        if plan["capability"] in {"guitar.hybrid-v2-rule/v1", "difficulty.transform/v1"}
+        if plan["capability"]
+        in {"guitar.hybrid-v2-rule/v1", "drums.v14-expert/v1", "difficulty.transform/v1"}
         else "not_available",
         "model_id": plan["model_id"],
         "profile_id": plan["profile_id"],
@@ -447,7 +448,7 @@ def _read_chart_run_request(request_path: Path, capability: str) -> dict[str, An
         raise WorkerRequestError("chart run request is unreadable or not valid JSON") from error
     expected = (
         {"preflight_request", "audio_path", "output_dir"}
-        if capability == "guitar.hybrid-v2-rule/v1"
+        if capability in {"guitar.hybrid-v2-rule/v1", "drums.v14-expert/v1"}
         else {"preflight_request", "source_midi_path", "song_path", "output_dir", "threshold"}
     )
     if not isinstance(raw, dict) or set(raw) != expected:
@@ -568,6 +569,27 @@ def _write_five_lane_midi(
     midi.save(output_path)
 
 
+def _write_expert_drums_midi(events: Sequence[Any], output_path: Path) -> None:
+    """Write only direct Expert Drums events from the typed V14 profile."""
+    import mido  # noqa: PLC0415
+
+    tempo, ticks_per_beat = 500_000, 480
+    messages: list[tuple[int, bool, int, int]] = []
+    for event in events:
+        tick = round(float(event.time_ms) / 1000 * ticks_per_beat * 1_000_000 / tempo)
+        messages.extend(((tick, True, event.midi_note, event.velocity), (tick + 120, False, event.midi_note, 0)))
+    messages.sort(key=lambda item: (item[0], item[1], item[2]))
+    midi = mido.MidiFile(ticks_per_beat=ticks_per_beat)
+    track = mido.MidiTrack([mido.MetaMessage("track_name", name="PART DRUMS", time=0), mido.MetaMessage("set_tempo", tempo=tempo, time=0)])
+    midi.tracks.append(track)
+    previous = 0
+    for tick, is_on, note, velocity in messages:
+        track.append(mido.Message("note_on" if is_on else "note_off", note=note, velocity=velocity, time=tick - previous))
+        previous = tick
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    midi.save(output_path)
+
+
 def _run_without_legacy_output(callback: Any) -> Any:
     """Run a legacy inference callable without leaking private paths to stdout."""
     # Some optional inference dependencies keep logging handlers bound to the
@@ -636,6 +658,25 @@ def run_chart_request(request_path: Path) -> dict[str, object]:
             artifacts = {"notes_midi": {"name": midi_path.name, "sha256": _sha256(midi_path)}}
             stages = {"guitar": {"status": "succeeded", "expert_event_count": len(chart.notes) + len(chart.chords)}}
             response = {"output_name": midi_path.name, "expert_event_count": len(chart.notes) + len(chart.chords)}
+        elif plan["capability"] == "drums.v14-expert/v1":
+            audio = Path(request["audio_path"])
+            if not audio.is_file():
+                raise WorkerRequestError("chart input audio is unavailable")
+            from src.inference.drums_v14_profile import (
+                load_drums_v14_expert_profile,  # noqa: PLC0415
+            )
+            from src.inference.drums_v14_runtime import DrumsV14Runtime  # noqa: PLC0415
+
+            profile = load_drums_v14_expert_profile(bundle, preflight_raw["profile_id"])
+            component = bundle.component(profile.component_id)
+            if component is None or component.checkpoint is None:
+                raise WorkerRequestError("drums V14 component is incomplete")
+            events = _run_without_legacy_output(lambda: DrumsV14Runtime.from_profile(profile, checkpoint_path=component.checkpoint, model_parameters=profile.model_parameters, device=plan["device"]).transcribe_audio_file(audio))
+            midi_path = output_dir / "notes.mid"
+            _write_expert_drums_midi(events, midi_path)
+            artifacts = {"notes_midi": {"name": midi_path.name, "sha256": _sha256(midi_path)}}
+            stages = {"drums": {"status": "succeeded", "expert_event_count": len(events)}}
+            response = {"output_name": midi_path.name, "expert_event_count": len(events)}
         elif plan["capability"] == "difficulty.transform/v1":
             import torch  # noqa: PLC0415
 
@@ -711,7 +752,7 @@ def run_chart_request(request_path: Path) -> dict[str, object]:
         )
     except WorkerRequestError:
         raise
-    except (BundleValidationError, OSError, ValueError) as error:
+    except (BundleValidationError, OSError, RuntimeError, ValueError) as error:
         raise WorkerRequestError("profile chart execution failed") from error
     return {
         "status": "completed",
