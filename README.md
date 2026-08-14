@@ -346,6 +346,30 @@ The catalog must provide Expert Guitar coverage plus `audio.guitar`, or
 legacy `build_guitar_manifest.py`, which scans raw song folders and should not
 be used for OCTAVE catalogs.
 
+### Drums task manifest
+
+The Drums onset/classifier pipeline has the same catalog-only boundary.  The
+task view selects Expert Drums and prefers `audio.drums`, falling back to
+`audio.mix`. STRUM derives its 8-lane pro-drums labels from the managed
+`notes.mid` in memory, so OCTAVE does not need to generate legacy
+`drums_labels.json` files.
+
+```bash
+python scripts/build_drums_catalog_manifest.py /path/to/catalog \
+  --output /path/to/views/drums.json
+python scripts/preprocess_onset_windows.py \
+  --manifest /path/to/views/drums.json \
+  --catalog-root /path/to/catalog \
+  --output-dir /path/to/drums-cache --split both
+```
+
+The generated cache index records a path-free lineage contract: catalog ID and
+content hash, pipeline ID/version, task-view hash, deterministic split policy,
+selected source IDs and asset hashes, plus a preprocessing configuration hash.
+Use this lineage when deciding whether a drum checkpoint may be resumed,
+fine-tuned, or deployed for auto-charting. The legacy folder-based manifest is
+still supported for historical data, but must not be used for OCTAVE catalogs.
+
 ## Development
 
 Developed on NVIDIA DGX Spark (GB10 GPU, CUDA 12.8). Trained on ~5,000 human-authored pro drum charts from the Clone Hero community.

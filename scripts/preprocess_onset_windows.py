@@ -15,6 +15,7 @@ Output files in {output_dir}/cache/:
 """
 
 import argparse
+import hashlib
 import json
 import logging
 import sys
@@ -28,7 +29,15 @@ import torch
 import torchaudio
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from src.models.onset_classifier_dataset import LANE_CYMBAL_TO_CLASS, CLASS_NAMES
+from src.catalog_drums_manifest import (
+    MANIFEST_FORMAT as CATALOG_MANIFEST_FORMAT,
+)
+from src.catalog_drums_manifest import (
+    resolve_drums_manifest_songs,
+    task_view_sha256,
+)
+from src.models.onset_classifier_dataset import CLASS_NAMES, LANE_CYMBAL_TO_CLASS
+from src.preprocessing.parsers.midi_parser import MidiParser
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
@@ -53,7 +62,7 @@ CONTEXT_SIZE = 4
 WINDOW_BEFORE_SAMP = int(WINDOW_BEFORE_MS / 1000 * SAMPLE_RATE)
 WINDOW_AFTER_SAMP = int(WINDOW_AFTER_MS / 1000 * SAMPLE_RATE)
 WINDOW_SAMPLES = WINDOW_BEFORE_SAMP + WINDOW_AFTER_SAMP
-FINE_FRAMES = WINDOW_SAMPLES // FINE_HOP + 1   # 87
+FINE_FRAMES = WINDOW_SAMPLES // FINE_HOP + 1  # 87
 COARSE_FRAMES = WINDOW_SAMPLES // COARSE_HOP + 1  # 44
 LOWFREQ_FRAMES = WINDOW_SAMPLES // LOWFREQ_HOP + 1  # 44 (same as coarse)
 
@@ -75,8 +84,39 @@ def parse_onsets(labels_path: Path) -> list[tuple[float, set[int]]]:
         hits_by_time[bin_t]["classes"].add(cls)
 
     sorted_times = sorted(hits_by_time.keys())
-    return [(hits_by_time[t]["time_ms"], hits_by_time[t]["classes"])
-            for t in sorted_times]
+    return [(hits_by_time[t]["time_ms"], hits_by_time[t]["classes"]) for t in sorted_times]
+
+
+def parse_catalog_onsets(midi_path: Path) -> list[tuple[float, set[int]]]:
+    """Derive STRUM's eight drum labels from a managed catalog MIDI asset.
+
+    This is deliberately an in-memory conversion.  OCTAVE supplies only the
+    canonical note chart; STRUM owns the label mapping used by its trainer.
+    """
+    try:
+        chart = MidiParser().parse(midi_path)
+    except Exception:
+        return []
+    hits_by_time: dict[int, dict[str, object]] = {}
+    for hit in chart.hits:
+        label = LANE_CYMBAL_TO_CLASS.get((hit.lane, hit.is_cymbal))
+        if label is None:
+            continue
+        bucket = round(hit.time_ms / 5) * 5
+        entry = hits_by_time.setdefault(bucket, {"time_ms": hit.time_ms, "classes": set()})
+        entry["classes"].add(label)  # type: ignore[union-attr]
+    return [
+        (float(hits_by_time[key]["time_ms"]), hits_by_time[key]["classes"])  # type: ignore[arg-type]
+        for key in sorted(hits_by_time)
+    ]
+
+
+def _song_inputs(song: dict, data_dir: Path) -> tuple[Path, list[tuple[float, set[int]]]]:
+    """Return runtime-only audio and labels for legacy or catalog task inputs."""
+    if "source_id" in song:
+        return Path(song["audio_path"]), parse_catalog_onsets(Path(song["midi_path"]))
+    labels_path = data_dir / song["id"] / "drums_labels.json"
+    return data_dir / song["stems"]["drums"], parse_onsets(labels_path)
 
 
 def count_valid_onsets(onset_list: list, audio_len_samples: int) -> int:
@@ -100,10 +140,12 @@ def phase1_count(songs: list[dict], data_dir: Path) -> tuple[int, list]:
         if i % 200 == 0:
             logger.info(f"  [{i}/{len(songs)}] counted {total} onsets...")
 
-        labels_path = data_dir / song["id"] / "drums_labels.json"
-        audio_path = data_dir / song["stems"]["drums"]
-
-        if not labels_path.exists() or not audio_path.exists():
+        try:
+            audio_path, onset_list = _song_inputs(song, data_dir)
+        except (KeyError, TypeError):
+            skipped += 1
+            continue
+        if not audio_path.exists() or not onset_list:
             skipped += 1
             continue
 
@@ -116,21 +158,21 @@ def phase1_count(songs: list[dict], data_dir: Path) -> tuple[int, list]:
             skipped += 1
             continue
 
-        onset_list = parse_onsets(labels_path)
         n = count_valid_onsets(onset_list, audio_len)
 
         if n > 0:
-            song_info.append({
-                "song": song,
-                "onset_count": n,
-                "onset_list": onset_list,
-            })
+            song_info.append(
+                {
+                    "song": song,
+                    "onset_count": n,
+                    "onset_list": onset_list,
+                }
+            )
             total += n
         else:
             skipped += 1
 
-    logger.info(f"  Count complete: {total} onsets from {len(song_info)} songs "
-                f"(skipped {skipped})")
+    logger.info(f"  Count complete: {total} onsets from {len(song_info)} songs (skipped {skipped})")
     return total, song_info
 
 
@@ -168,28 +210,39 @@ def phase2_extract(
         (lb_path, lb_shape, np.uint8),
         (ctx_path, ctx_shape, np.float16),
     ]:
-        fp = np.lib.format.open_memmap(str(path), mode='w+', dtype=dtype, shape=shape)
+        fp = np.lib.format.open_memmap(str(path), mode="w+", dtype=dtype, shape=shape)
         del fp  # flush
 
-    mm_fine = np.lib.format.open_memmap(str(mf_path), mode='r+')
-    mm_coarse = np.lib.format.open_memmap(str(mc_path), mode='r+')
-    mm_lowfreq = np.lib.format.open_memmap(str(ml_path), mode='r+')
-    mm_crash_flux = np.lib.format.open_memmap(str(cf_path), mode='r+')
-    mm_labels = np.lib.format.open_memmap(str(lb_path), mode='r+')
-    mm_ctx = np.lib.format.open_memmap(str(ctx_path), mode='r+')
+    mm_fine = np.lib.format.open_memmap(str(mf_path), mode="r+")
+    mm_coarse = np.lib.format.open_memmap(str(mc_path), mode="r+")
+    mm_lowfreq = np.lib.format.open_memmap(str(ml_path), mode="r+")
+    mm_crash_flux = np.lib.format.open_memmap(str(cf_path), mode="r+")
+    mm_labels = np.lib.format.open_memmap(str(lb_path), mode="r+")
+    mm_ctx = np.lib.format.open_memmap(str(ctx_path), mode="r+")
 
     # Mel transforms
     fine_mel = torchaudio.transforms.MelSpectrogram(
-        sample_rate=SAMPLE_RATE, n_fft=FINE_N_FFT, hop_length=FINE_HOP,
-        n_mels=N_MELS, power=2.0,
+        sample_rate=SAMPLE_RATE,
+        n_fft=FINE_N_FFT,
+        hop_length=FINE_HOP,
+        n_mels=N_MELS,
+        power=2.0,
     )
     coarse_mel = torchaudio.transforms.MelSpectrogram(
-        sample_rate=SAMPLE_RATE, n_fft=COARSE_N_FFT, hop_length=COARSE_HOP,
-        n_mels=N_MELS, power=2.0,
+        sample_rate=SAMPLE_RATE,
+        n_fft=COARSE_N_FFT,
+        hop_length=COARSE_HOP,
+        n_mels=N_MELS,
+        power=2.0,
     )
     lowfreq_mel = torchaudio.transforms.MelSpectrogram(
-        sample_rate=SAMPLE_RATE, n_fft=LOWFREQ_N_FFT, hop_length=LOWFREQ_HOP,
-        n_mels=N_MELS, f_min=LOWFREQ_FMIN, f_max=LOWFREQ_FMAX, power=2.0,
+        sample_rate=SAMPLE_RATE,
+        n_fft=LOWFREQ_N_FFT,
+        hop_length=LOWFREQ_HOP,
+        n_mels=N_MELS,
+        f_min=LOWFREQ_FMIN,
+        f_max=LOWFREQ_FMAX,
+        power=2.0,
     )
 
     offset = 0
@@ -202,10 +255,14 @@ def phase2_extract(
 
         song = sinfo["song"]
         onset_list = sinfo["onset_list"]
-        audio_path = data_dir / song["stems"]["drums"]
+        try:
+            audio_path, _ = _song_inputs(song, data_dir)
+        except (KeyError, TypeError):
+            failed_songs += 1
+            continue
 
         try:
-            audio, sr = sf.read(str(audio_path), dtype='float32')
+            audio, sr = sf.read(str(audio_path), dtype="float32")
         except Exception:
             failed_songs += 1
             continue
@@ -231,7 +288,7 @@ def phase2_extract(
                 break
 
             # Audio window
-            window = audio[start:start + WINDOW_SAMPLES]
+            window = audio[start : start + WINDOW_SAMPLES]
             if len(window) < WINDOW_SAMPLES:
                 window = np.pad(window, (0, WINDOW_SAMPLES - len(window)))
 
@@ -246,18 +303,21 @@ def phase2_extract(
             if mf.shape[-1] > FINE_FRAMES:
                 mf = mf[:, :FINE_FRAMES]
             elif mf.shape[-1] < FINE_FRAMES:
-                mf = torch.nn.functional.pad(mf, (0, FINE_FRAMES - mf.shape[-1]),
-                                             value=mf.min().item())
+                mf = torch.nn.functional.pad(
+                    mf, (0, FINE_FRAMES - mf.shape[-1]), value=mf.min().item()
+                )
             if mc.shape[-1] > COARSE_FRAMES:
                 mc = mc[:, :COARSE_FRAMES]
             elif mc.shape[-1] < COARSE_FRAMES:
-                mc = torch.nn.functional.pad(mc, (0, COARSE_FRAMES - mc.shape[-1]),
-                                             value=mc.min().item())
+                mc = torch.nn.functional.pad(
+                    mc, (0, COARSE_FRAMES - mc.shape[-1]), value=mc.min().item()
+                )
             if ml.shape[-1] > LOWFREQ_FRAMES:
                 ml = ml[:, :LOWFREQ_FRAMES]
             elif ml.shape[-1] < LOWFREQ_FRAMES:
-                ml = torch.nn.functional.pad(ml, (0, LOWFREQ_FRAMES - ml.shape[-1]),
-                                             value=ml.min().item())
+                ml = torch.nn.functional.pad(
+                    ml, (0, LOWFREQ_FRAMES - ml.shape[-1]), value=ml.min().item()
+                )
 
             # Context (neighbor one-hots)
             ctx_parts = []
@@ -300,8 +360,7 @@ def phase2_extract(
     del mm_fine, mm_coarse, mm_lowfreq, mm_crash_flux, mm_labels, mm_ctx
 
     actual_count = offset
-    logger.info(f"\n  Written: {actual_count}/{total_onsets} onsets "
-                f"(failed songs: {failed_songs})")
+    logger.info(f"\n  Written: {actual_count}/{total_onsets} onsets (failed songs: {failed_songs})")
 
     # If actual < allocated, truncate by rewriting headers
     if actual_count < total_onsets:
@@ -315,22 +374,79 @@ def phase2_extract(
             (ctx_path, ctx_shape, np.float16),
         ]:
             new_shape = (actual_count,) + orig_shape[1:]
-            data = np.lib.format.open_memmap(str(path), mode='r+')[:actual_count].copy()
-            fp = np.lib.format.open_memmap(str(path), mode='w+', dtype=dtype, shape=new_shape)
+            data = np.lib.format.open_memmap(str(path), mode="r+")[:actual_count].copy()
+            fp = np.lib.format.open_memmap(str(path), mode="w+", dtype=dtype, shape=new_shape)
             fp[:] = data
             del fp, data
 
     return {"actual_count": actual_count, "class_counts": dict(class_counts)}
 
 
-def extract_split(manifest_path: Path, split: str, cache_dir: Path):
+def _catalog_lineage(manifest: dict, songs: list[dict]) -> dict[str, object]:
+    """Path-free provenance persisted beside a cache for checkpoint compatibility."""
+    task = manifest["task"]
+    inputs = [
+        {
+            "source_id": song["source_id"],
+            "audio_sha256": song["input_hashes"]["audio_sha256"],
+            "notes_midi_sha256": song["input_hashes"]["notes_midi_sha256"],
+        }
+        for song in songs
+    ]
+    config = {
+        "sample_rate": SAMPLE_RATE,
+        "n_mels": N_MELS,
+        "fine_n_fft": FINE_N_FFT,
+        "fine_hop": FINE_HOP,
+        "coarse_n_fft": COARSE_N_FFT,
+        "coarse_hop": COARSE_HOP,
+        "lowfreq_n_fft": LOWFREQ_N_FFT,
+        "lowfreq_hop": LOWFREQ_HOP,
+        "window_before_ms": WINDOW_BEFORE_MS,
+        "window_after_ms": WINDOW_AFTER_MS,
+        "label_encoding": task["label_encoding"],
+    }
+    config_hash = hashlib.sha256(
+        json.dumps(config, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    return {
+        "catalog_id": manifest["catalog"]["catalog_id"],
+        "catalog_content_sha256": manifest["catalog"]["content_sha256"],
+        "task_view_format": manifest["format"],
+        "task_view_sha256": task_view_sha256(manifest),
+        "pipeline_id": task["pipeline_id"],
+        "pipeline_version": task["pipeline_version"],
+        "split_policy": task["split_policy"],
+        "source_ids": [item["source_id"] for item in inputs],
+        "inputs": inputs,
+        "preprocessing": {
+            "id": "drums-onset-windows/v1",
+            "config": config,
+            "config_sha256": config_hash,
+        },
+    }
+
+
+def extract_split(
+    manifest_path: Path, split: str, cache_dir: Path, *, catalog_root: Path | None = None
+):
     """Full extraction pipeline for one split."""
     with open(manifest_path) as f:
         manifest = json.load(f)
 
     data_dir = manifest_path.parent
-    songs = [s for s in manifest["songs"]
-             if s["split"] == split and s["charts"].get("drums")]
+    catalog_lineage = None
+    if manifest.get("format") == CATALOG_MANIFEST_FORMAT:
+        if catalog_root is None:
+            raise ValueError("--catalog-root is required for a Drums catalog task view")
+        songs = [
+            song
+            for song in resolve_drums_manifest_songs(manifest, catalog_root)
+            if song["split"] == split
+        ]
+        catalog_lineage = _catalog_lineage(manifest, songs)
+    else:
+        songs = [s for s in manifest["songs"] if s["split"] == split and s["charts"].get("drums")]
 
     logger.info(f"Found {len(songs)} {split} songs with drum charts")
 
@@ -341,9 +457,13 @@ def extract_split(manifest_path: Path, split: str, cache_dir: Path):
         return
 
     # Disk estimate
-    bytes_per_onset = (N_MELS * FINE_FRAMES * 2 + N_MELS * COARSE_FRAMES * 2
-                       + N_MELS * LOWFREQ_FRAMES * 2
-                       + 8 + 2 * CONTEXT_SIZE * 8 * 2)
+    bytes_per_onset = (
+        N_MELS * FINE_FRAMES * 2
+        + N_MELS * COARSE_FRAMES * 2
+        + N_MELS * LOWFREQ_FRAMES * 2
+        + 8
+        + 2 * CONTEXT_SIZE * 8 * 2
+    )
     disk_gb = total_onsets * bytes_per_onset / 1e9
     logger.info(f"  Estimated disk usage: {disk_gb:.1f} GB")
 
@@ -373,6 +493,8 @@ def extract_split(manifest_path: Path, split: str, cache_dir: Path):
             "contexts": f"{split}_contexts.npy",
         },
     }
+    if catalog_lineage is not None:
+        index["lineage"] = catalog_lineage
     index_path = cache_dir / f"{split}_index.json"
     with open(index_path, "w") as f:
         json.dump(index, f, indent=2)
@@ -380,11 +502,13 @@ def extract_split(manifest_path: Path, split: str, cache_dir: Path):
     logger.info(f"\nExtraction complete ({split}):")
     logger.info(f"  Total onsets: {result['actual_count']}")
     for i, name in enumerate(CLASS_NAMES):
-        logger.info(f"  {name}: {result['class_counts'].get(str(i), result['class_counts'].get(i, 0))}")
+        logger.info(
+            f"  {name}: {result['class_counts'].get(str(i), result['class_counts'].get(i, 0))}"
+        )
     logger.info(f"  Index: {index_path}")
 
     # File sizes
-    for key, fname in index["files"].items():
+    for _key, fname in index["files"].items():
         fpath = cache_dir / fname
         if fpath.exists():
             logger.info(f"  {fname}: {fpath.stat().st_size / 1e9:.2f} GB")
@@ -394,20 +518,23 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--manifest", default="/mnt/ml-data/dataset_drums/manifest.json")
     parser.add_argument("--output-dir", default="outputs/onset_classifier")
-    parser.add_argument("--split", default="both", choices=["train", "test", "both"])
+    parser.add_argument("--split", default="both", choices=["train", "val", "test", "both"])
+    parser.add_argument(
+        "--catalog-root", type=Path, help="OCTAVE catalog root for a catalog task view"
+    )
     args = parser.parse_args()
 
     cache_dir = Path(args.output_dir) / "cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
 
-    splits = ["train", "test"] if args.split == "both" else [args.split]
+    splits = ["train", "val", "test"] if args.split == "both" else [args.split]
     for split in splits:
         t0 = time.time()
-        logger.info(f"\n{'='*60}")
+        logger.info(f"\n{'=' * 60}")
         logger.info(f"Extracting {split} onset windows...")
-        logger.info(f"{'='*60}")
-        extract_split(Path(args.manifest), split, cache_dir)
-        logger.info(f"Total time: {time.time()-t0:.0f}s")
+        logger.info(f"{'=' * 60}")
+        extract_split(Path(args.manifest), split, cache_dir, catalog_root=args.catalog_root)
+        logger.info(f"Total time: {time.time() - t0:.0f}s")
 
 
 if __name__ == "__main__":
