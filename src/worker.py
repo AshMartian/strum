@@ -408,6 +408,14 @@ def preflight_chart_request(request_path: Path) -> dict[str, object]:
         bundle = load_model_bundle(raw["model_root"], check_files=True)
         typed = load_guitar_hybrid_rule_profile(bundle, raw["profile_id"])
         profile_configuration_sha256 = typed.configuration_sha256
+    elif plan["capability"] == "drums.v14-expert/v1":
+        from src.inference.drums_v14_profile import (  # noqa: PLC0415
+            load_drums_v14_expert_profile,
+        )
+
+        bundle = load_model_bundle(raw["model_root"], check_files=True)
+        typed = load_drums_v14_expert_profile(bundle, raw["profile_id"])
+        profile_configuration_sha256 = typed.configuration_sha256
     elif plan["capability"] == "difficulty.transform/v1":
         if len(plan["components"]) != 1 or plan["components"][0]["architecture"] != "EventTransformMLP/v1":
             raise WorkerRequestError("difficulty transform requires exactly one EventTransformMLP/v1")

@@ -574,7 +574,13 @@ and component hashes. It never enables the learned fret mapper, uses no
 `STRUM_GUITAR_*` overrides, and cannot make Hard/Medium/Easy charts unless a
 separate explicit STRUM difficulty profile is selected. Drums and the legacy
 multi-instrument batch pipeline are deliberately not execution handlers yet:
-they still contain undeclared companion/fallback behavior.
+they still contain undeclared companion/fallback behavior. A narrow
+`drums.v14-expert/v1` bundle profile can already be preflighted: it permits
+exactly one verified V14 8-class checkpoint, fixed V14 preprocessing, direct
+class thresholds, and Expert output with no postprocessing, ensemble, cymbal,
+or multiclass fallback. It remains non-executable until that checkpoint is
+packaged as a safe weights-only state dictionary and the direct V14 interpreter
+is enabled; STRUM will not load the legacy pickle checkpoint through this API.
 
 ```bash
 python -m src.song_source_catalog /path/to/catalog
