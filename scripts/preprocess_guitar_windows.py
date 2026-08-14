@@ -26,6 +26,9 @@ Usage:
         [--limit-songs N]   # debug
         [--no-onset-cache | --no-fret-cache]
         [--workers N]
+
+For a `strum-guitar-catalog-manifest/v1`, add `--catalog-root` so STRUM can
+re-validate catalog assets and resolve managed paths only at runtime.
 """
 
 from __future__ import annotations
@@ -35,9 +38,7 @@ import json
 import logging
 import sys
 import time
-from collections import Counter
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 import soundfile as sf
@@ -45,8 +46,13 @@ import torch
 import torchaudio
 from tqdm import tqdm
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s",
-                    datefmt="%H:%M:%S")
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+if str(REPOSITORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPOSITORY_ROOT))
+
+from src.catalog_guitar_manifest import MANIFEST_FORMAT, resolve_guitar_manifest_songs  # noqa: E402
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
 log = logging.getLogger("guitar_preprocess")
 
 # ─────────────────────────── Audio / mel constants ──────────────────────────
@@ -56,16 +62,16 @@ N_FFT = 2048
 HOP_LENGTH = 512
 FMIN = 30.0
 FMAX = 8000.0
-FRAME_MS = 1000.0 * HOP_LENGTH / SAMPLE_RATE   # 23.22 ms
-FRAMES_PER_SEC = SAMPLE_RATE / HOP_LENGTH       # 43.07
+FRAME_MS = 1000.0 * HOP_LENGTH / SAMPLE_RATE  # 23.22 ms
+FRAMES_PER_SEC = SAMPLE_RATE / HOP_LENGTH  # 43.07
 
 # ─────────────────────────── Stage 1: segments ──────────────────────────────
 # 5-second segments with 50% overlap → matches OnsetCRNN config in
 # train_guitar_onset.py (segment_duration_sec=5.0, overlap=0.5).
 SEG_DURATION_SEC = 5.0
 SEG_OVERLAP = 0.5
-SEG_FRAMES = int(SEG_DURATION_SEC * FRAMES_PER_SEC) + 1   # 216
-SEG_HOP_FRAMES = int(SEG_FRAMES * (1 - SEG_OVERLAP))      # 108
+SEG_FRAMES = int(SEG_DURATION_SEC * FRAMES_PER_SEC) + 1  # 216
+SEG_HOP_FRAMES = int(SEG_FRAMES * (1 - SEG_OVERLAP))  # 108
 SEG_HOP_SAMPLES = int(SEG_HOP_FRAMES * HOP_LENGTH)
 SEG_SAMPLES = (SEG_FRAMES - 1) * HOP_LENGTH
 
@@ -79,14 +85,14 @@ WIN_AFTER_MS = 400.0
 WIN_BEFORE_SAMP = int(WIN_BEFORE_MS / 1000.0 * SAMPLE_RATE)
 WIN_AFTER_SAMP = int(WIN_AFTER_MS / 1000.0 * SAMPLE_RATE)
 WIN_SAMPLES = WIN_BEFORE_SAMP + WIN_AFTER_SAMP
-WIN_FRAMES = WIN_SAMPLES // HOP_LENGTH + 1                # 22
+WIN_FRAMES = WIN_SAMPLES // HOP_LENGTH + 1  # 22
 
 # Group simultaneous Expert notes into one onset (mirrors manifest builder)
 CHORD_GROUP_MS = 25.0
 
 
 # ─────────────────────────── Helpers ────────────────────────────────────────
-def load_audio_mono_22050(path: Path) -> Optional[np.ndarray]:
+def load_audio_mono_22050(path: Path) -> np.ndarray | None:
     """Read any sf-supported audio → mono float32 @ 22050 Hz."""
     try:
         audio, sr = sf.read(str(path), dtype="float32")
@@ -126,7 +132,7 @@ def compute_log_mel(audio: np.ndarray) -> torch.Tensor:
     """Returns (n_mels, T) log-mel."""
     with torch.no_grad():
         x = torch.from_numpy(audio).float().unsqueeze(0)
-        m = get_mel()(x).squeeze(0)              # (n_mels, T)
+        m = get_mel()(x).squeeze(0)  # (n_mels, T)
         m = torch.log(m + 1e-8)
     return m
 
@@ -135,6 +141,7 @@ def parse_onsets_from_manifest(midi_path: Path) -> list[tuple[float, set[int]]]:
     """Re-parse Expert PART GUITAR onsets from notes.mid (cheaper than
     re-running build_guitar_manifest, but uses identical logic)."""
     import mido
+
     EXPERT = {96: 0, 97: 1, 98: 2, 99: 3, 100: 4}
     OPEN = 95
 
@@ -214,8 +221,7 @@ def count_segments(audio_len: int) -> int:
     return 1 + (audio_len - SEG_SAMPLES) // SEG_HOP_SAMPLES
 
 
-def count_valid_windows(onsets: list[tuple[float, set[int]]],
-                        audio_len: int) -> int:
+def count_valid_windows(onsets: list[tuple[float, set[int]]], audio_len: int) -> int:
     n = 0
     for tms, _ in onsets:
         center = int(tms / 1000.0 * SAMPLE_RATE)
@@ -255,8 +261,7 @@ def phase1(songs: list[dict]) -> tuple[list[dict], int, int]:
         # we SUBTRACT it from MIDI event times.
         offset_ms = float(song.get("audio_offset_ms", 0) or 0)
         if offset_ms != 0.0:
-            onsets = [(tms - offset_ms, frets) for (tms, frets) in onsets
-                      if (tms - offset_ms) >= 0]
+            onsets = [(tms - offset_ms, frets) for (tms, frets) in onsets if (tms - offset_ms) >= 0]
             if not onsets:
                 skipped += 1
                 continue
@@ -267,18 +272,25 @@ def phase1(songs: list[dict]) -> tuple[list[dict], int, int]:
             skipped += 1
             continue
 
-        info.append({
-            "song": song,
-            "audio_len_samples": audio_len,
-            "onsets": onsets,
-            "n_segments": n_seg,
-            "n_windows": n_win,
-        })
+        info.append(
+            {
+                "song": song,
+                "audio_len_samples": audio_len,
+                "onsets": onsets,
+                "n_segments": n_seg,
+                "n_windows": n_win,
+            }
+        )
         total_segs += n_seg
         total_wins += n_win
 
-    log.info("phase1: %d songs / %d segments / %d windows (skipped %d)",
-             len(info), total_segs, total_wins, skipped)
+    log.info(
+        "phase1: %d songs / %d segments / %d windows (skipped %d)",
+        len(info),
+        total_segs,
+        total_wins,
+        skipped,
+    )
     return info, total_segs, total_wins
 
 
@@ -302,11 +314,15 @@ def phase2_extract(
         seg_audio_path = onset_dir / f"{split}_segments_mel.npy"
         seg_label_path = onset_dir / f"{split}_segments_onset.npy"
         seg_audio = np.lib.format.open_memmap(
-            str(seg_audio_path), mode="w+", dtype=np.float16,
+            str(seg_audio_path),
+            mode="w+",
+            dtype=np.float16,
             shape=(total_segs, N_MELS, SEG_FRAMES),
         )
         seg_label = np.lib.format.open_memmap(
-            str(seg_label_path), mode="w+", dtype=np.float16,
+            str(seg_label_path),
+            mode="w+",
+            dtype=np.float16,
             shape=(total_segs, SEG_FRAMES),
         )
     if do_fret:
@@ -314,15 +330,21 @@ def phase2_extract(
         win_fret_path = fret_dir / f"{split}_window_fret.npy"
         win_meta_path = fret_dir / f"{split}_window_chord.npy"
         win_mel = np.lib.format.open_memmap(
-            str(win_mel_path), mode="w+", dtype=np.float16,
+            str(win_mel_path),
+            mode="w+",
+            dtype=np.float16,
             shape=(total_wins, N_MELS, WIN_FRAMES),
         )
         win_fret = np.lib.format.open_memmap(
-            str(win_fret_path), mode="w+", dtype=np.uint8,
+            str(win_fret_path),
+            mode="w+",
+            dtype=np.uint8,
             shape=(total_wins, 5),
         )
         win_chord = np.lib.format.open_memmap(
-            str(win_meta_path), mode="w+", dtype=np.uint8,
+            str(win_meta_path),
+            mode="w+",
+            dtype=np.uint8,
             shape=(total_wins,),
         )
 
@@ -340,7 +362,7 @@ def phase2_extract(
             failed += 1
             continue
 
-        full_mel = compute_log_mel(audio)            # (n_mels, T)
+        full_mel = compute_log_mel(audio)  # (n_mels, T)
         T_full = full_mel.shape[-1]
 
         # ── Onset frame target (full-song)
@@ -360,8 +382,8 @@ def phase2_extract(
                 fend = fstart + SEG_FRAMES
                 if fend > T_full:
                     break
-                seg = full_mel[:, fstart:fend]                  # (n_mels, SEG_FRAMES)
-                lab = onset_frames_target[fstart:fend]          # (SEG_FRAMES,)
+                seg = full_mel[:, fstart:fend]  # (n_mels, SEG_FRAMES)
+                lab = onset_frames_target[fstart:fend]  # (SEG_FRAMES,)
                 if seg_off >= total_segs:
                     break
                 seg_audio[seg_off] = seg.numpy().astype(np.float16)
@@ -404,17 +426,14 @@ def phase2_extract(
 
     # Truncate if we wrote fewer than allocated
     if do_onset and seg_off < total_segs:
-        _truncate(onset_dir / f"{split}_segments_mel.npy",
-                  (seg_off, N_MELS, SEG_FRAMES), np.float16)
-        _truncate(onset_dir / f"{split}_segments_onset.npy",
-                  (seg_off, SEG_FRAMES), np.float16)
+        _truncate(
+            onset_dir / f"{split}_segments_mel.npy", (seg_off, N_MELS, SEG_FRAMES), np.float16
+        )
+        _truncate(onset_dir / f"{split}_segments_onset.npy", (seg_off, SEG_FRAMES), np.float16)
     if do_fret and win_off < total_wins:
-        _truncate(fret_dir / f"{split}_window_mel.npy",
-                  (win_off, N_MELS, WIN_FRAMES), np.float16)
-        _truncate(fret_dir / f"{split}_window_fret.npy",
-                  (win_off, 5), np.uint8)
-        _truncate(fret_dir / f"{split}_window_chord.npy",
-                  (win_off,), np.uint8)
+        _truncate(fret_dir / f"{split}_window_mel.npy", (win_off, N_MELS, WIN_FRAMES), np.float16)
+        _truncate(fret_dir / f"{split}_window_fret.npy", (win_off, 5), np.uint8)
+        _truncate(fret_dir / f"{split}_window_chord.npy", (win_off,), np.uint8)
 
     meta = {
         "split": split,
@@ -429,7 +448,8 @@ def phase2_extract(
             "n_mels": N_MELS,
             "n_fft": N_FFT,
             "hop_length": HOP_LENGTH,
-            "fmin": FMIN, "fmax": FMAX,
+            "fmin": FMIN,
+            "fmax": FMAX,
             "frame_ms": FRAME_MS,
             "seg_frames": SEG_FRAMES,
             "seg_overlap": SEG_OVERLAP,
@@ -445,13 +465,18 @@ def phase2_extract(
     if do_fret:
         with (fret_dir / f"{split}_meta.json").open("w") as f:
             json.dump(meta, f, indent=2)
-    log.info("split=%s: wrote %d segments / %d windows  fret_counts=%s",
-             split, seg_off, win_off, fret_counts.tolist())
+    log.info(
+        "split=%s: wrote %d segments / %d windows  fret_counts=%s",
+        split,
+        seg_off,
+        win_off,
+        fret_counts.tolist(),
+    )
     return meta
 
 
 def _truncate(path: Path, new_shape: tuple, dtype) -> None:
-    data = np.lib.format.open_memmap(str(path), mode="r+")[:new_shape[0]].copy()
+    data = np.lib.format.open_memmap(str(path), mode="r+")[: new_shape[0]].copy()
     fp = np.lib.format.open_memmap(str(path), mode="w+", dtype=dtype, shape=new_shape)
     fp[:] = data
     del fp
@@ -461,11 +486,14 @@ def _truncate(path: Path, new_shape: tuple, dtype) -> None:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--manifest", default="configs/guitar_v1_manifest.json")
+    ap.add_argument(
+        "--catalog-root",
+        type=Path,
+        help="required for an OCTAVE catalog-backed Guitar task manifest",
+    )
     ap.add_argument("--cache-dir", default="/mnt/ml-data/guitar_v1_cache")
-    ap.add_argument("--splits", nargs="+",
-                    default=["train", "val", "test"])
-    ap.add_argument("--limit-songs", type=int, default=0,
-                    help="Per-split cap (debug)")
+    ap.add_argument("--splits", nargs="+", default=["train", "val", "test"])
+    ap.add_argument("--limit-songs", type=int, default=0, help="Per-split cap (debug)")
     ap.add_argument("--no-onset-cache", action="store_true")
     ap.add_argument("--no-fret-cache", action="store_true")
     args = ap.parse_args()
@@ -477,7 +505,12 @@ def main() -> int:
         return 2
 
     manifest = json.loads(Path(args.manifest).read_text())
-    all_songs = manifest["songs"]
+    if manifest.get("format") == MANIFEST_FORMAT:
+        if args.catalog_root is None:
+            ap.error("--catalog-root is required for a catalog-backed manifest")
+        all_songs = resolve_guitar_manifest_songs(manifest, args.catalog_root)
+    else:
+        all_songs = manifest["songs"]
     cache_dir = Path(args.cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
     log.info("manifest: %d songs total", len(all_songs))
@@ -497,7 +530,13 @@ def main() -> int:
         if not do_fret:
             total_wins = 0
         overall[split] = phase2_extract(
-            info, cache_dir, split, total_segs, total_wins, do_onset, do_fret,
+            info,
+            cache_dir,
+            split,
+            total_segs,
+            total_wins,
+            do_onset,
+            do_fret,
         )
         log.info("split=%s done in %.1fs", split, time.time() - t0)
 

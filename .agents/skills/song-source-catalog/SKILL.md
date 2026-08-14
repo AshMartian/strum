@@ -32,6 +32,11 @@ sources = select_training_sources(
 )
 ```
 
+For the existing Guitar onset/fret pipeline, build a path-free task manifest
+with `scripts/build_guitar_catalog_manifest.py`, then pass both that manifest
+and `--catalog-root` to `scripts/preprocess_guitar_windows.py`. Do not use the
+legacy raw-folder scanner for an OCTAVE catalog.
+
 ## Validate before training
 
 ```bash

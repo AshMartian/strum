@@ -325,6 +325,27 @@ audio asset. Task tokenizers and dataset builders should use the Python API
 `load_catalog()` and `select_training_sources()` rather than reading catalog
 JSONL or source packages directly.
 
+### Guitar task manifest
+
+For the current Guitar onset/fret pipeline, build a task manifest from the
+catalog rather than using the legacy folder scanner. The task manifest contains
+only catalog-relative content-addressed assets; preprocessing re-validates the
+catalog and resolves managed paths only in memory.
+
+```bash
+python scripts/build_guitar_catalog_manifest.py /path/to/catalog \
+  --output /path/to/views/guitar.json
+python scripts/preprocess_guitar_windows.py \
+  --manifest /path/to/views/guitar.json \
+  --catalog-root /path/to/catalog \
+  --cache-dir /path/to/cache --limit-songs 5
+```
+
+The catalog must provide Expert Guitar coverage plus `audio.guitar`, or
+`audio.mix` when the builder's fallback is enabled. This is distinct from the
+legacy `build_guitar_manifest.py`, which scans raw song folders and should not
+be used for OCTAVE catalogs.
+
 ## Development
 
 Developed on NVIDIA DGX Spark (GB10 GPU, CUDA 12.8). Trained on ~5,000 human-authored pro drum charts from the Clone Hero community.
