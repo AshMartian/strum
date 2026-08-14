@@ -52,6 +52,8 @@ def test_probe_declares_versioned_runtime_and_available_pipelines() -> None:
     assert payload["python_requires"] == ">=3.11"
     assert "guitar.onset-fret/v1" in payload["pipelines"]
     assert "dataset_prepare" in payload["capabilities"]
+    assert "chart_run" in payload["capabilities"]
+    assert isinstance(payload["optional_dependencies"]["basic_pitch"]["available"], bool)
     assert "model_bundle_preflight" in payload["capabilities"]
 
 

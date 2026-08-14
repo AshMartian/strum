@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import subprocess
@@ -234,6 +235,7 @@ def _runtime_payload() -> dict[str, object]:
         "catalog_inspect",
         "dataset_prepare",
         "chart_preflight",
+        "chart_run",
         "model_bundle_preflight",
         "checkpoint_inspect",
     ]
@@ -250,6 +252,12 @@ def _runtime_payload() -> dict[str, object]:
         "device_support": ["cuda", "mps", "cpu"],
         "capabilities": capabilities,
         "model_bundle_schema_versions": list(MODEL_BUNDLE_SCHEMA_VERSIONS),
+        "optional_dependencies": {
+            "basic_pitch": {
+                "available": importlib.util.find_spec("basic_pitch") is not None,
+                "required_by": ["guitar.hybrid-v2-rule/v1"],
+            }
+        },
         "pipelines": [
             pipeline.id for pipeline in PIPELINES if pipeline.preparation_status == "available"
         ],
