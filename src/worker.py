@@ -20,7 +20,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from src import PROJECT_ROOT, __version__
-from src.model_bundle import BundleValidationError, ModelBundle, load_model_bundle
+from src.model_bundle import BundleValidationError, InferenceProfile, ModelBundle, load_model_bundle
 
 PROTOCOL_VERSION = 1
 MODEL_BUNDLE_SCHEMA_VERSIONS = (1,)
@@ -192,6 +192,31 @@ def preflight_bundle(
     }
 
 
+def validate_inference_profile(
+    path: str | Path,
+    *,
+    profile_id: str,
+    difficulty_policy: str,
+) -> dict[str, object]:
+    """Resolve a declared inference profile and verify all required model files."""
+    bundle = load_model_bundle(path, check_files=True)
+    profile: InferenceProfile | None = bundle.profile(profile_id)
+    if profile is None:
+        raise BundleValidationError(f"inference profile is not declared: {profile_id}")
+    if difficulty_policy not in profile.difficulty_policies:
+        raise BundleValidationError(
+            f"profile {profile_id} does not support difficulty policy {difficulty_policy}"
+        )
+    plan = preflight_bundle(path, required_components=profile.required_components)
+    return {
+        **plan,
+        "profile_id": profile.profile_id,
+        "capability": profile.capability,
+        "instruments": list(profile.instruments),
+        "difficulty_policy": difficulty_policy,
+    }
+
+
 def _print_json(payload: dict[str, object]) -> None:
     print(json.dumps(payload, sort_keys=True))
 
@@ -218,6 +243,17 @@ def _parse_args() -> argparse.Namespace:
     inspect = checkpoint_commands.add_parser("inspect", help="inspect a checkpoint bundle")
     inspect.add_argument("--model-root", type=Path, required=True)
     inspect.add_argument("--json", action="store_true")
+    inference = commands.add_parser("inference", help="validate deployable inference profiles")
+    inference_commands = inference.add_subparsers(dest="inference_command", required=True)
+    profile = inference_commands.add_parser("profile", help="inspect one inference profile")
+    profile_commands = profile.add_subparsers(dest="profile_command", required=True)
+    validate_profile = profile_commands.add_parser(
+        "validate", help="validate one inference profile"
+    )
+    validate_profile.add_argument("--model-root", type=Path, required=True)
+    validate_profile.add_argument("--profile", required=True)
+    validate_profile.add_argument("--difficulty-policy", required=True)
+    validate_profile.add_argument("--json", action="store_true")
     return parser.parse_args()
 
 
@@ -249,6 +285,19 @@ def main() -> int:
                     "components": sorted(bundle.components),
                     "compatibility": bundle.compatibility,
                 }
+            )
+            return 0
+        if (
+            args.command == "inference"
+            and args.inference_command == "profile"
+            and args.profile_command == "validate"
+        ):
+            _print_json(
+                validate_inference_profile(
+                    args.model_root,
+                    profile_id=args.profile,
+                    difficulty_policy=args.difficulty_policy,
+                )
             )
             return 0
     except BundleValidationError as error:

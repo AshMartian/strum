@@ -7,7 +7,12 @@ from pathlib import Path
 import pytest
 
 from src.model_bundle import MANIFEST_FILENAME, BundleValidationError
-from src.worker import PROTOCOL_VERSION, _runtime_payload, preflight_bundle
+from src.worker import (
+    PROTOCOL_VERSION,
+    _runtime_payload,
+    preflight_bundle,
+    validate_inference_profile,
+)
 
 
 def _bundle(root: Path, component: dict[str, object]) -> Path:
@@ -63,3 +68,31 @@ def test_preflight_rejects_incomplete_or_missing_components(tmp_path: Path) -> N
         preflight_bundle(root, required_components=["guitar.onset"])
     with pytest.raises(BundleValidationError, match="not declared"):
         preflight_bundle(root, required_components=["guitar.fret"])
+
+
+def test_profile_validation_requires_declared_companions_and_difficulty_policy(
+    tmp_path: Path,
+) -> None:
+    root = _bundle(tmp_path, {"architecture": "GuitarOnsetCRNN/v1"})
+    manifest_path = root / MANIFEST_FILENAME
+    manifest = json.loads(manifest_path.read_text())
+    manifest["profiles"] = {
+        "guitar-default": {
+            "capability": "guitar.audio_to_chart/v1",
+            "instruments": ["guitar"],
+            "required_components": ["guitar.onset"],
+            "difficulty_policies": ["expert_only", "deterministic-v1"],
+        }
+    }
+    manifest_path.write_text(json.dumps(manifest))
+
+    result = validate_inference_profile(
+        root, profile_id="guitar-default", difficulty_policy="expert_only"
+    )
+
+    assert result["capability"] == "guitar.audio_to_chart/v1"
+    assert result["instruments"] == ["guitar"]
+    with pytest.raises(BundleValidationError, match="does not support"):
+        validate_inference_profile(
+            root, profile_id="guitar-default", difficulty_policy="learned:bad"
+        )

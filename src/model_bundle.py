@@ -47,6 +47,17 @@ class ModelComponent:
 
 
 @dataclass(frozen=True)
+class InferenceProfile:
+    """A complete, deployable auto-chart capability within a model bundle."""
+
+    profile_id: str
+    capability: str
+    instruments: tuple[str, ...]
+    required_components: tuple[str, ...]
+    difficulty_policies: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class ModelBundle:
     """A parsed manifest with paths resolved relative to its bundle root."""
 
@@ -55,12 +66,17 @@ class ModelBundle:
     schema_version: int
     compatibility: dict[str, Any]
     components: dict[str, ModelComponent]
+    profiles: dict[str, InferenceProfile]
     manifest_path: Path | None = None
     legacy: bool = False
 
     def component(self, name: str) -> ModelComponent | None:
         """Return a declared component, or ``None`` for an optional override."""
         return self.components.get(name)
+
+    def profile(self, profile_id: str) -> InferenceProfile | None:
+        """Return a declared inference profile without loading its weights."""
+        return self.profiles.get(profile_id)
 
     def checkpoint(self, name: str, default: Path | None = None) -> Path | None:
         """Resolve a component checkpoint, falling back to ``default`` when absent."""
@@ -130,6 +146,12 @@ class ModelBundle:
                     errors.append(
                         f"{component.name}: checkpoint byte length mismatch "
                         f"(expected {component.byte_length}, got {component.checkpoint.stat().st_size})"
+                    )
+        for profile in self.profiles.values():
+            for component_name in profile.required_components:
+                if component_name not in self.components:
+                    errors.append(
+                        f"profile {profile.profile_id} requires undeclared component {component_name}"
                     )
         return errors
 
@@ -282,6 +304,56 @@ def _parse_component(root: Path, name: str, value: object) -> ModelComponent:
     )
 
 
+def _parse_profile(name: str, value: object) -> InferenceProfile:
+    if not isinstance(value, dict):
+        raise BundleValidationError(f"profiles.{name} must be an object")
+    allowed = {"capability", "instruments", "required_components", "difficulty_policies"}
+    unknown = set(value) - allowed
+    missing = allowed - set(value)
+    if unknown:
+        raise BundleValidationError(
+            f"profiles.{name} has unknown field(s): {', '.join(sorted(unknown))}"
+        )
+    if missing:
+        raise BundleValidationError(
+            f"profiles.{name} missing field(s): {', '.join(sorted(missing))}"
+        )
+    capability = value["capability"]
+    instruments = value["instruments"]
+    required_components = value["required_components"]
+    difficulty_policies = value["difficulty_policies"]
+    if not isinstance(capability, str) or not capability.strip():
+        raise BundleValidationError(f"profiles.{name}.capability must be a non-empty string")
+    for field, candidate in (
+        ("instruments", instruments),
+        ("required_components", required_components),
+        ("difficulty_policies", difficulty_policies),
+    ):
+        if (
+            not isinstance(candidate, list)
+            or not candidate
+            or not all(isinstance(item, str) and item.strip() for item in candidate)
+            or len(set(candidate)) != len(candidate)
+        ):
+            raise BundleValidationError(
+                f"profiles.{name}.{field} must be a unique non-empty string list"
+            )
+    if any(
+        policy not in {"expert_only", "deterministic-v1"} and not policy.startswith("learned:")
+        for policy in difficulty_policies
+    ):
+        raise BundleValidationError(
+            f"profiles.{name}.difficulty_policies must use expert_only, deterministic-v1, or learned:<id>"
+        )
+    return InferenceProfile(
+        profile_id=name,
+        capability=capability,
+        instruments=tuple(instruments),
+        required_components=tuple(required_components),
+        difficulty_policies=tuple(difficulty_policies),
+    )
+
+
 def load_model_bundle(path: str | Path, *, check_files: bool = False) -> ModelBundle:
     """Load a manifest file or a directory containing one.
 
@@ -301,9 +373,10 @@ def load_model_bundle(path: str | Path, *, check_files: bool = False) -> ModelBu
     if not isinstance(raw, dict):
         raise BundleValidationError("bundle manifest must be a JSON object")
 
-    allowed = {"schema_version", "model_id", "compatibility", "components"}
+    required = {"schema_version", "model_id", "compatibility", "components"}
+    allowed = {*required, "profiles"}
     unknown = set(raw) - allowed
-    missing = {"schema_version", "model_id", "compatibility", "components"} - set(raw)
+    missing = required - set(raw)
     if unknown:
         raise BundleValidationError(
             f"bundle manifest has unknown field(s): {', '.join(sorted(unknown))}"
@@ -320,10 +393,15 @@ def load_model_bundle(path: str | Path, *, check_files: bool = False) -> ModelBu
         raise BundleValidationError("compatibility must be an object")
     if not isinstance(raw["components"], dict) or not raw["components"]:
         raise BundleValidationError("components must be a non-empty object")
+    if "profiles" in raw and not isinstance(raw["profiles"], dict):
+        raise BundleValidationError("profiles must be an object")
 
     root = manifest_path.parent.resolve()
     components = {
         name: _parse_component(root, name, value) for name, value in raw["components"].items()
+    }
+    profiles = {
+        name: _parse_profile(name, value) for name, value in raw.get("profiles", {}).items()
     }
     bundle = ModelBundle(
         root=root,
@@ -331,6 +409,7 @@ def load_model_bundle(path: str | Path, *, check_files: bool = False) -> ModelBu
         schema_version=raw["schema_version"],
         compatibility=raw["compatibility"],
         components=components,
+        profiles=profiles,
         manifest_path=manifest_path,
     )
     errors = bundle.validate(check_files=check_files)
@@ -386,6 +465,7 @@ def legacy_model_bundle(root: Path = PROJECT_ROOT) -> ModelBundle:
             "strum_version": f">={__version__}",
         },
         components=components,
+        profiles={},
         legacy=True,
     )
 
