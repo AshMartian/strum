@@ -1,0 +1,4 @@
+interface:
+  display_name: "Song Source Catalog"
+  short_description: "Validate and prepare safe STRUM training inputs"
+  default_prompt: "Validate an OCTAVE song source catalog and prepare STRUM task inputs."
