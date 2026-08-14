@@ -774,6 +774,31 @@ def train(config: TrainingConfig) -> dict[str, Any]:
     (output_dir / "training-metadata.json").write_text(
         json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
+    task_view_id = task_view.get("task_view_id") if isinstance(task_view, dict) else None
+    config_fingerprint = _canonical_json_sha256(portable_config)
+    experiment = {
+        "schema_version": 1,
+        "format": "strum-experiment/v1",
+        "run_id": f"{_slug(config.model_id)}-{config_fingerprint[:12]}",
+        "lifecycle": "completed",
+        "pipeline": {"id": "chart_transform.five_lane", "version": 1},
+        "task_view_id": task_view_id,
+        "configuration": {"sha256": config_fingerprint, "values": portable_config},
+        "checkpoint_mode": "fine_tune" if initialization else "fresh",
+        "runtime": {
+            "strum_version": __version__,
+            "strum_revision": config.strum_revision,
+            "device": _device_metadata(config.device, device),
+        },
+        "metrics": metrics,
+        "model_bundle": {
+            "model_id": config.model_id,
+            "manifest_sha256": _sha256(output_dir / MANIFEST_FILENAME),
+        },
+    }
+    (output_dir / "experiment.json").write_text(
+        json.dumps(experiment, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
     return {"bundle_dir": output_dir, "metrics": metrics, "metadata": metadata}
 
 
@@ -783,6 +808,12 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: source.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _canonical_json_sha256(value: object) -> str:
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
 
 
 def _slug(value: str) -> str:

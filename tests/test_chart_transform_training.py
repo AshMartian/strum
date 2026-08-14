@@ -117,6 +117,7 @@ def test_cpu_chart_pair_training_writes_valid_model_bundle(tmp_path: Path) -> No
 
     bundle = load_model_bundle(output_dir, check_files=True)
     metadata = json.loads((output_dir / "training-metadata.json").read_text())
+    experiment = json.loads((output_dir / "experiment.json").read_text())
 
     assert bundle.model_id == "test-expert-to-hard"
     component_name = "chart_transform.bass.expert_to_hard"
@@ -131,6 +132,11 @@ def test_cpu_chart_pair_training_writes_valid_model_bundle(tmp_path: Path) -> No
     assert metadata["dataset"]["provenance"].startswith("synthetic")
     assert metadata["dataset"]["license"] == "test-only"
     assert metadata["dataset"]["instrument"] == "bass"
+    assert experiment["format"] == "strum-experiment/v1"
+    assert experiment["pipeline"] == {"id": "chart_transform.five_lane", "version": 1}
+    assert experiment["checkpoint_mode"] == "fresh"
+    assert experiment["model_bundle"]["manifest_sha256"]
+    assert str(dataset_dir) not in json.dumps(experiment)
     assert set(metadata["split"]["train_song_ids"]).isdisjoint(
         metadata["split"]["validation_song_ids"]
     )
