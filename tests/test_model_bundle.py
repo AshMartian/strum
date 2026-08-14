@@ -157,6 +157,8 @@ def test_profile_configuration_is_relative_and_checked(tmp_path: Path) -> None:
                 "required_components": ["guitar.onset"],
                 "difficulty_policies": ["expert_only"],
                 "configuration": "profiles/guitar-rule.json",
+                "configuration_sha256": hashlib.sha256(config.read_bytes()).hexdigest(),
+                "configuration_byte_length": config.stat().st_size,
             }
         },
     )
@@ -164,3 +166,4 @@ def test_profile_configuration_is_relative_and_checked(tmp_path: Path) -> None:
     bundle = load_model_bundle(tmp_path, check_files=True)
 
     assert bundle.profile("guitar-rule").configuration == config
+    assert bundle.profile("guitar-rule").configuration_sha256

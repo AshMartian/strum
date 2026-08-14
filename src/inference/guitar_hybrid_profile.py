@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.metadata
 import importlib.util
 import json
 from dataclasses import dataclass
@@ -28,7 +29,7 @@ class GuitarHybridRuleProfile:
     sustain_min_duration_ms: float
     max_chord_size: int
     voice_filter: bool
-    basic_pitch_dependency: str
+    basic_pitch_version: str
     configuration_sha256: str
 
 
@@ -77,7 +78,7 @@ def load_guitar_hybrid_rule_profile(
         "sustain_min_duration_ms",
         "max_chord_size",
         "voice_filter",
-        "basic_pitch_dependency",
+        "basic_pitch_version",
     }
     if (
         not isinstance(raw, dict)
@@ -113,13 +114,24 @@ def load_guitar_hybrid_rule_profile(
         or raw["max_chord_size"] < 1
     ):
         raise BundleValidationError("guitar hybrid rule configuration settings are out of range")
-    if not isinstance(raw["basic_pitch_dependency"], str) or not raw["basic_pitch_dependency"]:
+    if not isinstance(raw["basic_pitch_version"], str) or not raw["basic_pitch_version"]:
         raise BundleValidationError(
-            "guitar hybrid rule configuration requires Basic Pitch dependency"
+            "guitar hybrid rule configuration requires an exact Basic Pitch version"
         )
     if importlib.util.find_spec("basic_pitch") is None:
         raise BundleValidationError(
             "guitar hybrid rule profile requires unavailable Basic Pitch runtime"
+        )
+    try:
+        installed_basic_pitch = importlib.metadata.version("basic-pitch")
+    except importlib.metadata.PackageNotFoundError as error:
+        raise BundleValidationError(
+            "guitar hybrid rule profile requires unavailable Basic Pitch distribution"
+        ) from error
+    if installed_basic_pitch != raw["basic_pitch_version"]:
+        raise BundleValidationError(
+            "guitar hybrid rule profile requires Basic Pitch "
+            f"{raw['basic_pitch_version']}, found {installed_basic_pitch}"
         )
     return GuitarHybridRuleProfile(
         profile_id=profile_id,
@@ -133,6 +145,6 @@ def load_guitar_hybrid_rule_profile(
         sustain_min_duration_ms=float(raw["sustain_min_duration_ms"]),
         max_chord_size=raw["max_chord_size"],
         voice_filter=raw["voice_filter"],
-        basic_pitch_dependency=raw["basic_pitch_dependency"],
+        basic_pitch_version=raw["basic_pitch_version"],
         configuration_sha256=hashlib.sha256(profile.configuration.read_bytes()).hexdigest(),
     )

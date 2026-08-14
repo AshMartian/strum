@@ -58,6 +58,8 @@ class InferenceProfile:
     required_components: tuple[str, ...]
     difficulty_policies: tuple[str, ...]
     configuration: Path | None = None
+    configuration_sha256: str | None = None
+    configuration_byte_length: int | None = None
 
 
 @dataclass(frozen=True)
@@ -171,10 +173,15 @@ class ModelBundle:
                     errors.append(
                         f"profile {profile.profile_id} requires undeclared component {component_name}"
                     )
-            if profile.configuration is not None and not profile.configuration.is_file():
-                errors.append(
-                    f"profile {profile.profile_id}: configuration not found: {profile.configuration}"
-                )
+            if profile.configuration is not None:
+                if not profile.configuration.is_file():
+                    errors.append(
+                        f"profile {profile.profile_id}: configuration not found: {profile.configuration}"
+                    )
+                elif verify_hashes and _sha256(profile.configuration) != profile.configuration_sha256:
+                    errors.append(f"profile {profile.profile_id}: configuration sha256 mismatch")
+                elif profile.configuration.stat().st_size != profile.configuration_byte_length:
+                    errors.append(f"profile {profile.profile_id}: configuration byte length mismatch")
         return errors
 
     def compatibility_status(self) -> list[str]:
@@ -359,6 +366,8 @@ def _parse_profile(root: Path, name: str, value: object) -> InferenceProfile:
         "required_components",
         "difficulty_policies",
         "configuration",
+        "configuration_sha256",
+        "configuration_byte_length",
     }
     unknown = set(value) - allowed
     required = {"capability", "instruments", "required_components", "difficulty_policies"}
@@ -398,15 +407,36 @@ def _parse_profile(root: Path, name: str, value: object) -> InferenceProfile:
         raise BundleValidationError(
             f"profiles.{name}.difficulty_policies must use expert_only, deterministic-v1, or learned:<id>"
         )
+    configuration = _resolve_relative_path(
+        root, value.get("configuration"), "configuration", f"profiles.{name}"
+    )
+    configuration_sha256 = value.get("configuration_sha256")
+    configuration_byte_length = value.get("configuration_byte_length")
+    if configuration is not None and (
+        not isinstance(configuration_sha256, str)
+        or len(configuration_sha256) != 64
+        or any(ch not in "0123456789abcdef" for ch in configuration_sha256)
+        or not isinstance(configuration_byte_length, int)
+        or configuration_byte_length < 0
+    ):
+        raise BundleValidationError(
+            f"profiles.{name}.configuration requires sha256 and non-negative byte_length"
+        )
+    if configuration is None and (
+        configuration_sha256 is not None or configuration_byte_length is not None
+    ):
+        raise BundleValidationError(
+            f"profiles.{name}.configuration_sha256 and configuration_byte_length require configuration"
+        )
     return InferenceProfile(
         profile_id=name,
         capability=capability,
         instruments=tuple(instruments),
         required_components=tuple(required_components),
         difficulty_policies=tuple(difficulty_policies),
-        configuration=_resolve_relative_path(
-            root, value.get("configuration"), "configuration", f"profiles.{name}"
-        ),
+        configuration=configuration,
+        configuration_sha256=configuration_sha256,
+        configuration_byte_length=configuration_byte_length,
     )
 
 

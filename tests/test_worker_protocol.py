@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -11,6 +12,7 @@ import pytest
 from src.model_bundle import MANIFEST_FILENAME, BundleValidationError
 from src.worker import (
     PROTOCOL_VERSION,
+    _run_without_legacy_output,
     _runtime_payload,
     _write_expert_guitar_midi,
     inspect_catalog,
@@ -55,6 +57,22 @@ def test_probe_declares_versioned_runtime_and_available_pipelines() -> None:
     assert "chart_run" in payload["capabilities"]
     assert isinstance(payload["optional_dependencies"]["basic_pitch"]["available"], bool)
     assert "model_bundle_preflight" in payload["capabilities"]
+
+
+def test_legacy_inference_output_is_not_exposed_to_worker_clients(
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    secret_path = "/private/catalog/audio.opus"
+
+    def legacy_inference() -> str:
+        print(f"Predicting MIDI for {secret_path}")
+        os.write(2, secret_path.encode())
+        return "chart"
+
+    assert _run_without_legacy_output(legacy_inference) == "chart"
+    captured = capfd.readouterr()
+    assert secret_path not in captured.out
+    assert secret_path not in captured.err
 
 
 def _catalog_asset(root: Path, content: bytes, filename: str) -> dict[str, object]:

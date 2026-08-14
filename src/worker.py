@@ -10,8 +10,10 @@ know STRUM's source-tree scripts.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import subprocess
@@ -314,6 +316,8 @@ def preflight_bundle(
                 "byte_length": component.byte_length,
                 "architecture": component.architecture,
                 "preprocessing": component.preprocessing,
+                "config_sha256": component.config_sha256,
+                "config_byte_length": component.config_byte_length,
             }
         )
     if errors:
@@ -349,6 +353,8 @@ def validate_inference_profile(
         "capability": profile.capability,
         "instruments": list(profile.instruments),
         "difficulty_policy": difficulty_policy,
+        "profile_configuration_sha256": profile.configuration_sha256,
+        "profile_configuration_byte_length": profile.configuration_byte_length,
     }
 
 
@@ -412,6 +418,7 @@ def preflight_chart_request(request_path: Path) -> dict[str, object]:
         "manifest_sha256": plan["manifest_sha256"],
         "components": plan["components"],
         "profile_configuration_sha256": profile_configuration_sha256,
+        "profile_configuration_byte_length": plan["profile_configuration_byte_length"],
     }
 
 
@@ -480,6 +487,31 @@ def _write_expert_guitar_midi(chart: Any, output_path: Path) -> None:
     midi.save(output_path)
 
 
+def _run_without_legacy_output(callback: Any) -> Any:
+    """Run a legacy inference callable without leaking private paths to stdout."""
+    # Some optional inference dependencies keep logging handlers bound to the
+    # process file descriptors, bypassing ``redirect_stdout``. Redirect both
+    # descriptors for the short, synchronous call so the worker always emits
+    # exactly one JSON response after it has completed.
+    output_fds = {1, 2}
+    for stream in (sys.stdout, sys.stderr):
+        with contextlib.suppress(OSError, io.UnsupportedOperation):
+            output_fds.add(stream.fileno())
+    saved_fds = {fd: os.dup(fd) for fd in output_fds}
+    try:
+        with open(os.devnull, "w", encoding="utf-8") as sink:
+            sys.stdout.flush()
+            sys.stderr.flush()
+            for fd in output_fds:
+                os.dup2(sink.fileno(), fd)
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                return callback()
+    finally:
+        for fd, saved_fd in saved_fds.items():
+            os.dup2(saved_fd, fd)
+            os.close(saved_fd)
+
+
 def run_chart_request(request_path: Path) -> dict[str, object]:
     """Execute the explicit Guitar hybrid profile and record a safe run result."""
     request = _read_chart_run_request(request_path)
@@ -497,12 +529,17 @@ def run_chart_request(request_path: Path) -> dict[str, object]:
         from src.inference.guitar_hybrid_v2 import transcribe_guitar_hybrid  # noqa: PLC0415
 
         bundle = load_model_bundle(preflight_raw["model_root"], check_files=True)
+        errors = bundle.validate(check_files=True, verify_hashes=True)
+        if errors:
+            raise BundleValidationError("; ".join(errors))
         profile = load_guitar_hybrid_rule_profile(bundle, preflight_raw["profile_id"])
-        chart = transcribe_guitar_hybrid(
-            audio,
-            device=plan["device"],
-            execution_profile=profile,
-            model_bundle=bundle,
+        chart = _run_without_legacy_output(
+            lambda: transcribe_guitar_hybrid(
+                audio,
+                device=plan["device"],
+                execution_profile=profile,
+                model_bundle=bundle,
+            )
         )
         output_dir = Path(request["output_dir"])
         midi_path = output_dir / "notes.mid"

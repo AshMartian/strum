@@ -539,8 +539,10 @@ separate deployment step.
 The first chart execution capability is intentionally narrow:
 `guitar.hybrid-v2-rule/v1`. It requires a bundle-verified onset checkpoint and
 model-config fingerprint, a typed profile configuration, and an installed
-Basic Pitch runtime. Its request references an already-validated preflight
-request plus private input/output locations:
+Basic Pitch runtime. Basic Pitch's TensorFlow dependency currently requires a
+managed Python 3.11 environment; `strum-worker probe --json` reports whether
+it is available. Its request references an already-validated preflight request
+plus private input/output locations:
 
 ```json
 {
