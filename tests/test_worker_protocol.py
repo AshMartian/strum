@@ -12,6 +12,7 @@ from src.worker import (
     _runtime_payload,
     inspect_catalog,
     preflight_bundle,
+    preflight_chart_request,
     prepare_dataset_request,
     validate_inference_profile,
 )
@@ -176,3 +177,36 @@ def test_profile_validation_requires_declared_companions_and_difficulty_policy(
         validate_inference_profile(
             root, profile_id="guitar-default", difficulty_policy="learned:bad"
         )
+
+
+def test_chart_preflight_returns_an_explicit_non_execution_plan(tmp_path: Path) -> None:
+    root = _bundle(tmp_path, {"architecture": "GuitarOnsetCRNN/v1"})
+    manifest_path = root / MANIFEST_FILENAME
+    manifest = json.loads(manifest_path.read_text())
+    manifest["profiles"] = {
+        "guitar-default": {
+            "capability": "guitar.audio_to_chart/v1",
+            "instruments": ["guitar"],
+            "required_components": ["guitar.onset"],
+            "difficulty_policies": ["expert_only"],
+        }
+    }
+    manifest_path.write_text(json.dumps(manifest))
+    request = tmp_path / "chart-request.json"
+    request.write_text(
+        json.dumps(
+            {
+                "model_root": str(root),
+                "profile_id": "guitar-default",
+                "difficulty_policy": "expert_only",
+                "instruments": ["guitar"],
+                "device": "cuda",
+            }
+        )
+    )
+
+    plan = preflight_chart_request(request)
+
+    assert plan["status"] == "ready"
+    assert plan["execution"] == "not_available"
+    assert plan["components"][0]["id"] == "guitar.onset"

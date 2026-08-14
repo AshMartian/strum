@@ -47,6 +47,8 @@ class PipelineDescriptor:
     kind: str
     version: int
     catalog_requirements: dict[str, object]
+    prepare_schema: dict[str, object]
+    train_schema: dict[str, object] | None
     checkpoint_outputs: tuple[str, ...]
     inference_capability: str | None
     status: str
@@ -58,6 +60,54 @@ class PipelineDescriptor:
         data["checkpoint_outputs"] = list(self.checkpoint_outputs)
         return data
 
+
+def _object_schema(
+    properties: dict[str, object], *, required: tuple[str, ...] = ()
+) -> dict[str, object]:
+    """Return the small JSON-Schema subset exposed to the OCTAVE renderer."""
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": properties,
+        "required": list(required),
+    }
+
+
+CATALOG_AUDIO_OPTIONS = {
+    "audio_role": {"type": "string"},
+    "fallback_audio_role": {"type": ["string", "null"]},
+    "required_difficulty": {"type": "string", "default": "expert"},
+}
+CHART_TRANSFORM_PREPARE_SCHEMA = _object_schema(
+    {
+        "instrument": {"type": "string", "enum": ["guitar", "bass", "keys", "drums"]},
+        "target_difficulty": {"type": "string", "enum": ["Hard", "Medium", "Easy"]},
+        "split_seed": {"type": "integer", "default": 20260814},
+        "validation_fraction": {"type": "number", "minimum": 0, "maximum": 1, "default": 0.2},
+        "dataset_id": {"type": "string"},
+        "overwrite": {"type": "boolean", "default": False},
+    },
+    required=("instrument", "target_difficulty"),
+)
+CHART_TRANSFORM_TRAIN_SCHEMA = _object_schema(
+    {
+        "model_id": {"type": "string"},
+        "seed": {"type": "integer", "default": 20260813},
+        "validation_fraction": {"type": "number", "minimum": 0, "maximum": 1, "default": 0.2},
+        "lane_count": {"type": "integer", "minimum": 1, "default": 5},
+        "alignment_tolerance_ms": {"type": "number", "minimum": 0, "default": 50},
+        "hidden_dim": {"type": "integer", "minimum": 1, "default": 32},
+        "learning_rate": {"type": "number", "exclusiveMinimum": 0, "default": 0.001},
+        "epochs": {"type": "integer", "minimum": 1, "default": 20},
+        "device": {"type": "string", "default": "auto"},
+        "audio_feature_mode": {"type": "string", "enum": ["none"]},
+        "audio_sample_rate": {"type": "integer", "minimum": 1, "default": 16000},
+        "audio_window_ms": {"type": "number", "exclusiveMinimum": 0, "default": 50},
+        "audio_max_duration_seconds": {"type": "number", "exclusiveMinimum": 0, "default": 900},
+        "strum_revision": {"type": "string"},
+    },
+    required=("model_id",),
+)
 
 PIPELINES = (
     PipelineDescriptor(
@@ -71,6 +121,8 @@ PIPELINES = (
             "audio_roles": ["guitar", "mix"],
             "audio_policy": "prefer:guitar,fallback:mix",
         },
+        prepare_schema=_object_schema(CATALOG_AUDIO_OPTIONS),
+        train_schema=None,
         checkpoint_outputs=("guitar_onset", "guitar_fret"),
         inference_capability="guitar.audio_to_chart/v1",
         status="catalog_ready",
@@ -87,6 +139,8 @@ PIPELINES = (
             "source_difficulty": "expert",
             "target_difficulties": ["hard", "medium", "easy"],
         },
+        prepare_schema=CHART_TRANSFORM_PREPARE_SCHEMA,
+        train_schema=CHART_TRANSFORM_TRAIN_SCHEMA,
         checkpoint_outputs=("chart_transform",),
         inference_capability="difficulty.transform/v1",
         status="catalog_ready",
@@ -104,6 +158,8 @@ PIPELINES = (
             "audio_roles": ["drums", "mix"],
             "audio_policy": "prefer:drums,fallback:mix",
         },
+        prepare_schema=_object_schema(CATALOG_AUDIO_OPTIONS),
+        train_schema=None,
         checkpoint_outputs=("drums_onset",),
         inference_capability="drums.audio_to_chart/v1",
         status="catalog_ready",
@@ -123,6 +179,16 @@ PIPELINES = (
                 "difficulties": ["expert"],
                 "audio_policy": "task-specific managed role with mix fallback",
             },
+            prepare_schema=_object_schema(
+                {
+                    **CATALOG_AUDIO_OPTIONS,
+                    "disable_fallback": {"type": "boolean", "default": False},
+                    "split_ratios": {"type": "array", "items": {"type": "integer"}},
+                    "split_seed": {"type": "string", "default": "catalog-source-id/v1"},
+                    "preprocessing": {"type": "object", "default": {}},
+                }
+            ),
+            train_schema=None,
             checkpoint_outputs=(task_kind,),
             inference_capability=None,
             status="catalog_ready",
@@ -167,6 +233,7 @@ def _runtime_payload() -> dict[str, object]:
         "pipeline_discovery",
         "catalog_inspect",
         "dataset_prepare",
+        "chart_preflight",
         "model_bundle_preflight",
         "checkpoint_inspect",
     ]
@@ -266,6 +333,57 @@ def validate_inference_profile(
         "capability": profile.capability,
         "instruments": list(profile.instruments),
         "difficulty_policy": difficulty_policy,
+    }
+
+
+def preflight_chart_request(request_path: Path) -> dict[str, object]:
+    """Resolve a profile for a future chart job without loading model weights.
+
+    This is intentionally a preflight-only boundary until each production
+    auto-chart backend consumes declared bundle components rather than legacy
+    working-directory defaults. A caller must not treat preflight success as an
+    authorization to execute the legacy pipeline with arbitrary checkpoints.
+    """
+    try:
+        raw = json.loads(request_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise WorkerRequestError("chart request is unreadable or not valid JSON") from error
+    expected = {"model_root", "profile_id", "difficulty_policy", "instruments", "device"}
+    if not isinstance(raw, dict) or set(raw) != expected:
+        raise WorkerRequestError("chart preflight request has unsupported fields")
+    if not all(
+        isinstance(raw[key], str) and raw[key]
+        for key in ("model_root", "profile_id", "difficulty_policy", "device")
+    ):
+        raise WorkerRequestError("chart preflight identity fields must be non-empty strings")
+    instruments = raw["instruments"]
+    if (
+        not isinstance(instruments, list)
+        or not instruments
+        or not all(isinstance(instrument, str) and instrument for instrument in instruments)
+        or len(set(instruments)) != len(instruments)
+    ):
+        raise WorkerRequestError(
+            "chart preflight instruments must be a unique non-empty string list"
+        )
+    plan = validate_inference_profile(
+        raw["model_root"],
+        profile_id=raw["profile_id"],
+        difficulty_policy=raw["difficulty_policy"],
+    )
+    if not set(instruments) <= set(plan["instruments"]):
+        raise WorkerRequestError("profile does not cover requested instruments")
+    return {
+        "status": "ready",
+        "execution": "not_available",
+        "model_id": plan["model_id"],
+        "profile_id": plan["profile_id"],
+        "capability": plan["capability"],
+        "difficulty_policy": plan["difficulty_policy"],
+        "instruments": instruments,
+        "device": raw["device"],
+        "manifest_sha256": plan["manifest_sha256"],
+        "components": plan["components"],
     }
 
 
@@ -548,6 +666,13 @@ def _parse_args() -> argparse.Namespace:
     validate_profile.add_argument("--profile", required=True)
     validate_profile.add_argument("--difficulty-policy", required=True)
     validate_profile.add_argument("--json", action="store_true")
+    chart = commands.add_parser("chart", help="preflight typed auto-chart requests")
+    chart_commands = chart.add_subparsers(dest="chart_command", required=True)
+    chart_preflight = chart_commands.add_parser(
+        "preflight", help="validate a chart profile request"
+    )
+    chart_preflight.add_argument("--request", type=Path, required=True)
+    chart_preflight.add_argument("--json", action="store_true")
     return parser.parse_args()
 
 
@@ -602,6 +727,9 @@ def main() -> int:
                     difficulty_policy=args.difficulty_policy,
                 )
             )
+            return 0
+        if args.command == "chart" and args.chart_command == "preflight":
+            _print_json(preflight_chart_request(args.request))
             return 0
     except BundleValidationError:
         _print_json(
