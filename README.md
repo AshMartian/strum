@@ -481,6 +481,28 @@ fine-tune it. STRUM releases weights and a benchmark manifest, not its
 original community-chart training corpus; supply only chart pairs you are
 authorized to use.
 
+## OCTAVE song-source catalogs
+
+STRUM treats OCTAVE's `octave-song-source-catalog/v1` as its common local
+training-source boundary. OCTAVE imports source packages, makes the rights
+decision, and materializes managed assets. STRUM then validates asset hashes
+and selects only `training_use: allowed` records for a task view; it does not
+parse external package formats or persist original source paths.
+
+```bash
+python -m src.song_source_catalog /path/to/catalog
+python scripts/build_guitar_catalog_manifest.py /path/to/catalog \
+  --output /path/to/views/guitar.json
+python scripts/preprocess_guitar_windows.py \
+  --manifest /path/to/views/guitar.json \
+  --catalog-root /path/to/catalog --cache-dir /path/to/cache
+```
+
+The current Guitar onset/fret adapter requires Expert Guitar coverage and
+prefers `audio.guitar`, falling back to `audio.mix`. New task builders use
+`load_catalog()` and `select_training_sources()` rather than scanning source
+folders.
+
 ## Development
 
 Developed on NVIDIA DGX Spark (GB10 GPU, CUDA 12.8). Trained on ~5,000 human-authored pro drum charts from the Clone Hero community.
