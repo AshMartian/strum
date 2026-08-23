@@ -107,6 +107,7 @@ def test_chart_transform_schema_exposes_opaque_parent_artifact_selection() -> No
 def test_pipeline_descriptors_advertise_safe_host_orchestration_requirements() -> None:
     guitar = next(item for item in PIPELINES if item.id == "guitar.onset-fret/v1")
     assert guitar.private_request_fields == ("catalog_root",)
+    assert guitar.training_requirements == ("profile_evaluation", "profile_packaging")
     assert guitar.catalog_inspection_option_keys == (
         "audio_role",
         "fallback_audio_role",
@@ -132,6 +133,18 @@ def test_pipeline_descriptors_advertise_safe_host_orchestration_requirements() -
             "fallback_audio_role",
             "required_difficulty",
         )
+    assert next(
+        item for item in PIPELINES if item.id == "bass.onset-fret/v1"
+    ).training_requirements == (
+        "bass_profile_evaluation",
+        "bass_profile_packaging",
+    )
+    assert next(
+        item for item in PIPELINES if item.id == "keys.onset-fret/v1"
+    ).training_requirements == (
+        "keys_profile_evaluation",
+        "keys_profile_packaging",
+    )
     for pipeline_id in ("strum.fret-mapper/guitar/v1", "strum.fret-mapper/bass/v1"):
         descriptor = next(item for item in PIPELINES if item.id == pipeline_id)
         assert descriptor.private_request_fields == ("catalog_root",)

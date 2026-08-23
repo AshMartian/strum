@@ -306,6 +306,7 @@ PIPELINES = (
             "fallback_audio_role",
             "required_difficulty",
         ),
+        training_requirements=("profile_evaluation", "profile_packaging"),
     ),
     PipelineDescriptor(
         id="bass.onset-fret/v1",
@@ -334,6 +335,7 @@ PIPELINES = (
             "fallback_audio_role",
             "required_difficulty",
         ),
+        training_requirements=("bass_profile_evaluation", "bass_profile_packaging"),
     ),
     PipelineDescriptor(
         id="keys.onset-fret/v1",
@@ -362,6 +364,7 @@ PIPELINES = (
             "fallback_audio_role",
             "required_difficulty",
         ),
+        training_requirements=("keys_profile_evaluation", "keys_profile_packaging"),
     ),
     PipelineDescriptor(
         id="chart_transform.five_lane/v1",
@@ -441,6 +444,7 @@ PIPELINES = (
             "fallback_audio_role",
             "required_difficulty",
         ),
+        training_requirements=("drums_chart_execution_profile",),
     ),
     *(
         PipelineDescriptor(
