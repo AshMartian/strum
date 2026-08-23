@@ -650,13 +650,16 @@ descriptors carry a `strum-planned-training-contract/v1` with
 `training_status: planned`, a machine-readable ordered set of required STRUM
 stages, and `execution.status: not_available`. Pro Guitar/Bass task views
 select only the exact `PART REAL_GUITAR` / `PART REAL_GUITAR_22` or
-`PART REAL_BASS` / `PART REAL_BASS_22` identities; a future target encoder
-must retain the source-track variant rather than merge it into a five-lane
-label. Pro Keys task views require Expert and select only `PART REAL_KEYS_X`:
-the `E`, `M`, and `H` tracks are not accidental training inputs. No Pro
-descriptor has a train schema, checkpoint profile, inference capability, or
-chart handler until its declared decoder, event model, held-out evaluator,
-profile package, and chart execution stages are implemented and validated.
+`PART REAL_BASS` / `PART REAL_BASS_22` identities. Prepare materializes a
+path-free `strum-pro-target-task-manifest/v1`: it decodes Expert string, fret,
+duration, technique, and standard-versus-`_22` variant targets without ever
+mapping them to five lanes. Pro Keys preparation likewise decodes only
+`PART REAL_KEYS_X` pitches, durations, channels, and range shifts; `E`, `M`,
+and `H` are not accidental inputs. A malformed or unsupported REAL_* MIDI
+source is excluded explicitly. No Pro descriptor has a train schema,
+checkpoint profile, inference capability, or chart handler until its audio
+preprocessor, event model, held-out evaluator, profile package, and chart
+execution stages are implemented and validated.
 
 Keys has the same narrow experiment boundary: `keys.onset-fret/v1` revalidates
 the dedicated `keys_onset_fret` task view, whose label schema selects only
@@ -912,6 +915,15 @@ for each song (for example `PART VOCALS`, `PART REAL_GUITAR`, or
 semantics rather than inferring track conventions from its own source tree.
 STRUM revalidates both declarations against the catalog before resolving the
 ephemeral managed paths. The view never records an OCTAVE source path.
+
+Pro tasks additionally pass through `src.pro_target_manifest` during worker
+Prepare. The resulting `strum-pro-target-task-manifest/v1` embeds only the
+immutable catalog task view plus decoded label events. At train time the
+decoder revalidates catalog lineage and re-derives every target from the
+managed MIDI asset, so edited target JSON, drifted MIDI, invalid note pairing,
+unsupported Pro technique channels, or a standard-track fret above 17 cannot
+silently become training data. This closes the label-decoding gap only; it does
+not create a Pro trainer or auto-chart profile.
 
 ```bash
 # Any chart/audio family: only Expert coverage and allowed catalog records.

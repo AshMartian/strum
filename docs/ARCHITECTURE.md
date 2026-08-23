@@ -393,11 +393,14 @@ The Pro descriptors also expose a `strum-planned-training-contract/v1`: exact
 REAL_* source-track identities, required Expert label semantics, ordered
 missing stages, and an explicit `execution.status: not_available`. Pro Keys
 accepts only `PART REAL_KEYS_X` for the Expert path; Pro Guitar/Bass retain
-the standard versus `_22` source variant for their future encoder. OCTAVE can
-render those facts directly rather than treating a planned descriptor as a
-disabled version of a five-lane model. Section descriptors now expose their
-real catalog worker while retaining evaluation, profile-packaging, and runtime
-integration requirements.
+the standard versus `_22` source variant in a worker-produced,
+`strum-pro-target-task-manifest/v1` target view. STRUM decodes those immutable
+catalog assets into exact string/fret/technique or Pro Keys pitch/range-shift
+events and re-derives them before a future trainer may consume the view. This
+is a label preparation stage, not a profile: OCTAVE must still treat Pro
+execution as unavailable. Section descriptors now expose their real catalog
+worker while retaining evaluation, profile-packaging, and runtime integration
+requirements.
 
 The learned five-lane difficulty transform can be prepared as chart-only or
 with the bounded `rms_onset_v1` catalog-audio baseline. Audio conditioning is

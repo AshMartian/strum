@@ -295,9 +295,9 @@ def test_fret_mapper_pipelines_advertise_strict_worker_training(
 @pytest.mark.parametrize(
     ("pipeline_id", "required_gap"),
     [
-        ("strum.instrument-chart/pro-guitar/v1", "pro_string_fret_target_encoder/v1"),
+        ("strum.instrument-chart/pro-guitar/v1", "pro_guitar_audio_preprocessor/v1"),
         ("strum.instrument-chart/pro-bass/v1", "pro_bass_sequence_trainer/v1"),
-        ("strum.instrument-chart/pro-keys/v1", "pro_keys_pitch_target_encoder/v1"),
+        ("strum.instrument-chart/pro-keys/v1", "pro_keys_audio_preprocessor/v1"),
     ],
 )
 def test_prepare_only_pro_pipelines_publish_their_actual_gaps(

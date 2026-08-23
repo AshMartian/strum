@@ -52,6 +52,10 @@ from src.model_bundle import (
     ModelBundle,
     load_model_bundle,
 )
+from src.pro_target_manifest import (
+    build_catalog_pro_target_manifest,
+    write_catalog_pro_target_manifest,
+)
 from src.song_source_catalog import (
     AUDIO_ROLES,
     CATALOG_FILENAME,
@@ -258,8 +262,6 @@ PLANNED_TRAINING_REQUIREMENTS: dict[str, tuple[str, ...]] = {
         "vocal_chart_execution/v1",
     ),
     "pro_guitar": (
-        "pro_string_fret_target_encoder/v1",
-        "pro_string_fret_track_variant_encoder/v1",
         "pro_guitar_audio_preprocessor/v1",
         "pro_guitar_sequence_trainer/v1",
         "pro_guitar_held_out_evaluation/v1",
@@ -267,8 +269,6 @@ PLANNED_TRAINING_REQUIREMENTS: dict[str, tuple[str, ...]] = {
         "pro_guitar_chart_execution/v1",
     ),
     "pro_bass": (
-        "pro_string_fret_target_encoder/v1",
-        "pro_string_fret_track_variant_encoder/v1",
         "pro_bass_audio_preprocessor/v1",
         "pro_bass_sequence_trainer/v1",
         "pro_bass_held_out_evaluation/v1",
@@ -276,8 +276,6 @@ PLANNED_TRAINING_REQUIREMENTS: dict[str, tuple[str, ...]] = {
         "pro_bass_chart_execution/v1",
     ),
     "pro_keys": (
-        "pro_keys_expert_track_decoder/v1",
-        "pro_keys_pitch_target_encoder/v1",
         "pro_keys_audio_preprocessor/v1",
         "pro_keys_sequence_trainer/v1",
         "pro_keys_held_out_evaluation/v1",
@@ -344,6 +342,7 @@ PRO_TRAINING_CONTRACTS: dict[str, dict[str, object]] = {
                 "pro_technique_events",
             ],
         },
+        "prepared_target_encoding": "strum-pro-midi-target-decoder/v1",
         "required_stages": list(PLANNED_TRAINING_REQUIREMENTS["pro_guitar"]),
         "execution": {"status": "not_available", "inference_capability": None},
     },
@@ -362,6 +361,7 @@ PRO_TRAINING_CONTRACTS: dict[str, dict[str, object]] = {
                 "pro_technique_events",
             ],
         },
+        "prepared_target_encoding": "strum-pro-midi-target-decoder/v1",
         "required_stages": list(PLANNED_TRAINING_REQUIREMENTS["pro_bass"]),
         "execution": {"status": "not_available", "inference_capability": None},
     },
@@ -381,6 +381,7 @@ PRO_TRAINING_CONTRACTS: dict[str, dict[str, object]] = {
                 "expert_difficulty_track",
             ],
         },
+        "prepared_target_encoding": "strum-pro-midi-target-decoder/v1",
         "required_stages": list(PLANNED_TRAINING_REQUIREMENTS["pro_keys"]),
         "execution": {"status": "not_available", "inference_capability": None},
     },
@@ -663,6 +664,14 @@ PIPELINES = (
                         "label_tracks": CATALOG_TASK_LABEL_SCHEMAS[task_kind].get(
                             "track_names",
                             CATALOG_TASK_LABEL_SCHEMAS[task_kind].get("track_prefixes", []),
+                        ),
+                        **(
+                            {
+                                "prepared_task_view_format": "strum-pro-target-task-manifest/v1",
+                                "prepared_target_encoding": "strum-pro-midi-target-decoder/v1",
+                            }
+                            if task_kind in PRO_TRAINING_CONTRACTS
+                            else {}
                         ),
                     }
                     if task_kind in {*PRO_TRAINING_CONTRACTS, "vocals"}
@@ -2802,6 +2811,31 @@ def prepare_dataset_request(request_path: Path) -> dict[str, object]:
         written = result["manifest_path"]
         record_count = result["record_count"]
         task_view_id = result["task_view_id"]
+    elif pipeline_id in {
+        "strum.instrument-chart/pro-guitar/v1",
+        "strum.instrument-chart/pro-bass/v1",
+        "strum.instrument-chart/pro-keys/v1",
+    }:
+        task_kind = next(
+            (kind for kind, value in CATALOG_TASK_PIPELINES.items() if value == pipeline_id), None
+        )
+        if task_kind is None:
+            raise WorkerRequestError("pipeline has no Pro catalog task adapter")
+        permitted = {
+            "audio_role",
+            "fallback_audio_role",
+            "disable_fallback",
+            "required_difficulty",
+            "split_ratios",
+            "split_seed",
+            "preprocessing",
+        }
+        if set(options) - permitted:
+            raise WorkerRequestError("unsupported Pro catalog preparation option")
+        manifest = build_catalog_pro_target_manifest(catalog_root, task_kind, **options)
+        written = write_catalog_pro_target_manifest(output, manifest)
+        record_count = manifest["summary"]["record_count"]
+        task_view_id = _task_view_digest(manifest)
     else:
         task_kind = next(
             (kind for kind, value in CATALOG_TASK_PIPELINES.items() if value == pipeline_id), None
