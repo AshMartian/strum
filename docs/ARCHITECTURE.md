@@ -20,7 +20,7 @@ fails closed to the profiles declared by a validated model bundle:
 | Bass onset/fret | Worker-trainable; evaluated profile executable | Revalidated `PART BASS` task views and distinct `bass.onset`/`bass.fret` components; only an evaluated `bass.neural-v1-expert/v1` profile writes Expert Bass |
 | Keys onset/fret | Worker-trainable; evaluated profile executable | Revalidated `PART KEYS` task views and distinct `keys.onset`/`keys.fret` components; only an evaluated `keys.neural-v1-expert/v1` profile writes Expert Keys |
 | `drums.onset-classifier-evaluation/v1` | Executable evaluator only | Prepared V2 onset windows → eight class probabilities; explicitly not a chart handler |
-| Pro Guitar, Pro Bass, Pro Keys | Catalog-ready task views, training planned | No worker trainer or deployable profile; exact REAL_* labels and structured missing stages are declared |
+| Pro Guitar, Pro Bass, Pro Keys | Catalog-ready exact-REAL_* known-event candidates | Raw candidate learns attributes at supplied reference event times only; no event proposal, sequence decoder, profile, or deployable chart handler |
 | Vocals, Guitar/Bass mapper, Guitar/Bass section | Worker-trainable experiments | Vocal activity/pitch, phrase-boundary, lyric, and lead talky components are distinct and non-deployable; no profile without remaining composition/evaluation/runtime gates |
 | Legacy batch pipeline | Research / compatibility scripts | Not a worker execution handler |
 
@@ -410,7 +410,10 @@ Each discovered pipeline reports independent `preparation_status`,
 task view useful without overstating worker training or deployment support.
 The Pro descriptors also expose a `strum-planned-training-contract/v1`: exact
 REAL_* source-track identities, required Expert label semantics, ordered
-missing stages, and an explicit `execution.status: not_available`. Pro Keys
+missing stages, and an explicit `execution.status: not_available`. Their one
+available worker experiment is `strum-pro-known-reference-event-window/v1`: it
+evaluates exact attributes only at an authored reference event, and cannot
+propose events or decode/write a chart. Pro Keys
 accepts only `PART REAL_KEYS_X` for the Expert path; Pro Guitar/Bass retain
 the standard versus `_22` source variant in a worker-produced,
 `strum-pro-target-task-manifest/v1` target view. STRUM decodes those immutable

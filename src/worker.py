@@ -298,19 +298,22 @@ PLANNED_TRAINING_REQUIREMENTS: dict[str, tuple[str, ...]] = {
         "vocal_chart_execution/v1",
     ),
     "pro_guitar": (
-        "pro_guitar_sequence_trainer/v1",
+        "pro_guitar_free_running_event_proposal/v1",
+        "pro_guitar_variant_aware_sequence_decoder/v1",
         "pro_guitar_held_out_evaluation/v1",
         "pro_guitar_profile_package/v1",
         "pro_guitar_chart_execution/v1",
     ),
     "pro_bass": (
-        "pro_bass_sequence_trainer/v1",
+        "pro_bass_free_running_event_proposal/v1",
+        "pro_bass_variant_aware_sequence_decoder/v1",
         "pro_bass_held_out_evaluation/v1",
         "pro_bass_profile_package/v1",
         "pro_bass_chart_execution/v1",
     ),
     "pro_keys": (
-        "pro_keys_sequence_trainer/v1",
+        "pro_keys_free_running_event_proposal/v1",
+        "pro_keys_chromatic_sequence_decoder/v1",
         "pro_keys_held_out_evaluation/v1",
         "pro_keys_profile_package/v1",
         "pro_keys_chart_execution/v1",
@@ -741,7 +744,7 @@ def _vocal_training_contract_for_output(template: object) -> dict[str, object]:
 PRO_TRAINING_CONTRACTS: dict[str, dict[str, object]] = {
     "pro_guitar": {
         "format": "strum-planned-training-contract/v1",
-        "training_status": "planned",
+        "training_status": "experiment_only",
         "label_source": {
             "schema_id": "pro-string-fret-midi/v1",
             "selection": "exact-real-track-identities/v1",
@@ -760,14 +763,24 @@ PRO_TRAINING_CONTRACTS: dict[str, dict[str, object]] = {
         "available_preprocessing": {
             "id": "pro-logmel-event-windows/v1",
             "target_binding": "exact-real-track-event-windows/v1",
-            "deployment_status": "research_cache_only",
+            "deployment_status": "known_event_candidate_only",
         },
+        "available_experiment_stages": [
+            {
+                "id": "pro_guitar_known_event_attribute_candidate/v1",
+                "input_contract": "strum-pro-known-reference-event-window/v1",
+                "outputs": ["string_fret_technique", "track_variant"],
+                "free_running_event_proposal": False,
+                "sequence_decoding": False,
+                "chart_execution": False,
+            }
+        ],
         "required_stages": list(PLANNED_TRAINING_REQUIREMENTS["pro_guitar"]),
         "execution": {"status": "not_available", "inference_capability": None},
     },
     "pro_bass": {
         "format": "strum-planned-training-contract/v1",
-        "training_status": "planned",
+        "training_status": "experiment_only",
         "label_source": {
             "schema_id": "pro-string-fret-midi/v1",
             "selection": "exact-real-track-identities/v1",
@@ -784,14 +797,24 @@ PRO_TRAINING_CONTRACTS: dict[str, dict[str, object]] = {
         "available_preprocessing": {
             "id": "pro-logmel-event-windows/v1",
             "target_binding": "exact-real-track-event-windows/v1",
-            "deployment_status": "research_cache_only",
+            "deployment_status": "known_event_candidate_only",
         },
+        "available_experiment_stages": [
+            {
+                "id": "pro_bass_known_event_attribute_candidate/v1",
+                "input_contract": "strum-pro-known-reference-event-window/v1",
+                "outputs": ["string_fret_technique", "track_variant"],
+                "free_running_event_proposal": False,
+                "sequence_decoding": False,
+                "chart_execution": False,
+            }
+        ],
         "required_stages": list(PLANNED_TRAINING_REQUIREMENTS["pro_bass"]),
         "execution": {"status": "not_available", "inference_capability": None},
     },
     "pro_keys": {
         "format": "strum-planned-training-contract/v1",
-        "training_status": "planned",
+        "training_status": "experiment_only",
         "label_source": {
             "schema_id": "pro-keys-pitch-midi/v1",
             "selection": "exact-real-track-identities/v1",
@@ -809,8 +832,18 @@ PRO_TRAINING_CONTRACTS: dict[str, dict[str, object]] = {
         "available_preprocessing": {
             "id": "pro-logmel-event-windows/v1",
             "target_binding": "exact-real-track-event-windows/v1",
-            "deployment_status": "research_cache_only",
+            "deployment_status": "known_event_candidate_only",
         },
+        "available_experiment_stages": [
+            {
+                "id": "pro_keys_known_event_attribute_candidate/v1",
+                "input_contract": "strum-pro-known-reference-event-window/v1",
+                "outputs": ["chromatic_pitch_set", "range_shift_state"],
+                "free_running_event_proposal": False,
+                "sequence_decoding": False,
+                "chart_execution": False,
+            }
+        ],
         "required_stages": list(PLANNED_TRAINING_REQUIREMENTS["pro_keys"]),
         "execution": {"status": "not_available", "inference_capability": None},
     },
@@ -845,6 +878,21 @@ VOCALS_ACTIVITY_TRAIN_SCHEMA = _object_schema(
         "max_train_batches": {"type": "integer", "minimum": 0, "default": 0},
         "max_val_batches": {"type": "integer", "minimum": 0, "default": 0},
         "seed": {"type": "integer", "minimum": 0, "default": 20260822},
+    },
+    required=("model_id",),
+)
+PRO_EVENT_ATTRIBUTE_TRAIN_SCHEMA = _object_schema(
+    {
+        "model_id": {"type": "string"},
+        "epochs": {"type": "integer", "minimum": 1, "default": 25},
+        "batch_size": {"type": "integer", "minimum": 1, "default": 32},
+        "learning_rate": {"type": "number", "exclusiveMinimum": 0, "default": 0.0003},
+        "device": {"type": "string", "enum": ["auto", "cuda", "mps", "cpu"], "default": "auto"},
+        "limit_songs": {"type": "integer", "minimum": 0, "default": 0},
+        "max_train_batches": {"type": "integer", "minimum": 0, "default": 0},
+        "max_val_batches": {"type": "integer", "minimum": 0, "default": 0},
+        "seed": {"type": "integer", "minimum": 0, "default": 20260822},
+        "channels": {"type": "integer", "minimum": 1, "default": 48},
     },
     required=("model_id",),
 )
@@ -1256,7 +1304,9 @@ PIPELINES = (
                 }
             ),
             train_schema=(
-                FRET_MAPPER_TRAIN_SCHEMA
+                PRO_EVENT_ATTRIBUTE_TRAIN_SCHEMA
+                if task_kind in PRO_TRAINING_CONTRACTS
+                else FRET_MAPPER_TRAIN_SCHEMA
                 if task_kind.startswith("fret_mapper_")
                 else SECTION_TRAIN_SCHEMA
                 if task_kind.startswith("section_")
@@ -1274,13 +1324,18 @@ PIPELINES = (
                 # pseudo-component names.
                 else ()
                 if task_kind in INSTRUMENT_CHART_TRAINING_CONTRACTS
+                else (f"pro.{task_kind.removeprefix('pro_')}.event_attributes",)
+                if task_kind in PRO_TRAINING_CONTRACTS
                 else (task_kind,)
             ),
             inference_capability=None,
             status="catalog_ready",
             preparation_status="available",
             training_status=(
-                "available" if task_kind.startswith(("fret_mapper_", "section_")) else "planned"
+                "available"
+                if task_kind in PRO_TRAINING_CONTRACTS
+                or task_kind.startswith(("fret_mapper_", "section_"))
+                else "planned"
             ),
             # Every catalog task view requires a private catalog root during
             # preparation.  Training-only private fields must never be
@@ -3554,6 +3609,9 @@ def _read_train_request(request_path: Path) -> dict[str, Any]:
         "strum.fret-mapper/bass/v1",
         "strum.section-classifier/guitar/v1",
         "strum.section-classifier/bass/v1",
+        "strum.instrument-chart/pro-guitar/v1",
+        "strum.instrument-chart/pro-bass/v1",
+        "strum.instrument-chart/pro-keys/v1",
     }:
         if set(raw) != base_fields | {"catalog_root"}:
             raise WorkerRequestError("catalog-backed training request has unsupported fields")
@@ -4104,6 +4162,54 @@ def run_training_request(request_path: Path) -> dict[str, object]:
         except (KeysTrainingError, OSError, TypeError, ValueError) as error:
             raise WorkerRequestError(
                 "Keys training request failed validation or execution"
+            ) from error
+        return {
+            "status": "completed",
+            "pipeline_id": pipeline_id,
+            "model_id": preflight["model_id"],
+            "bundle_name": Path(result["bundle_dir"]).name,
+            "manifest_sha256": preflight["manifest_sha256"],
+            "components": preflight["components"],
+            "metrics": result["metrics"],
+            "deployment_status": result["deployment_status"],
+        }
+    if pipeline_id in {
+        "strum.instrument-chart/pro-guitar/v1",
+        "strum.instrument-chart/pro-bass/v1",
+        "strum.instrument-chart/pro-keys/v1",
+    }:
+        from src.pro_event_worker_training import (  # noqa: PLC0415
+            ProEventTrainingError,
+            ProEventTrainingOptions,
+            run_catalog_pro_event_training,
+        )
+
+        if "parent_bundle" in request:
+            raise WorkerRequestError("Pro event candidate training does not accept parent_bundle")
+        catalog_root = request.get("catalog_root")
+        if not isinstance(catalog_root, str) or not catalog_root:
+            raise WorkerRequestError(
+                "Pro event candidate training requires worker-local catalog_root"
+            )
+        try:
+            options = ProEventTrainingOptions.from_mapping(request["options"])
+            revision, _dirty = _revision()
+            result = run_catalog_pro_event_training(
+                task_view_path=Path(request["task_view"]),
+                output_dir=Path(request["output"]),
+                catalog_root=Path(catalog_root),
+                pipeline_id=pipeline_id,
+                options=options,
+                strum_revision=revision,
+            )
+            preflight = preflight_bundle(
+                result["bundle_dir"], required_components=descriptor.checkpoint_outputs
+            )
+        except (BundleValidationError, CatalogValidationError):
+            raise
+        except (ProEventTrainingError, OSError, TypeError, ValueError) as error:
+            raise WorkerRequestError(
+                "Pro event candidate training request failed validation or execution"
             ) from error
         return {
             "status": "completed",

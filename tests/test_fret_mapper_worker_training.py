@@ -302,18 +302,18 @@ def test_fret_mapper_pipelines_advertise_strict_worker_training(
 @pytest.mark.parametrize(
     ("pipeline_id", "required_gap"),
     [
-        ("strum.instrument-chart/pro-guitar/v1", "pro_guitar_sequence_trainer/v1"),
-        ("strum.instrument-chart/pro-bass/v1", "pro_bass_sequence_trainer/v1"),
-        ("strum.instrument-chart/pro-keys/v1", "pro_keys_sequence_trainer/v1"),
+        ("strum.instrument-chart/pro-guitar/v1", "pro_guitar_free_running_event_proposal/v1"),
+        ("strum.instrument-chart/pro-bass/v1", "pro_bass_free_running_event_proposal/v1"),
+        ("strum.instrument-chart/pro-keys/v1", "pro_keys_free_running_event_proposal/v1"),
     ],
 )
-def test_prepare_only_pro_pipelines_publish_their_actual_gaps(
+def test_pro_pipelines_publish_known_event_candidate_and_remaining_chart_gaps(
     pipeline_id: str, required_gap: str
 ) -> None:
     descriptor = next(item for item in PIPELINES if item.id == pipeline_id)
 
     assert descriptor.preparation_status == "available"
-    assert descriptor.training_status == "planned"
-    assert descriptor.train_schema is None
+    assert descriptor.training_status == "available"
+    assert descriptor.train_schema is not None
     assert required_gap in descriptor.training_requirements
     assert required_gap in descriptor.as_json()["training_requirements"]

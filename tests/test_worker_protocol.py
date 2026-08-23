@@ -21,6 +21,7 @@ from src.worker import (
     PROTOCOL_VERSION,
     WorkerRequestError,
     _chart_result_contract,
+    _read_train_request,
     _revision,
     _run_without_legacy_output,
     _runtime_payload,
@@ -309,21 +310,21 @@ def test_pipeline_descriptors_advertise_safe_host_orchestration_requirements() -
             "pro_guitar",
             "pro-string-fret-midi/v1",
             ["PART REAL_GUITAR", "PART REAL_GUITAR_22"],
-            {"pro_guitar_sequence_trainer/v1", "pro_guitar_chart_execution/v1"},
+            {"pro_guitar_free_running_event_proposal/v1", "pro_guitar_chart_execution/v1"},
         ),
         (
             "strum.instrument-chart/pro-bass/v1",
             "pro_bass",
             "pro-string-fret-midi/v1",
             ["PART REAL_BASS", "PART REAL_BASS_22"],
-            {"pro_bass_sequence_trainer/v1", "pro_bass_chart_execution/v1"},
+            {"pro_bass_free_running_event_proposal/v1", "pro_bass_chart_execution/v1"},
         ),
         (
             "strum.instrument-chart/pro-keys/v1",
             "pro_keys",
             "pro-keys-pitch-midi/v1",
             ["PART REAL_KEYS_X"],
-            {"pro_keys_sequence_trainer/v1", "pro_keys_chart_execution/v1"},
+            {"pro_keys_free_running_event_proposal/v1", "pro_keys_chart_execution/v1"},
         ),
     ],
 )
@@ -336,8 +337,9 @@ def test_pro_descriptors_publish_non_executable_real_midi_training_contracts(
 ) -> None:
     descriptor = next(item for item in PIPELINES if item.id == pipeline_id)
 
-    assert descriptor.training_status == "planned"
-    assert descriptor.train_schema is None
+    assert descriptor.training_status == "available"
+    assert descriptor.train_schema is not None
+    assert descriptor.train_schema["required"] == ["model_id"]
     assert descriptor.inference_capability is None
     assert descriptor.catalog_requirements["label_schema"] == schema_id
     assert descriptor.catalog_requirements["label_tracks"] == tracks
@@ -357,16 +359,20 @@ def test_pro_descriptors_publish_non_executable_real_midi_training_contracts(
     assert contract == {
         **contract,
         "format": "strum-planned-training-contract/v1",
-        "training_status": "planned",
+        "training_status": "experiment_only",
         "execution": {"status": "not_available", "inference_capability": None},
     }
     assert contract["label_source"]["schema_id"] == schema_id
     assert contract["label_source"]["tracks"] == tracks
     assert contract["prepared_target_encoding"] == "strum-pro-midi-target-decoder/v1"
+    stage = contract["available_experiment_stages"][0]
+    assert stage["free_running_event_proposal"] is False
+    assert stage["sequence_decoding"] is False
+    assert stage["chart_execution"] is False
     assert contract["available_preprocessing"] == {
         "id": "pro-logmel-event-windows/v1",
         "target_binding": "exact-real-track-event-windows/v1",
-        "deployment_status": "research_cache_only",
+        "deployment_status": "known_event_candidate_only",
     }
     assert set(contract["required_stages"]) == set(descriptor.training_requirements)
     assert required_stages <= set(contract["required_stages"])
@@ -452,6 +458,34 @@ def test_generic_bass_and_keys_descriptors_publish_exact_v1_bridges_without_alia
             "execution": "available_after_profile_validation",
         }
     ]
+
+
+@pytest.mark.parametrize(
+    "pipeline_id",
+    (
+        "strum.instrument-chart/pro-guitar/v1",
+        "strum.instrument-chart/pro-bass/v1",
+        "strum.instrument-chart/pro-keys/v1",
+    ),
+)
+def test_pro_candidate_request_requires_the_private_catalog_root(
+    tmp_path: Path, pipeline_id: str
+) -> None:
+    request = tmp_path / "pro-train.json"
+    request.write_text(
+        json.dumps(
+            {
+                "pipeline_id": pipeline_id,
+                "task_view": "/private/pro-targets.json",
+                "output": "/private/output",
+                "catalog_root": "/private/catalog",
+                "options": {"model_id": "pro-known-event-candidate"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert _read_train_request(request)["catalog_root"] == "/private/catalog"
 
 
 def test_legacy_inference_output_is_not_exposed_to_worker_clients(

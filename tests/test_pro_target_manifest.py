@@ -12,6 +12,7 @@ import pytest
 
 from src.catalog_task_manifest import build_catalog_task_manifest
 from src.pro_audio_preprocessing import _tempo_segments, _tick_seconds, prepare_pro_audio_windows
+from src.pro_event_worker_training import _source_inputs
 from src.pro_target_manifest import (
     PRO_AUDIO_PREPROCESSING_ID,
     PRO_TARGET_MANIFEST_FORMAT,
@@ -189,7 +190,9 @@ def test_pro_targets_are_decoded_from_exact_tracks_without_path_leaks(
     assert resolved[0]["targets"] == manifest["songs"][0]["targets"]
 
 
-def test_pro_targets_exclude_invalid_standard_fret_and_remain_non_trainable(tmp_path: Path) -> None:
+def test_pro_targets_exclude_invalid_standard_fret_before_candidate_training(
+    tmp_path: Path,
+) -> None:
     _catalog(tmp_path, standard_fret=22)
 
     manifest = build_catalog_pro_target_manifest(tmp_path, "pro_guitar")
@@ -199,8 +202,8 @@ def test_pro_targets_exclude_invalid_standard_fret_and_remain_non_trainable(tmp_
     assert manifest["summary"]["exclusion_reason_counts"] == {
         "Pro string target uses an unsupported technique or fret": 1
     }
-    # The standard task contract continues to advertise no trainer; decoding
-    # labels is not a claim that STRUM can generate playable Pro charts.
+    # Decoding labels is not a claim that STRUM can generate playable Pro
+    # charts; even the known-event candidate receives no malformed targets.
     assert build_catalog_task_manifest(tmp_path, "pro_guitar")["task"]["kind"] == "pro_guitar"
 
 
@@ -210,6 +213,22 @@ def test_pro_target_resolution_rejects_tampering_or_catalog_drift(tmp_path: Path
     manifest["songs"][0]["targets"][0]["events"][0]["pitch"] = 61
     with pytest.raises(CatalogValidationError, match="targets do not match"):
         resolve_catalog_pro_target_manifest_songs(manifest, tmp_path)
+
+
+def test_pro_candidate_experiment_lineage_uses_target_view_hashes_without_paths(
+    tmp_path: Path,
+) -> None:
+    _catalog(tmp_path)
+    manifest = build_catalog_pro_target_manifest(tmp_path, "pro_guitar")
+
+    sources = _source_inputs(manifest)
+
+    assert len(sources) == 1
+    assert sources[0]["audio_sha256"] == manifest["task_view"]["songs"][0]["audio"]["sha256"]
+    assert (
+        sources[0]["notes_midi_sha256"] == manifest["task_view"]["songs"][0]["notes_midi"]["sha256"]
+    )
+    assert str(tmp_path) not in json.dumps(sources)
 
 
 def test_worker_prepare_returns_a_decoded_pro_target_view(tmp_path: Path) -> None:
