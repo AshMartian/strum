@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 import soundfile as sf
 
+import src.vocal_profile_contract as vocal_profile_contract
 from scripts.preprocess_vocal_lyric_alignment import (
     TOKEN_TO_ID,
     prepare_vocal_lyric_alignment,
@@ -344,6 +345,43 @@ def test_vocals_pipeline_exposes_strict_private_catalog_training_contract() -> N
         "inference_capability": None,
         "required_handler": "vocal_chart_profile_handler/v1",
         "fallback": "forbidden",
+    }
+
+
+def test_vocal_descriptor_rederives_package_policy_identity_at_output_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    descriptor = next(item for item in PIPELINES if item.id == "strum.instrument-chart/vocals/v1")
+    expected = vocal_profile_contract.vocal_profile_quality_policy_identity()
+    monkeypatch.setattr(
+        vocal_profile_contract,
+        "VOCAL_PROFILE_QUALITY_POLICY_FORMAT",
+        "mutated-policy-format/v999",
+        raising=False,
+    )
+    monkeypatch.setattr(
+        vocal_profile_contract,
+        "VOCAL_PROFILE_QUALITY_POLICY_SHA256",
+        "f" * 64,
+        raising=False,
+    )
+
+    packaging = descriptor.as_json()["training_contract"]["packaging_contract"]
+    evaluation = descriptor.as_json()["training_contract"]["held_out_evaluation_contract"]
+
+    assert packaging["quality_policy"] == {
+        **expected,
+        "failure_behavior": "reject-package/v1",
+        "verification": "recompute-outcomes-do-not-trust-reported-pass/v1",
+    }
+    assert packaging["quality_policy_sha256"] == expected["sha256"]
+    assert packaging["quality_policy_definition"] == (
+        vocal_profile_contract.vocal_profile_quality_policy_definition()
+    )
+    assert evaluation["evidence"]["quality_policy"] == {
+        **expected,
+        "outcomes": "strum-vocal-profile-quality-outcomes/v1",
+        "aggregation": "all-required-metrics-pass/v1",
     }
 
 

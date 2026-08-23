@@ -72,7 +72,6 @@ from src.vocal_harmony_catalog import (
     write_vocal_harmony_source_task,
 )
 from src.vocal_profile_contract import (
-    VOCAL_PROFILE_QUALITY_POLICY_SHA256,
     vocal_profile_quality_policy_definition,
     vocal_profile_quality_policy_identity,
 )
@@ -135,6 +134,13 @@ class PipelineDescriptor:
         data["training_requirements"] = list(self.training_requirements)
         if data["training_contract"] is None:
             data.pop("training_contract")
+        elif self.id == "strum.instrument-chart/vocals/v1":
+            # The policy identity must be re-derived from the canonical Vocal
+            # policy bytes at output time.  Do not leak a process-mutable
+            # global alias into an OCTAVE-visible descriptor.
+            data["training_contract"] = _vocal_training_contract_for_output(
+                data["training_contract"]
+            )
         return data
 
 
@@ -608,7 +614,7 @@ VOCALS_TRAINING_CONTRACT: dict[str, object] = {
         # duplicate thresholds.  This is still a planned package contract;
         # no package writer or Vocal chart handler is registered here.
         "quality_policy_definition": vocal_profile_quality_policy_definition(),
-        "quality_policy_sha256": VOCAL_PROFILE_QUALITY_POLICY_SHA256,
+        "quality_policy_sha256": vocal_profile_quality_policy_identity()["sha256"],
         "raw_component_bundle_deployment_status": "not_deployable",
     },
     "required_stages": list(PLANNED_TRAINING_REQUIREMENTS["vocals"]),
@@ -619,6 +625,45 @@ VOCALS_TRAINING_CONTRACT: dict[str, object] = {
         "fallback": "forbidden",
     },
 }
+
+
+def _vocal_training_contract_for_output(template: object) -> dict[str, object]:
+    """Return the planned Vocal descriptor with canonical policy identity.
+
+    Pipeline descriptors are long-lived module objects, while OCTAVE-visible
+    output is serialized later.  Rebuild every policy-bearing output field at
+    serialization time so it is derived by the shared identity helper rather
+    than any process-mutable module alias or stale import-time digest.
+    """
+    if not isinstance(template, dict):  # pragma: no cover - static descriptor guard
+        raise RuntimeError("Vocal training contract template must be an object")
+
+    # ``asdict`` has already recursively copied the descriptor, but copy the
+    # JSON-shaped template here too so callers of this helper cannot mutate a
+    # descriptor's static data through a returned object.
+    contract = json.loads(json.dumps(template))
+    identity = vocal_profile_quality_policy_identity()
+
+    evaluation = contract["held_out_evaluation_contract"]
+    packaging = contract["packaging_contract"]
+    if not isinstance(evaluation, dict) or not isinstance(packaging, dict):  # pragma: no cover
+        raise RuntimeError("Vocal training contract template is invalid")
+    evaluation_evidence = evaluation["evidence"]
+    if not isinstance(evaluation_evidence, dict):  # pragma: no cover
+        raise RuntimeError("Vocal evaluation contract template is invalid")
+    evaluation_evidence["quality_policy"] = {
+        **identity,
+        "outcomes": "strum-vocal-profile-quality-outcomes/v1",
+        "aggregation": "all-required-metrics-pass/v1",
+    }
+    packaging["quality_policy"] = {
+        **identity,
+        "failure_behavior": "reject-package/v1",
+        "verification": "recompute-outcomes-do-not-trust-reported-pass/v1",
+    }
+    packaging["quality_policy_definition"] = vocal_profile_quality_policy_definition()
+    packaging["quality_policy_sha256"] = identity["sha256"]
+    return contract
 
 
 PRO_TRAINING_CONTRACTS: dict[str, dict[str, object]] = {

@@ -26,7 +26,6 @@ from src.vocal_harmony_catalog import (
     HARMONY_TRACK_ROLES,
 )
 
-VOCAL_PROFILE_QUALITY_POLICY_FORMAT = "strum-vocal-profile-quality-policy/v1"
 VOCAL_HELD_OUT_REPORT_FORMAT = "strum-vocal-held-out-chart-evaluation-report/v1"
 _SHA256 = re.compile(r"^[a-f0-9]{64}$")
 _HARMONY_TRACKS = tuple(HARMONY_TRACK_ROLES)
@@ -54,58 +53,53 @@ class VocalProfileContractError(ValueError):
     """Raised when future Vocal profile evidence is incomplete or unsafe."""
 
 
-# This is intentionally a STRUM-owned, versioned policy rather than a host
-# option.  A profile package must pin the canonical content hash below and the
-# evaluator must produce every outcome; callers cannot substitute a policy
-# that drops inconvenient metrics after seeing the held-out split.
-_VOCAL_PROFILE_QUALITY_POLICY: dict[str, object] = {
-    "schema_version": 1,
-    "format": VOCAL_PROFILE_QUALITY_POLICY_FORMAT,
-    "policy_id": "vocal-chart-baseline-quality-v1",
-    "metric_requirements": {
-        "pitched_notes": {
-            "onset_f1": {"operator": "gte", "threshold": 0.80},
-            "offset_f1": {"operator": "gte", "threshold": 0.75},
-            "pitch_accuracy": {"operator": "gte", "threshold": 0.85},
-        },
-        "phrases": {
-            "start_f1": {"operator": "gte", "threshold": 0.80},
-            "end_f1": {"operator": "gte", "threshold": 0.80},
-        },
-        "lyrics": {
-            "token_error_rate": {"operator": "lte", "threshold": 0.25},
-            "timestamp_alignment_error_ms": {"operator": "lte", "threshold": 100.0},
-        },
-        "talkies": {"span_f1": {"operator": "gte", "threshold": 0.75}},
-        "harmony": {"track_specific_note_f1": {"operator": "gte", "threshold": 0.75}},
-        "assembled_chart": {
-            "valid_midi": {"operator": "equals", "threshold": True},
-            "per_track_event_coverage": {"operator": "gte", "threshold": 0.95},
-        },
-    },
-    "aggregation": {
-        "per_metric": "all-required-metrics-pass/v1",
-        "harmony": "all-selected-approved-tracks-pass/v1",
-        "assembled_chart": "lead-and-every-selected-harmony-track-pass/v1",
-        "minimum_selected_harmony_tracks": 1,
-        "threshold_selection": "policy-pinned-before-held-out-evaluation/v1",
-        "failed_or_missing_outcome": "package-rejected/v1",
-    },
-}
-
-
 def _canonical(value: object) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
 
 
-def _sha256_json(value: object) -> str:
-    return hashlib.sha256(_canonical(value).encode("utf-8")).hexdigest()
+def _vocal_profile_quality_policy_canonical_bytes() -> bytes:
+    """Return STRUM's immutable canonical Vocal policy payload.
+
+    This deliberately returns a byte literal from function code rather than
+    deriving the policy from a module-level dictionary or identity aliases.
+    The identity helper below decodes and canonicalizes it for every use, so a
+    caller that rebinds module names cannot publish a mismatched format, ID,
+    or digest.
+    """
+    return (
+        b'{"aggregation":{"assembled_chart":"lead-and-every-selected-harmony-track-pass/v1",'
+        b'"failed_or_missing_outcome":"package-rejected/v1",'
+        b'"harmony":"all-selected-approved-tracks-pass/v1",'
+        b'"minimum_selected_harmony_tracks":1,'
+        b'"per_metric":"all-required-metrics-pass/v1",'
+        b'"threshold_selection":"policy-pinned-before-held-out-evaluation/v1"},'
+        b'"format":"strum-vocal-profile-quality-policy/v1",'
+        b'"metric_requirements":{"assembled_chart":{"per_track_event_coverage":'
+        b'{"operator":"gte","threshold":0.95},"valid_midi":'
+        b'{"operator":"equals","threshold":true}},"harmony":'
+        b'{"track_specific_note_f1":{"operator":"gte","threshold":0.75}},'
+        b'"lyrics":{"timestamp_alignment_error_ms":{"operator":"lte","threshold":100.0},'
+        b'"token_error_rate":{"operator":"lte","threshold":0.25}},'
+        b'"phrases":{"end_f1":{"operator":"gte","threshold":0.8},'
+        b'"start_f1":{"operator":"gte","threshold":0.8}},'
+        b'"pitched_notes":{"offset_f1":{"operator":"gte","threshold":0.75},'
+        b'"onset_f1":{"operator":"gte","threshold":0.8},'
+        b'"pitch_accuracy":{"operator":"gte","threshold":0.85}},'
+        b'"talkies":{"span_f1":{"operator":"gte","threshold":0.75}}},'
+        b'"policy_id":"vocal-chart-baseline-quality-v1","schema_version":1}'
+    )
 
 
-_VOCAL_PROFILE_QUALITY_POLICY_CANONICAL = _canonical(_VOCAL_PROFILE_QUALITY_POLICY)
-VOCAL_PROFILE_QUALITY_POLICY_SHA256 = hashlib.sha256(
-    _VOCAL_PROFILE_QUALITY_POLICY_CANONICAL.encode("utf-8")
-).hexdigest()
+def _decoded_vocal_profile_quality_policy() -> tuple[dict[str, object], bytes]:
+    """Decode and verify the canonical bytes that define the STRUM policy."""
+    canonical_bytes = _vocal_profile_quality_policy_canonical_bytes()
+    value = json.loads(canonical_bytes.decode("utf-8"))
+    if not isinstance(value, dict):  # pragma: no cover - static payload guard
+        raise RuntimeError("STRUM Vocal quality policy must decode to an object")
+    recomputed = _canonical(value).encode("utf-8")
+    if recomputed != canonical_bytes:  # pragma: no cover - static payload guard
+        raise RuntimeError("STRUM Vocal quality policy bytes are not canonical")
+    return value, recomputed
 
 
 def vocal_profile_quality_policy_definition() -> dict[str, object]:
@@ -115,24 +109,25 @@ def vocal_profile_quality_policy_definition() -> dict[str, object]:
     module dictionary.  That prevents an in-process caller from changing
     thresholds after the policy identity has been published to a host.
     """
-    value = json.loads(_VOCAL_PROFILE_QUALITY_POLICY_CANONICAL)
-    assert isinstance(value, dict)
-    return value
+    policy, _ = _decoded_vocal_profile_quality_policy()
+    return policy
 
 
 def vocal_profile_quality_policy_identity() -> dict[str, object]:
     """Return the safe immutable identity hosts and reports must pin."""
-    # Never read identity data from the mutable module-level source object.
-    # The canonical JSON was fixed when this module loaded; decode it anew so
-    # an in-process caller cannot make the published ID disagree with the
-    # pinned policy hash.
-    policy = vocal_profile_quality_policy_definition()
+    # The full identity is derived together from decoded canonical policy
+    # bytes.  In particular, do not use a separately exported format/sha
+    # alias: callers may mutate module attributes in-process, whereas policy
+    # evidence must remain bound to the actual canonical content.
+    policy, canonical_bytes = _decoded_vocal_profile_quality_policy()
+    policy_format = policy["format"]
     policy_id = policy["policy_id"]
-    assert isinstance(policy_id, str)
+    if not isinstance(policy_format, str) or not isinstance(policy_id, str):  # pragma: no cover
+        raise RuntimeError("STRUM Vocal quality policy identity is invalid")
     return {
-        "format": VOCAL_PROFILE_QUALITY_POLICY_FORMAT,
+        "format": policy_format,
         "policy_id": policy_id,
-        "sha256": VOCAL_PROFILE_QUALITY_POLICY_SHA256,
+        "sha256": hashlib.sha256(canonical_bytes).hexdigest(),
     }
 
 

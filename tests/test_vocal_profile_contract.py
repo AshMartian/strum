@@ -176,18 +176,36 @@ def test_quality_policy_definition_is_reconstructed_from_its_pinned_content() ->
     assert fresh_copy["format"] == vocal_profile_quality_policy_identity()["format"]
 
 
-def test_quality_policy_identity_cannot_diverge_from_its_pinned_hash() -> None:
+def test_quality_policy_identity_and_package_evidence_ignore_mutated_module_aliases(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     expected = vocal_profile_quality_policy_identity()
-    original_id = vocal_profile_contract._VOCAL_PROFILE_QUALITY_POLICY["policy_id"]
-    try:
-        vocal_profile_contract._VOCAL_PROFILE_QUALITY_POLICY["policy_id"] = "mutated-policy-id"
+    monkeypatch.setattr(
+        vocal_profile_contract,
+        "VOCAL_PROFILE_QUALITY_POLICY_FORMAT",
+        "mutated-policy-format/v999",
+        raising=False,
+    )
+    monkeypatch.setattr(
+        vocal_profile_contract,
+        "VOCAL_PROFILE_QUALITY_POLICY_SHA256",
+        "f" * 64,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        vocal_profile_contract,
+        "_VOCAL_PROFILE_QUALITY_POLICY",
+        {"format": "mutated-policy-format/v999", "policy_id": "mutated-policy-id"},
+        raising=False,
+    )
 
-        assert vocal_profile_quality_policy_identity() == expected
-        assert (
-            evaluate_vocal_profile_quality_report(_passing_report())["quality_policy"] == expected
-        )
-    finally:
-        vocal_profile_contract._VOCAL_PROFILE_QUALITY_POLICY["policy_id"] = original_id
+    assert vocal_profile_quality_policy_identity() == expected
+    assert evaluate_vocal_profile_quality_report(_passing_report())["quality_policy"] == expected
+
+    mutated_report = _passing_report()
+    mutated_report["quality_policy"]["format"] = "mutated-policy-format/v999"
+    with pytest.raises(VocalProfileContractError, match="pinned STRUM policy"):
+        require_vocal_profile_package_evidence(mutated_report)
 
 
 def test_quality_gate_rejects_missing_or_non_strum_policy_and_failed_evidence() -> None:
