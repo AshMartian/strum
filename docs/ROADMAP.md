@@ -78,7 +78,12 @@ presented as a successful OCTAVE auto-chart result.
   experiments. STRUM derives the six chart-pattern labels from the declared
   `PART GUITAR` or `PART BASS` task-view track, revalidates the catalog split
   while materializing log-mel caches, and packages a hash-verified
-  `section_classifier.{instrument}` component with no inference profile.
+  `section_classifier.{instrument}` component with no inference profile. The
+  artifact records its torchaudio feature contract. It cannot be routed
+  through the separately declared legacy librosa `SectionRouter` merely because mel dimensions
+  and labels match. Promotion requires an exact frontend contract, tensor-only
+  profile loader, held-out calibration, router-on/off chart-impact evaluation,
+  and composition with a concrete Guitar or Bass auto-chart profile.
 - ✅ A catalog-worker Drums V2 experiment can be integrity-packaged as
   `drums.onset-classifier-evaluation/v1`. Its hash-verified runtime accepts
   only STRUM's prepared onset windows and returns eight class probabilities;

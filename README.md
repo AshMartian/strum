@@ -835,8 +835,16 @@ These task views make each family catalog-ready. Guitar/Bass section task views
 also feed a bounded worker experiment: STRUM derives six chart-pattern labels,
 materializes catalog-split log-mel windows, and trains `SectionClassifier/v1`.
 The resulting `section_classifier.guitar` or `section_classifier.bass`
-component has no inference profile; it must pass a section-routing evaluation
-and a dedicated runtime/profile contract before it can alter an auto-chart.
+component has no inference profile and is not an auto-chart model. Its worker
+feature extractor is explicitly `section-logmel-torchaudio-windows/v1`, while
+the legacy `SectionRouter` currently computes a different declared librosa
+frontend. Similar mel dimensions are not evidence of compatibility, so STRUM
+will not package a worker checkpoint into that router or let it replace the
+router's checkpoint by path. Before a section component can affect a chart, it
+needs: an exact feature-extractor contract, a tensor-only bundle/profile
+loader, held-out section calibration, a held-out router-on/off chart-impact
+ablation, and composition with an executable instrument-specific chart
+profile. Guitar and Bass require separate composition contracts.
 Keys, Vocals, and Pro-instrument generic task views remain source contracts,
 not a claim that their future models share the five-lane representation.
 ### Catalog-backed chart-transform tasks

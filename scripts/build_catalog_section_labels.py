@@ -16,8 +16,8 @@ if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
 from scripts.build_section_labels import HOP_S, WINDOW_S, label_window  # noqa: E402
+from scripts.preprocess_guitar_windows import parse_onsets_from_manifest  # noqa: E402
 from src.catalog_task_manifest import resolve_catalog_task_manifest_songs  # noqa: E402
-from src.preprocessing.parsers.guitar_parser import GuitarParser  # noqa: E402
 
 
 def _manifest_hash(manifest: object) -> str:
@@ -27,13 +27,18 @@ def _manifest_hash(manifest: object) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _parse_chart_onsets(midi_path: Path, instrument: str) -> list[tuple[float, frozenset[int]]]:
-    chart = GuitarParser().parse(midi_path, instrument=instrument)
-    by_tick: dict[int, tuple[float, set[int]]] = {}
-    for note in chart.notes:
-        time_ms, frets = by_tick.setdefault(note.tick, (note.time_ms, set()))
-        frets.add(int(note.fret))
-    return [(time_ms, frozenset(frets)) for _, (time_ms, frets) in sorted(by_tick.items())]
+def _parse_chart_onsets(midi_path: Path, label_track: str) -> list[tuple[float, frozenset[int]]]:
+    """Return Expert five-lane events from exactly one task-view track.
+
+    The legacy :class:`GuitarParser` can fall back to another guitar-shaped
+    MIDI track when its preferred track is absent.  That is useful for an
+    interactive legacy importer, but it would silently change the label
+    source of a catalog worker.  Reuse the five-lane worker parser instead:
+    it requires the exact named track and uses the same 25 ms chord grouping
+    as the Guitar/Bass worker data path.
+    """
+    events = parse_onsets_from_manifest(midi_path, label_track=label_track)
+    return [(time_ms, frozenset(frets)) for time_ms, frets in events]
 
 
 def build_labels(manifest: dict[str, object], catalog_root: Path) -> dict[str, object]:
@@ -41,10 +46,17 @@ def build_labels(manifest: dict[str, object], catalog_root: Path) -> dict[str, o
     task = manifest.get("task")
     if not isinstance(task, dict) or task.get("kind") not in {"section_guitar", "section_bass"}:
         raise ValueError("catalog manifest must use section_guitar or section_bass")
-    instrument = task["instrument"]
+    expected_track = "PART GUITAR" if task["instrument"] == "guitar" else "PART BASS"
     records: list[dict[str, object]] = []
     for song in resolve_catalog_task_manifest_songs(manifest, catalog_root):
-        onsets = _parse_chart_onsets(Path(song["midi_path"]), instrument)
+        # A section label is derived from one five-lane performance stream.
+        # Multiple matching tracks can be alternate arrangements, not a
+        # union.  Do not invent union semantics while making a dataset.
+        if song.get("label_tracks") != [expected_track]:
+            raise ValueError(
+                "section labels require exactly one declared PART GUITAR or PART BASS track"
+            )
+        onsets = _parse_chart_onsets(Path(song["midi_path"]), expected_track)
         if not onsets:
             continue
         duration = sf.info(song["audio_path"]).duration

@@ -358,7 +358,11 @@ src/
 | Tom-refinement CNN | `train_tom_refinement.py` | (uses Demucs drum stem) | inline |
 | Five-lane Guitar/Bass onset + fret CRNN (V1) | `train_guitar_v1.py` | revalidated Guitar/Bass catalog task view → `preprocess_guitar_windows.py` | `guitar_v1.yaml` |
 | Pitch→fret mapper (V4) | worker-owned `strum.fret-mapper/{guitar,bass}/v1` → `train_fret_mapper.py` | catalog task view → `build_mapper_dataset.py` | worker bundle config |
-| Section classifier | `train_section_classifier.py` | `build_section_labels.py` → `preprocess_section_windows.py` | inline |
+<<<<<<< HEAD
+| Section classifier | worker-owned `strum.section-classifier/{guitar,bass}/v1` → `train_section_classifier.py` | revalidated exact `PART GUITAR`/`PART BASS` task track → `build_catalog_section_labels.py` → `preprocess_section_windows.py` | experiment-only bundle with declared `section-logmel-torchaudio-windows/v1`; no router profile |
+=======
+| Section classifier | worker-owned `strum.section-classifier/{guitar,bass}/v1` → `train_section_classifier.py` | revalidated exact `PART GUITAR`/`PART BASS` task track → `build_catalog_section_labels.py` → `preprocess_section_windows.py` | experiment-only bundle with declared `section-logmel-torchaudio-windows/v1`; no router profile |
+>>>>>>> d6d7665 (fix(section): make router promotion requirements explicit)
 
 All trainers log to W&B (`WANDB_MODE=offline` to disable). The Guitar/Bass
 fret-mapper worker is a narrow exception: it invokes the established builder
@@ -368,6 +372,14 @@ inference profile. It requires the `pitch` optional dependency. Other legacy
 script interfaces remain preparation-only; catalog readiness does not make a
 trainer worker-runnable, and any script output is not deployment-ready until
 STRUM evaluates and packages a model bundle/profile.
+
+Section training is also intentionally experiment-only. The established
+`SectionRouter` uses a librosa frontend, while the catalog worker trains with
+torchaudio features. The runtime must not substitute a worker checkpoint into
+the router by filename. A future composed chart profile must name an exact
+equivalent frontend, load hash-verified tensor weights through a typed profile,
+and pass both held-out section calibration and router-on/off chart-impact
+evaluation before it can change chart output.
 
 ## 10. Catalog and worker contract
 

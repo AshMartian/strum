@@ -111,11 +111,9 @@ def process_split(records: list[dict], split: str, cache_dir: Path) -> None:
             lab_mm[cur] = LABEL_TO_IDX[r["label"]]
             meta.append(
                 {
-                    # Catalog-derived labels are deliberately path-free and
-                    # identify their approved input by source_id.  The legacy
-                    # standalone labels use song_id, so accept that spelling
-                    # only at this adapter boundary.
-                    "song_id": r.get("source_id", r.get("song_id")),
+                    # Catalog-derived labels deliberately carry source IDs,
+                    # never the legacy folder-manifest song_id field.
+                    "source_id": r["source_id"],
                     "t_start_s": t_start,
                     "label": r["label"],
                 }

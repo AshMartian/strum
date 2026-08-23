@@ -135,7 +135,7 @@ def _fake_section_scripts(commands: list[list[str]]) -> object:
                     json.dumps(
                         [
                             {
-                                "song_id": record["source_id"],
+                                "source_id": record["source_id"],
                                 "t_start_s": record["t_start_s"],
                                 "label": record["label"],
                             }
@@ -214,9 +214,7 @@ def test_section_worker_packages_a_revalidated_catalog_experiment_without_profil
     result = run_training_request(train)
 
     assert result["status"] == "completed"
-    assert (
-        result["deployment_status"] == "requires_section_profile_evaluation_and_runtime_integration"
-    )
+    assert result["deployment_status"] == "requires_section_runtime_feature_alignment"
     assert [item[1].rsplit("/", 1)[-1] for item in commands] == [
         "build_catalog_section_labels.py",
         "preprocess_section_windows.py",
@@ -234,6 +232,20 @@ def test_section_worker_packages_a_revalidated_catalog_experiment_without_profil
     config = json.loads(next((bundle / "configs").glob("*.json")).read_text())
     assert config["instrument"] == task_kind.removeprefix("section_")
     assert config["format"] == "strum-section-classifier-model-config/v1"
+    assert config["preprocessing"] == "section-logmel-torchaudio-windows/v1"
+    assert config["feature_extractor"]["backend"] == "torchaudio"
+    assert config["runtime_profile"] == {
+        "format": "strum-section-router-deployment-requirements/v1",
+        "status": "not_packageable",
+        "reason": "section_router_feature_frontend_is_not_equivalent",
+        "requirements": [
+            "exact_section_feature_extractor_contract",
+            "section_router_profile_loader_tensor_only",
+            "held_out_section_calibration_evaluation",
+            "held_out_chart_impact_ablation",
+            f"composed_{task_kind.removeprefix('section_')}_chart_profile_contract",
+        ],
+    }
 
 
 def test_section_worker_rejects_wrong_task_or_label_schema(tmp_path: Path) -> None:
@@ -274,8 +286,13 @@ def test_section_descriptors_expose_private_catalog_training_without_inference(
     )
     assert descriptor.train_schema is not None
     assert "catalog_root" not in descriptor.train_schema["properties"]
-    assert descriptor.training_requirements == (
-        "section_profile_evaluation",
-        "section_profile_packaging",
-        "section_runtime_integration",
+    expected = (
+        "exact_section_feature_extractor_contract",
+        "section_router_profile_loader_tensor_only",
+        "held_out_section_calibration_evaluation",
+        "held_out_chart_impact_ablation",
+        "composed_guitar_chart_profile_contract"
+        if pipeline_id.endswith("guitar/v1")
+        else "composed_bass_chart_profile_contract",
     )
+    assert descriptor.training_requirements == expected

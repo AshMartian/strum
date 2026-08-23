@@ -259,16 +259,18 @@ PLANNED_TRAINING_REQUIREMENTS: dict[str, tuple[str, ...]] = {
         "pro_keys_chart_execution/v1",
     ),
     "section_guitar": (
-        "section_window_preprocessor",
-        "section_profile_evaluation",
-        "section_profile_packaging",
-        "section_runtime_integration",
+        "exact_section_feature_extractor_contract",
+        "section_router_profile_loader_tensor_only",
+        "held_out_section_calibration_evaluation",
+        "held_out_chart_impact_ablation",
+        "composed_guitar_chart_profile_contract",
     ),
     "section_bass": (
-        "section_window_preprocessor",
-        "section_profile_evaluation",
-        "section_profile_packaging",
-        "section_runtime_integration",
+        "exact_section_feature_extractor_contract",
+        "section_router_profile_loader_tensor_only",
+        "held_out_section_calibration_evaluation",
+        "held_out_chart_impact_ablation",
+        "composed_bass_chart_profile_contract",
     ),
 }
 
@@ -608,11 +610,7 @@ PIPELINES = (
                     "instrument_specific_profile_packaging",
                 )
                 if task_kind.startswith("fret_mapper_")
-                else (
-                    "section_profile_evaluation",
-                    "section_profile_packaging",
-                    "section_runtime_integration",
-                )
+                else (*PLANNED_TRAINING_REQUIREMENTS[task_kind],)
                 if task_kind.startswith("section_")
                 else PLANNED_TRAINING_REQUIREMENTS.get(task_kind, ())
             ),

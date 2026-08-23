@@ -33,10 +33,41 @@ from src.model_bundle import MANIFEST_FILENAME
 from src.song_source_catalog import CatalogValidationError
 
 EXPERIMENT_FORMAT = "strum-experiment/v1"
-PREPROCESSING_ID = "section-logmel-windows/v1"
+# The raw experiment is deliberately named for the actual extractor.  The
+# existing SectionRouter currently uses a different (librosa) frontend, so
+# the generic word "logmel" would overstate runtime compatibility.
+PREPROCESSING_ID = "section-logmel-torchaudio-windows/v1"
 MODEL_IMPLEMENTATION = "SectionClassifier/v1"
 LABEL_FORMAT = "strum-section-labels/v1"
 LABELS = ("silence", "constant_strum", "chord_stab", "lead_line", "single_notes", "mixed")
+DEPLOYMENT_STATUS = "requires_section_runtime_feature_alignment"
+RUNTIME_PROFILE_REQUIREMENTS = (
+    "exact_section_feature_extractor_contract",
+    "section_router_profile_loader_tensor_only",
+    "held_out_section_calibration_evaluation",
+    "held_out_chart_impact_ablation",
+)
+SECTION_FEATURE_EXTRACTOR = {
+    "format": "strum-section-feature-extractor/v1",
+    "backend": "torchaudio",
+    "sample_rate": 22050,
+    "channel_mixdown": "arithmetic_mean",
+    "resampler": "torchaudio.functional.resample/default",
+    "n_mels": 128,
+    "n_fft": 2048,
+    "hop_length": 512,
+    "fmin": 30.0,
+    "fmax": 8000.0,
+    "power": 2.0,
+    "window": "hann",
+    "center": True,
+    "pad_mode": "reflect",
+    "mel_scale": "htk",
+    "mel_norm": None,
+    "spectrogram_normalized": False,
+    "normalization": "per_window_mean_std_eps_1e-5",
+    "log_offset": 1e-8,
+}
 _MODEL_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 _TASKS = {
     "strum.section-classifier/guitar/v1": ("section_guitar", "guitar", "PART GUITAR"),
@@ -46,6 +77,12 @@ _TASKS = {
 
 class SectionTrainingError(ValueError):
     """Raised when a section training request cannot safely start or package."""
+
+
+def _runtime_profile_requirements(instrument: str) -> tuple[str, ...]:
+    if instrument not in {"guitar", "bass"}:
+        raise SectionTrainingError("section runtime instrument is invalid")
+    return (*RUNTIME_PROFILE_REQUIREMENTS, f"composed_{instrument}_chart_profile_contract")
 
 
 @dataclass(frozen=True)
@@ -152,6 +189,14 @@ def _read_task_view(
     }
     if not split_counts["train"] or not split_counts["val"]:
         raise SectionTrainingError("section task view requires non-empty train and val splits")
+    # The label builder deliberately refuses to merge matching tracks.  A
+    # task view must therefore name one exact five-lane performance stream,
+    # rather than relying on a legacy parser's fallback or on undefined union
+    # behavior across alternate arrangements.
+    if any(song.get("label_tracks") != [label_track] for song in songs):
+        raise SectionTrainingError(
+            "section task view requires exactly its declared five-lane label track"
+        )
     return task_view, songs, instrument, label_track
 
 
@@ -255,7 +300,10 @@ def _validate_cache(cache_dir: Path, songs: list[dict[str, object]]) -> dict[str
         ):
             raise SectionTrainingError("section preprocessing cache is incompatible")
         for record in metadata:
-            if not isinstance(record, dict) or expected_splits.get(record.get("song_id")) != split:
+            if (
+                not isinstance(record, dict)
+                or expected_splits.get(record.get("source_id")) != split
+            ):
                 raise SectionTrainingError("section cache does not match catalog task splits")
             if record.get("label") not in LABELS:
                 raise SectionTrainingError("section cache contains unknown labels")
@@ -397,6 +445,17 @@ def run_catalog_section_training(
         "window_seconds": 2.0,
         "hop_seconds": 1.0,
         "mel_shape": [128, 87],
+        # This is intentionally more specific than the legacy router's
+        # constants.  It makes the non-deployable gap visible in the portable
+        # artifact instead of allowing a future caller to assume that two
+        # log-mel frontends are interchangeable.
+        "feature_extractor": dict(SECTION_FEATURE_EXTRACTOR),
+        "runtime_profile": {
+            "format": "strum-section-router-deployment-requirements/v1",
+            "status": "not_packageable",
+            "reason": "section_router_feature_frontend_is_not_equivalent",
+            "requirements": list(_runtime_profile_requirements(instrument)),
+        },
         "training": options.portable(),
     }
     bundled_config.write_text(
@@ -463,7 +522,8 @@ def run_catalog_section_training(
             "device": device,
         },
         "metrics": metrics,
-        "deployment_status": "requires_section_profile_evaluation_and_runtime_integration",
+        "deployment_status": DEPLOYMENT_STATUS,
+        "deployment_requirements": list(_runtime_profile_requirements(instrument)),
         "bundle": {"name": bundle_dir.name, "manifest": MANIFEST_FILENAME},
     }
     (output_dir / "experiment.json").write_text(

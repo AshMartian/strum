@@ -17,7 +17,6 @@ import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 import torch
@@ -25,7 +24,7 @@ import torch
 logger = logging.getLogger(__name__)
 
 LABELS = ["silence", "constant_strum", "chord_stab", "lead_line", "single_notes", "mixed"]
-LABEL_TO_IDX = {l: i for i, l in enumerate(LABELS)}
+LABEL_TO_IDX = {label: index for index, label in enumerate(LABELS)}
 
 # Same audio constants as scripts/preprocess_section_windows.py
 SAMPLE_RATE = 22050
@@ -37,8 +36,35 @@ FMAX = 8000.0
 WINDOW_S = 2.0
 HOP_S = 1.0
 WINDOW_SAMPLES = int(WINDOW_S * SAMPLE_RATE)
-WINDOW_FRAMES = WINDOW_SAMPLES // HOP_LENGTH + 1   # ~87
+WINDOW_FRAMES = WINDOW_SAMPLES // HOP_LENGTH + 1  # ~87
 HOP_SAMPLES = int(HOP_S * SAMPLE_RATE)
+
+# Kept as data as well as code so worker artifacts can state precisely why a
+# torchaudio-trained section classifier is not automatically a SectionRouter
+# profile.  These choices differ materially from the catalog worker frontend
+# (notably mel scale, normalization, and STFT padding).  A future typed profile
+# must either use this exact contract during training or introduce an evaluated
+# compatibility adapter; matching tensor shape alone is insufficient.
+ROUTER_FEATURE_EXTRACTOR = {
+    "format": "strum-section-feature-extractor/v1",
+    "backend": "librosa",
+    "sample_rate": SAMPLE_RATE,
+    "channel_mixdown": "caller_provided_mono",
+    "resampler": "librosa.resample/default",
+    "n_mels": N_MELS,
+    "n_fft": N_FFT,
+    "hop_length": HOP_LENGTH,
+    "fmin": FMIN,
+    "fmax": FMAX,
+    "power": 2.0,
+    "window": "hann",
+    "center": True,
+    "pad_mode": "constant",
+    "mel_scale": "slaney",
+    "mel_norm": "slaney",
+    "normalization": "per_window_mean_std_eps_1e-5",
+    "log_offset": 1e-8,
+}
 
 DEFAULT_CKPT = "checkpoints/section_classifier/best.pt"
 
@@ -51,10 +77,10 @@ class Section:
     probs: np.ndarray  # shape (6,)
 
 
-_ROUTER_CACHE: dict[str, "SectionRouter"] = {}
+_ROUTER_CACHE: dict[str, SectionRouter | None] = {}
 
 
-def get_router(checkpoint: str = DEFAULT_CKPT) -> Optional["SectionRouter"]:
+def get_router(checkpoint: str = DEFAULT_CKPT) -> SectionRouter | None:
     """Singleton accessor; returns None if disabled or checkpoint missing."""
     if os.environ.get("STRUM_GB_USE_ROUTER", "1") == "0":
         return None
@@ -63,7 +89,7 @@ def get_router(checkpoint: str = DEFAULT_CKPT) -> Optional["SectionRouter"]:
         return _ROUTER_CACHE[key]
     if not Path(checkpoint).exists():
         logger.warning("section classifier checkpoint not found: %s (router disabled)", checkpoint)
-        _ROUTER_CACHE[key] = None  # type: ignore[assignment]
+        _ROUTER_CACHE[key] = None
         return None
     try:
         router = SectionRouter(checkpoint)
@@ -71,14 +97,14 @@ def get_router(checkpoint: str = DEFAULT_CKPT) -> Optional["SectionRouter"]:
         return router
     except Exception as exc:
         logger.warning("failed to load section router: %s", exc)
-        _ROUTER_CACHE[key] = None  # type: ignore[assignment]
+        _ROUTER_CACHE[key] = None
         return None
 
 
 class SectionRouter:
     """Loads SectionClassifier and predicts section labels over an audio array."""
 
-    def __init__(self, checkpoint: str = DEFAULT_CKPT, device: Optional[str] = None):
+    def __init__(self, checkpoint: str = DEFAULT_CKPT, device: str | None = None):
         from src.models.section_classifier import SectionClassifier
 
         # Force CPU by default — model is tiny (162k params), and torchaudio's
@@ -89,14 +115,19 @@ class SectionRouter:
             device = env_dev or "cpu"
         self.device = torch.device(device)
         self.model = SectionClassifier().to(self.device)
-        ckpt = torch.load(checkpoint, map_location=self.device, weights_only=False)
+        # This legacy path remains opt-in and is never an OCTAVE-deployable
+        # profile.  Still avoid executing pickle payloads while loading its
+        # state dictionary.
+        ckpt = torch.load(checkpoint, map_location=self.device, weights_only=True)
         state = ckpt.get("state_dict", ckpt)
         self.model.load_state_dict(state)
         self.model.eval()
 
         logger.info(
             "SectionRouter loaded: %s (val_acc=%.3f) on %s",
-            checkpoint, ckpt.get("val_acc", float("nan")), self.device,
+            checkpoint,
+            ckpt.get("val_acc", float("nan")),
+            self.device,
         )
 
     @torch.no_grad()
@@ -105,6 +136,7 @@ class SectionRouter:
         # Resample if needed (use librosa to avoid torchaudio NVRTC issue)
         if sr != SAMPLE_RATE:
             import librosa
+
             audio = librosa.resample(audio.astype(np.float32), orig_sr=sr, target_sr=SAMPLE_RATE)
 
         if len(audio) < WINDOW_SAMPLES:
@@ -119,17 +151,26 @@ class SectionRouter:
         # Compute one big mel spectrogram via librosa, then slice patches.
         # Faster than running mel per patch (~5x for typical song lengths).
         import librosa
+
         mel_full = librosa.feature.melspectrogram(
-            y=audio, sr=SAMPLE_RATE,
-            n_fft=N_FFT, hop_length=HOP_LENGTH, n_mels=N_MELS,
-            fmin=FMIN, fmax=FMAX, power=2.0,
+            y=audio,
+            sr=SAMPLE_RATE,
+            n_fft=N_FFT,
+            hop_length=HOP_LENGTH,
+            n_mels=N_MELS,
+            fmin=FMIN,
+            fmax=FMAX,
+            power=2.0,
+            window="hann",
+            center=True,
+            pad_mode="constant",
+            htk=False,
+            norm="slaney",
         )
         mel_full = np.log(mel_full + 1e-8).astype(np.float32)  # (n_mels, T_total)
 
         # Number of mel frames covered by one window
         frames_per_window = WINDOW_FRAMES
-        frames_per_hop = HOP_SAMPLES // HOP_LENGTH
-
         patches = np.zeros((n, N_MELS, frames_per_window), dtype=np.float32)
         for i, s in enumerate(starts):
             f_start = s // HOP_LENGTH
@@ -155,12 +196,14 @@ class SectionRouter:
 
         sections = []
         for i, s in enumerate(starts):
-            sections.append(Section(
-                t_start_s=s / SAMPLE_RATE,
-                t_end_s=(s + WINDOW_SAMPLES) / SAMPLE_RATE,
-                label=LABELS[int(preds[i])],
-                probs=probs[i],
-            ))
+            sections.append(
+                Section(
+                    t_start_s=s / SAMPLE_RATE,
+                    t_end_s=(s + WINDOW_SAMPLES) / SAMPLE_RATE,
+                    label=LABELS[int(preds[i])],
+                    probs=probs[i],
+                )
+            )
         return sections
 
 
