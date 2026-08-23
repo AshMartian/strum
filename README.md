@@ -999,6 +999,11 @@ immutable label-source schema and the exact approved MIDI track names selected
 for each song (for example `PART VOCALS`, `PART REAL_GUITAR`, or
 `PART REAL_KEYS_X`). A future trainer therefore receives explicit event
 semantics rather than inferring track conventions from its own source tree.
+New generic and onset/fret Bass or Keys views use `five-lane-midi/v2`, which
+selects only `PART BASS` or `PART KEYS`; similarly named alternate arrangements
+are never merged into labels. Existing `five-lane-midi/v1` views remain
+readable only when revalidation proves that their recorded selection was
+already that single exact track.
 STRUM revalidates both declarations against the catalog before resolving the
 ephemeral managed paths. The view never records an OCTAVE source path.
 

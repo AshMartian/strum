@@ -22,7 +22,11 @@ from typing import Any
 import yaml
 
 from src import PROJECT_ROOT, __version__
-from src.catalog_task_manifest import MANIFEST_FORMAT, resolve_catalog_task_manifest_songs
+from src.catalog_task_manifest import (
+    MANIFEST_FORMAT,
+    resolve_catalog_task_manifest_songs,
+    task_label_schema_is_supported,
+)
 from src.model_bundle import MANIFEST_FILENAME
 from src.song_source_catalog import CatalogValidationError
 
@@ -103,7 +107,6 @@ def _read_task_view(
     except (OSError, json.JSONDecodeError) as error:
         raise KeysTrainingError("Keys task view is unreadable or invalid") from error
     task = task_view.get("task") if isinstance(task_view, dict) else None
-    label_schema = task.get("label_schema") if isinstance(task, dict) else None
     if (
         not isinstance(task_view, dict)
         or task_view.get("format") != MANIFEST_FORMAT
@@ -111,8 +114,7 @@ def _read_task_view(
         or task.get("kind") != TASK_KIND
         or task.get("pipeline_id") != PIPELINE_ID
         or task.get("instrument") != "keys"
-        or not isinstance(label_schema, dict)
-        or label_schema.get("track_prefixes") != ["PART KEYS"]
+        or not task_label_schema_is_supported(TASK_KIND, task.get("label_schema"))
     ):
         raise KeysTrainingError("Keys training requires a Keys onset/fret catalog task view")
     try:

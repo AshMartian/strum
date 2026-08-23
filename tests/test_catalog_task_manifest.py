@@ -229,6 +229,80 @@ def test_pro_task_views_keep_exact_real_track_semantics(tmp_path: Path) -> None:
         resolve_catalog_task_manifest_songs(keys, tmp_path)
 
 
+@pytest.mark.parametrize(
+    ("task_kind", "instrument", "exact_track", "alternate_track"),
+    [
+        ("bass", "bass", "PART BASS", "PART BASS ALT"),
+        ("bass_onset_fret", "bass", "PART BASS", "PART BASS ALT"),
+        ("keys", "keys", "PART KEYS", "PART KEYS ALT"),
+        ("keys_onset_fret", "keys", "PART KEYS", "PART KEYS ALT"),
+    ],
+)
+def test_exact_five_lane_task_views_do_not_select_alternate_arrangements(
+    tmp_path: Path,
+    task_kind: str,
+    instrument: str,
+    exact_track: str,
+    alternate_track: str,
+) -> None:
+    record = _record(tmp_path, "octave-src-aaaaaaaa")
+    record["chart"]["instruments"][instrument]["track_names"] = [
+        exact_track,
+        alternate_track,
+    ]
+    _catalog(tmp_path, [record])
+
+    manifest = build_catalog_task_manifest(tmp_path, task_kind)
+
+    assert manifest["task"]["label_schema"] == {
+        "id": "five-lane-midi/v2",
+        "track_names": [exact_track],
+        "difficulty_encoding": "five-lane-note-ranges/v1",
+    }
+    assert manifest["songs"][0]["label_tracks"] == [exact_track]
+    assert resolve_catalog_task_manifest_songs(manifest, tmp_path)[0]["label_tracks"] == [
+        exact_track
+    ]
+
+
+@pytest.mark.parametrize(
+    ("task_kind", "instrument", "exact_track", "alternate_track"),
+    [
+        ("bass_onset_fret", "bass", "PART BASS", "PART BASS ALT"),
+        ("keys_onset_fret", "keys", "PART KEYS", "PART KEYS ALT"),
+    ],
+)
+def test_legacy_five_lane_task_views_only_resolve_when_their_selection_is_exact(
+    tmp_path: Path,
+    task_kind: str,
+    instrument: str,
+    exact_track: str,
+    alternate_track: str,
+) -> None:
+    record = _record(tmp_path, "octave-src-aaaaaaaa")
+    record["chart"]["instruments"][instrument]["track_names"] = [
+        exact_track,
+        alternate_track,
+    ]
+    _catalog(tmp_path, [record])
+    manifest = build_catalog_task_manifest(tmp_path, task_kind)
+    manifest["task"]["label_schema"] = {
+        "id": "five-lane-midi/v1",
+        "track_prefixes": [exact_track],
+        "difficulty_encoding": "five-lane-note-ranges/v1",
+    }
+
+    # Existing V1 task views remain usable when they already selected the
+    # single exact track consumed by the preprocessor.
+    assert resolve_catalog_task_manifest_songs(manifest, tmp_path)[0]["label_tracks"] == [
+        exact_track
+    ]
+
+    manifest["songs"][0]["label_tracks"] = [exact_track, alternate_track]
+    with pytest.raises(CatalogValidationError, match="valid approved catalog task input"):
+        resolve_catalog_task_manifest_songs(manifest, tmp_path)
+
+
 def test_rejects_tampered_preprocessing_and_catalog_lineage(tmp_path: Path) -> None:
     _catalog(tmp_path, [_record(tmp_path, "octave-src-aaaaaaaa")])
     manifest = build_catalog_task_manifest(tmp_path, "section_guitar")

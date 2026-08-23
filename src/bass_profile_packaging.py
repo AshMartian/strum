@@ -16,7 +16,11 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-from src.catalog_task_manifest import MANIFEST_FORMAT, resolve_catalog_task_manifest_songs
+from src.catalog_task_manifest import (
+    MANIFEST_FORMAT,
+    resolve_catalog_task_manifest_songs,
+    task_label_schema_is_supported,
+)
 from src.inference.bass_neural_profile import (
     CAPABILITY,
     EVALUATION_FORMAT,
@@ -91,12 +95,7 @@ def _require_bass_task_view(task_view: dict[str, Any]) -> None:
         or task.get("kind") != "bass_onset_fret"
         or task.get("pipeline_id") != "bass.onset-fret/v1"
         or task.get("instrument") != "bass"
-        or task.get("label_schema")
-        != {
-            "id": "five-lane-midi/v1",
-            "track_prefixes": ["PART BASS"],
-            "difficulty_encoding": "five-lane-note-ranges/v1",
-        }
+        or not task_label_schema_is_supported("bass_onset_fret", task.get("label_schema"))
     ):
         raise BassProfilePackagingError(
             "Bass evaluation requires a Bass onset/fret catalog task view"

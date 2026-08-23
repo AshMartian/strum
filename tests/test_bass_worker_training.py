@@ -87,7 +87,7 @@ def test_bass_worker_trains_from_its_catalog_task_view_and_packages_provenance(
     prepare_dataset_request(prepare_request)
     prepared = json.loads(task_view.read_text())
     assert prepared["task"]["kind"] == "bass_onset_fret"
-    assert prepared["task"]["label_schema"]["track_prefixes"] == ["PART BASS"]
+    assert prepared["task"]["label_schema"]["track_names"] == ["PART BASS"]
     assert str(tmp_path) not in json.dumps(prepared)
 
     commands: list[list[str]] = []
@@ -169,6 +169,8 @@ def test_bass_pipeline_advertises_a_strict_worker_training_schema() -> None:
     assert descriptor.train_schema is not None
     assert descriptor.train_schema["required"] == ["model_id"]
     assert "catalog_root" not in descriptor.train_schema["properties"]
+    assert descriptor.catalog_requirements["label_schema"] == "five-lane-midi/v2"
+    assert descriptor.catalog_requirements["label_tracks"] == ["PART BASS"]
     assert descriptor.checkpoint_outputs == ("bass.onset", "bass.fret")
     assert descriptor.inference_capability == "bass.neural-v1-expert/v1"
 
@@ -186,7 +188,11 @@ def test_five_lane_preprocessor_reads_part_bass_not_part_guitar(tmp_path: Path) 
     bass.append(mido.MetaMessage("track_name", name="PART BASS", time=0))
     bass.append(mido.Message("note_on", note=99, velocity=100, time=240))
     bass.append(mido.Message("note_off", note=99, velocity=0, time=120))
-    source.tracks.extend((guitar, bass))
+    bass_alt = mido.MidiTrack()
+    bass_alt.append(mido.MetaMessage("track_name", name="PART BASS ALT", time=0))
+    bass_alt.append(mido.Message("note_on", note=96, velocity=100, time=0))
+    bass_alt.append(mido.Message("note_off", note=96, velocity=0, time=120))
+    source.tracks.extend((guitar, bass_alt, bass))
     source.save(midi_path)
 
     assert parse_onsets_from_manifest(midi_path, label_track="PART BASS") == [(250.0, {3})]

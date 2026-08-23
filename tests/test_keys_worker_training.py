@@ -87,7 +87,7 @@ def test_keys_worker_trains_from_part_keys_task_view_and_packages_experiment_onl
     prepare_dataset_request(request)
     prepared = json.loads(task_view.read_text())
     assert prepared["task"]["kind"] == "keys_onset_fret"
-    assert prepared["task"]["label_schema"]["track_prefixes"] == ["PART KEYS"]
+    assert prepared["task"]["label_schema"]["track_names"] == ["PART KEYS"]
     assert str(tmp_path) not in json.dumps(prepared)
 
     commands: list[list[str]] = []
@@ -169,6 +169,8 @@ def test_keys_pipeline_advertises_strict_training_with_gated_profile_capability(
     assert descriptor.train_schema is not None
     assert descriptor.train_schema["required"] == ["model_id"]
     assert "catalog_root" not in descriptor.train_schema["properties"]
+    assert descriptor.catalog_requirements["label_schema"] == "five-lane-midi/v2"
+    assert descriptor.catalog_requirements["label_tracks"] == ["PART KEYS"]
     assert descriptor.checkpoint_outputs == ("keys.onset", "keys.fret")
     assert descriptor.inference_capability == "keys.neural-v1-expert/v1"
     assert descriptor.training_requirements == (
@@ -187,7 +189,10 @@ def test_five_lane_preprocessor_reads_part_keys_not_guitar(tmp_path: Path) -> No
     keys = mido.MidiTrack()
     keys.append(mido.MetaMessage("track_name", name="PART KEYS", time=0))
     keys.append(mido.Message("note_on", note=100, velocity=100, time=240))
-    source.tracks.extend((guitar, keys))
+    keys_alt = mido.MidiTrack()
+    keys_alt.append(mido.MetaMessage("track_name", name="PART KEYS ALT", time=0))
+    keys_alt.append(mido.Message("note_on", note=96, velocity=100, time=0))
+    source.tracks.extend((guitar, keys_alt, keys))
     midi_path = tmp_path / "notes.mid"
     source.save(midi_path)
 

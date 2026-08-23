@@ -125,18 +125,21 @@ TASK_INSTRUMENTS = {
 # they deliberately do not claim that a trainer/profile exists yet.
 TASK_LABEL_SCHEMAS: dict[str, dict[str, object]] = {
     "bass": {
-        "id": "five-lane-midi/v1",
-        "track_prefixes": ["PART BASS"],
+        # V2 makes the source identity match the generic Bass descriptor and
+        # the concrete preprocessor.  ``PART BASS ALT`` is an alternate
+        # arrangement, not an additional Bass label stream to merge.
+        "id": "five-lane-midi/v2",
+        "track_names": ["PART BASS"],
         "difficulty_encoding": "five-lane-note-ranges/v1",
     },
     "bass_onset_fret": {
-        "id": "five-lane-midi/v1",
-        "track_prefixes": ["PART BASS"],
+        "id": "five-lane-midi/v2",
+        "track_names": ["PART BASS"],
         "difficulty_encoding": "five-lane-note-ranges/v1",
     },
     "keys_onset_fret": {
-        "id": "five-lane-midi/v1",
-        "track_prefixes": ["PART KEYS"],
+        "id": "five-lane-midi/v2",
+        "track_names": ["PART KEYS"],
         "difficulty_encoding": "five-lane-note-ranges/v1",
     },
     "vocals_activity": {
@@ -164,8 +167,8 @@ TASK_LABEL_SCHEMAS: dict[str, dict[str, object]] = {
         "difficulty_encoding": "vocal-pitchless-talky-note-96-spans/v1",
     },
     "keys": {
-        "id": "five-lane-midi/v1",
-        "track_prefixes": ["PART KEYS"],
+        "id": "five-lane-midi/v2",
+        "track_names": ["PART KEYS"],
         "difficulty_encoding": "five-lane-note-ranges/v1",
     },
     "vocals": {
@@ -220,6 +223,46 @@ TASK_LABEL_SCHEMAS: dict[str, dict[str, object]] = {
         "difficulty_encoding": "not-applicable",
     },
 }
+
+# Existing task views used a prefix declaration despite the Bass and Keys
+# trainers reading only one exact track.  Keep them resolvable only when their
+# *actual selected label list* is exactly the current V2 selection; a legacy
+# view that included an alternate track fails revalidation rather than gaining
+# implicit union semantics.  New task views always carry the V2 declaration.
+LEGACY_EXACT_FIVE_LANE_LABEL_SCHEMAS: dict[str, dict[str, object]] = {
+    "bass": {
+        "id": "five-lane-midi/v1",
+        "track_prefixes": ["PART BASS"],
+        "difficulty_encoding": "five-lane-note-ranges/v1",
+    },
+    "bass_onset_fret": {
+        "id": "five-lane-midi/v1",
+        "track_prefixes": ["PART BASS"],
+        "difficulty_encoding": "five-lane-note-ranges/v1",
+    },
+    "keys": {
+        "id": "five-lane-midi/v1",
+        "track_prefixes": ["PART KEYS"],
+        "difficulty_encoding": "five-lane-note-ranges/v1",
+    },
+    "keys_onset_fret": {
+        "id": "five-lane-midi/v1",
+        "track_prefixes": ["PART KEYS"],
+        "difficulty_encoding": "five-lane-note-ranges/v1",
+    },
+}
+
+
+def task_label_schema_is_supported(task_kind: str, value: object) -> bool:
+    """Return whether a task-view label schema has safe current semantics.
+
+    The narrow legacy exception is a migration reader, not a generation path.
+    Callers still resolve every song through :func:`_label_tracks`, whose V2
+    exact identities reject legacy prefix-selected alternate tracks.
+    """
+    return value == TASK_LABEL_SCHEMAS.get(task_kind) or value == (
+        LEGACY_EXACT_FIVE_LANE_LABEL_SCHEMAS.get(task_kind)
+    )
 
 
 def deterministic_split(
@@ -488,7 +531,7 @@ def resolve_catalog_task_manifest_songs(
     )
     if task.get("preprocessing_sha256") != _canonical_json_hash(settings):
         raise CatalogValidationError("manifest preprocessing lineage is invalid")
-    if task.get("label_schema") != TASK_LABEL_SCHEMAS[task_kind]:
+    if not task_label_schema_is_supported(task_kind, task.get("label_schema")):
         raise CatalogValidationError("manifest label schema is invalid")
     ratios = tuple(raw_ratios)
     use_seed = split_seed if task.get("split_algorithm") == SPLIT_ALGORITHM else None

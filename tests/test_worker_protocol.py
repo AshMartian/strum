@@ -418,7 +418,7 @@ def test_generic_bass_and_keys_descriptors_publish_exact_v1_bridges_without_alia
     assert descriptor.train_schema is None
     assert descriptor.inference_capability is None
     assert descriptor.checkpoint_outputs == ()
-    assert descriptor.catalog_requirements["label_schema"] == "five-lane-midi/v1"
+    assert descriptor.catalog_requirements["label_schema"] == "five-lane-midi/v2"
     assert descriptor.catalog_requirements["label_tracks"] == [track]
     assert descriptor.catalog_requirements["audio_roles"] == [task_kind, "mix"]
     assert descriptor.catalog_requirements["audio_policy"] == f"prefer:{task_kind},fallback:mix"
@@ -427,7 +427,7 @@ def test_generic_bass_and_keys_descriptors_publish_exact_v1_bridges_without_alia
     assert contract["format"] == "strum-planned-training-contract/v1"
     assert contract["training_status"] == "planned"
     assert contract["label_source"] == {
-        "schema_id": "five-lane-midi/v1",
+        "schema_id": "five-lane-midi/v2",
         "selection": "exact-five-lane-track/v1",
         "tracks": [track],
         "required_difficulty": "expert",

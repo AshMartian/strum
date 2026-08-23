@@ -546,6 +546,12 @@ def main() -> int:
         if expected_kind is None or not isinstance(task, dict) or task.get("kind") != expected_kind:
             ap.error("this preprocessor only accepts its matching five-lane catalog task view")
         all_songs = resolve_catalog_task_manifest_songs(manifest, args.catalog_root)
+        # A five-lane task is one declared performance stream.  Resolving the
+        # catalog task view already revalidates this, but keep the worker
+        # boundary explicit so a future resolver cannot accidentally turn an
+        # alternate arrangement (for example ``PART BASS ALT``) into labels.
+        if any(song.get("label_tracks") != [expected_track] for song in all_songs):
+            ap.error("catalog task view must select exactly its declared five-lane MIDI track")
     else:
         all_songs = manifest["songs"]
     cache_dir = Path(args.cache_dir)

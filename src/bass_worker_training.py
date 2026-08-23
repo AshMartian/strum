@@ -24,6 +24,7 @@ from src import PROJECT_ROOT, __version__
 from src.catalog_task_manifest import (
     MANIFEST_FORMAT,
     resolve_catalog_task_manifest_songs,
+    task_label_schema_is_supported,
 )
 from src.model_bundle import MANIFEST_FILENAME
 from src.song_source_catalog import CatalogValidationError
@@ -112,6 +113,7 @@ def _read_task_view(
         or task.get("kind") != TASK_KIND
         or task.get("pipeline_id") != PIPELINE_ID
         or task.get("instrument") != "bass"
+        or not task_label_schema_is_supported(TASK_KIND, task.get("label_schema"))
     ):
         raise BassTrainingError("Bass training requires a Bass onset/fret catalog task view")
     try:
@@ -286,8 +288,12 @@ def run_catalog_bass_training(
 
     checkpoint_root = output_dir / "training-checkpoints"
     bundle_dir = output_dir / "bundle"
-    _copy_checkpoint(checkpoint_root / "bass_v1_onset" / "best.pt", bundle_dir / "weights/bass-onset.pt")
-    _copy_checkpoint(checkpoint_root / "bass_v1_fret" / "best.pt", bundle_dir / "weights/bass-fret.pt")
+    _copy_checkpoint(
+        checkpoint_root / "bass_v1_onset" / "best.pt", bundle_dir / "weights/bass-onset.pt"
+    )
+    _copy_checkpoint(
+        checkpoint_root / "bass_v1_fret" / "best.pt", bundle_dir / "weights/bass-fret.pt"
+    )
     relative_config = Path("configs/bass-training-config.json")
     bundle_config = bundle_dir / relative_config
     bundle_config.parent.mkdir(parents=True, exist_ok=True)
@@ -357,7 +363,9 @@ def run_catalog_bass_training(
         "task_view": {
             "format": task_view.get("format"),
             "sha256": _sha256(task_view_path),
-            "catalog_id": lineage_info.get("catalog_id") if isinstance(lineage_info, dict) else None,
+            "catalog_id": lineage_info.get("catalog_id")
+            if isinstance(lineage_info, dict)
+            else None,
             "source_inputs": lineage,
         },
         "preprocessing": {
