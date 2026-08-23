@@ -51,6 +51,11 @@ presented as a successful OCTAVE auto-chart result.
   Guitar, Drums, and learned difficulty-transform profiles. Per-instrument
   component stages state `ready`, `provided`, `succeeded`, `not_requested`,
   or `unavailable`; the selected difficulty policy is always explicit.
+- ✅ Versioned, path-free composed-profile graph declarations. A bundle can
+  expose every required stage, component, versioned runtime companion,
+  dependency edge, and terminal chart output through `checkpoint inspect` and
+  chart preflight. Graphs with no registered STRUM handler remain explicitly
+  non-executable; they cannot fall back to the legacy batch assembly path.
 - ✅ Catalog-backed, worker-trainable learned five-lane chart transforms for
   Guitar, Bass, Keys, and Drums, including explicit Expert → lower-difficulty
   provenance. The optional `rms_onset_v1` song-conditioning baseline is

@@ -16,6 +16,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,10 +26,46 @@ from src import PROJECT_ROOT, __version__
 
 MANIFEST_FILENAME = "strum-model-bundle.json"
 MANIFEST_SCHEMA_VERSION = 1
+PROFILE_COMPOSITION_FORMAT = "strum-profile-composition/v1"
+_IDENTIFIER_PATTERN = re.compile(r"^[a-z][a-z0-9_.-]*$")
 
 
 class BundleValidationError(ValueError):
     """Raised when a model bundle manifest is invalid or incompatible."""
+
+
+def _graph_ancestors(stage_id: str, stages: dict[str, ProfileGraphStage]) -> set[str]:
+    """Return transitive dependencies without recursing through malformed cycles."""
+    ancestors: set[str] = set()
+    pending = list(stages[stage_id].depends_on)
+    while pending:
+        dependency = pending.pop()
+        if dependency in ancestors or dependency not in stages:
+            continue
+        ancestors.add(dependency)
+        pending.extend(stages[dependency].depends_on)
+    return ancestors
+
+
+def _graph_has_cycle(stages: dict[str, ProfileGraphStage]) -> bool:
+    """Check directed stage dependencies with a small deterministic DFS."""
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def visit(stage_id: str) -> bool:
+        if stage_id in visiting:
+            return True
+        if stage_id in visited:
+            return False
+        visiting.add(stage_id)
+        for dependency in stages[stage_id].depends_on:
+            if dependency in stages and visit(dependency):
+                return True
+        visiting.remove(stage_id)
+        visited.add(stage_id)
+        return False
+
+    return any(visit(stage_id) for stage_id in stages)
 
 
 @dataclass(frozen=True)
@@ -49,6 +86,92 @@ class ModelComponent:
 
 
 @dataclass(frozen=True)
+class RuntimeCompanion:
+    """A versioned non-checkpoint dependency required by a profile graph.
+
+    A companion is intentionally declarative.  The manifest records the
+    runtime dependency STRUM must later verify; merely declaring one never
+    claims that the current worker can load or execute it.
+    """
+
+    companion_id: str
+    kind: str
+    version: str
+
+    def as_json(self) -> dict[str, str]:
+        return {"id": self.companion_id, "kind": self.kind, "version": self.version}
+
+
+@dataclass(frozen=True)
+class ProfileGraphStage:
+    """One typed node in a composed auto-chart profile graph."""
+
+    stage_id: str
+    kind: str
+    instrument: str | None
+    required: bool
+    component_ids: tuple[str, ...]
+    companion_ids: tuple[str, ...]
+    depends_on: tuple[str, ...]
+    inputs: tuple[str, ...]
+    outputs: tuple[str, ...]
+    difficulty: str | None = None
+    difficulty_policies: tuple[str, ...] = ()
+
+    def as_json(self) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "id": self.stage_id,
+            "kind": self.kind,
+            "required": self.required,
+            "component_ids": list(self.component_ids),
+            "companion_ids": list(self.companion_ids),
+            "depends_on": list(self.depends_on),
+            "inputs": list(self.inputs),
+            "outputs": list(self.outputs),
+        }
+        if self.instrument is not None:
+            payload["instrument"] = self.instrument
+        if self.difficulty is not None:
+            payload["difficulty"] = self.difficulty
+        if self.difficulty_policies:
+            payload["difficulty_policies"] = list(self.difficulty_policies)
+        return payload
+
+
+@dataclass(frozen=True)
+class ProfileGraphOutput:
+    """A terminal chart artifact declared by a profile graph."""
+
+    instrument: str
+    stage_id: str
+    artifact_id: str
+    difficulty: str
+
+    def as_json(self) -> dict[str, str]:
+        return {
+            "instrument": self.instrument,
+            "stage_id": self.stage_id,
+            "artifact_id": self.artifact_id,
+            "difficulty": self.difficulty,
+        }
+
+
+@dataclass(frozen=True)
+class ProfileGraph:
+    """A path-free composition plan for a complete profile."""
+
+    stages: tuple[ProfileGraphStage, ...]
+    outputs: tuple[ProfileGraphOutput, ...]
+
+    def as_json(self) -> dict[str, object]:
+        return {
+            "format": PROFILE_COMPOSITION_FORMAT,
+            "stages": [stage.as_json() for stage in self.stages],
+            "outputs": [output.as_json() for output in self.outputs],
+        }
+
+
+@dataclass(frozen=True)
 class InferenceProfile:
     """A complete, deployable auto-chart capability within a model bundle."""
 
@@ -56,10 +179,12 @@ class InferenceProfile:
     capability: str
     instruments: tuple[str, ...]
     required_components: tuple[str, ...]
+    required_companions: tuple[str, ...]
     difficulty_policies: tuple[str, ...]
     configuration: Path | None = None
     configuration_sha256: str | None = None
     configuration_byte_length: int | None = None
+    graph: ProfileGraph | None = None
 
 
 @dataclass(frozen=True)
@@ -71,6 +196,7 @@ class ModelBundle:
     schema_version: int
     compatibility: dict[str, Any]
     components: dict[str, ModelComponent]
+    companions: dict[str, RuntimeCompanion]
     profiles: dict[str, InferenceProfile]
     manifest_path: Path | None = None
     legacy: bool = False
@@ -173,16 +299,154 @@ class ModelBundle:
                     errors.append(
                         f"profile {profile.profile_id} requires undeclared component {component_name}"
                     )
+            for companion_name in profile.required_companions:
+                if companion_name not in self.companions:
+                    errors.append(
+                        f"profile {profile.profile_id} requires undeclared companion {companion_name}"
+                    )
+            if profile.graph is not None:
+                errors.extend(self._validate_profile_graph(profile))
             if profile.configuration is not None:
                 if not profile.configuration.is_file():
                     errors.append(
                         f"profile {profile.profile_id}: configuration not found: {profile.configuration}"
                     )
-                elif verify_hashes and _sha256(profile.configuration) != profile.configuration_sha256:
+                elif (
+                    verify_hashes and _sha256(profile.configuration) != profile.configuration_sha256
+                ):
                     errors.append(f"profile {profile.profile_id}: configuration sha256 mismatch")
                 elif profile.configuration.stat().st_size != profile.configuration_byte_length:
-                    errors.append(f"profile {profile.profile_id}: configuration byte length mismatch")
+                    errors.append(
+                        f"profile {profile.profile_id}: configuration byte length mismatch"
+                    )
         return errors
+
+    def _validate_profile_graph(self, profile: InferenceProfile) -> list[str]:
+        """Validate composition semantics after manifest references are resolved."""
+        assert profile.graph is not None
+        graph = profile.graph
+        errors: list[str] = []
+        stages = {stage.stage_id: stage for stage in graph.stages}
+        graph_components = {
+            component_id for stage in graph.stages for component_id in stage.component_ids
+        }
+        graph_companions = {
+            companion_id for stage in graph.stages for companion_id in stage.companion_ids
+        }
+        missing_graph_components = set(profile.required_components) - graph_components
+        if missing_graph_components:
+            errors.append(
+                f"profile {profile.profile_id} required_components are absent from graph: "
+                f"{', '.join(sorted(missing_graph_components))}"
+            )
+        missing_graph_companions = set(profile.required_companions) - graph_companions
+        if missing_graph_companions:
+            errors.append(
+                f"profile {profile.profile_id} required_companions are absent from graph: "
+                f"{', '.join(sorted(missing_graph_companions))}"
+            )
+        produced_by = {
+            artifact_id: stage.stage_id for stage in graph.stages for artifact_id in stage.outputs
+        }
+        if len(produced_by) != sum(len(stage.outputs) for stage in graph.stages):
+            errors.append(f"profile {profile.profile_id} graph artifact outputs must be unique")
+        graph_instruments = {output.instrument for output in graph.outputs}
+        if graph_instruments != set(profile.instruments):
+            errors.append(
+                f"profile {profile.profile_id} graph outputs must cover exactly its profile instruments"
+            )
+        for stage in graph.stages:
+            if stage.instrument is not None and stage.instrument not in profile.instruments:
+                errors.append(
+                    f"profile {profile.profile_id} graph stage {stage.stage_id} names an unsupported instrument"
+                )
+            for dependency in stage.depends_on:
+                if dependency not in stages:
+                    errors.append(
+                        f"profile {profile.profile_id} graph stage {stage.stage_id} depends on unknown stage {dependency}"
+                    )
+            if stage.stage_id in stage.depends_on:
+                errors.append(
+                    f"profile {profile.profile_id} graph stage {stage.stage_id} cannot depend on itself"
+                )
+            for component_name in stage.component_ids:
+                if component_name not in self.components:
+                    errors.append(
+                        f"profile {profile.profile_id} graph stage {stage.stage_id} requires undeclared component {component_name}"
+                    )
+                elif stage.required and component_name not in profile.required_components:
+                    errors.append(
+                        f"profile {profile.profile_id} graph required stage {stage.stage_id} component {component_name} is not in required_components"
+                    )
+            for companion_name in stage.companion_ids:
+                if companion_name not in self.companions:
+                    errors.append(
+                        f"profile {profile.profile_id} graph stage {stage.stage_id} requires undeclared companion {companion_name}"
+                    )
+                elif stage.required and companion_name not in profile.required_companions:
+                    errors.append(
+                        f"profile {profile.profile_id} graph required stage {stage.stage_id} companion {companion_name} is not in required_companions"
+                    )
+            for policy in stage.difficulty_policies:
+                if policy not in profile.difficulty_policies:
+                    errors.append(
+                        f"profile {profile.profile_id} graph stage {stage.stage_id} names unsupported difficulty policy {policy}"
+                    )
+            for artifact_id in stage.outputs:
+                if not artifact_id.startswith(("artifact.", "chart.")):
+                    errors.append(
+                        f"profile {profile.profile_id} graph stage {stage.stage_id} output {artifact_id} must be an artifact or chart identity"
+                    )
+            ancestors = _graph_ancestors(stage.stage_id, stages)
+            for artifact_id in stage.inputs:
+                if artifact_id.startswith("source."):
+                    continue
+                producer = produced_by.get(artifact_id)
+                if producer is None:
+                    errors.append(
+                        f"profile {profile.profile_id} graph stage {stage.stage_id} input {artifact_id} has no producer"
+                    )
+                elif producer not in ancestors:
+                    errors.append(
+                        f"profile {profile.profile_id} graph stage {stage.stage_id} input {artifact_id} is not supplied by a dependency"
+                    )
+        for output in graph.outputs:
+            stage = stages.get(output.stage_id)
+            if not output.artifact_id.startswith("chart."):
+                errors.append(
+                    f"profile {profile.profile_id} graph terminal output {output.artifact_id} must be a chart identity"
+                )
+            if stage is None:
+                errors.append(
+                    f"profile {profile.profile_id} graph output names unknown stage {output.stage_id}"
+                )
+            elif output.artifact_id not in stage.outputs:
+                errors.append(
+                    f"profile {profile.profile_id} graph output {output.artifact_id} is not emitted by stage {output.stage_id}"
+                )
+            elif stage.instrument not in {None, output.instrument}:
+                errors.append(
+                    f"profile {profile.profile_id} graph output instrument does not match stage {output.stage_id}"
+                )
+        if _graph_has_cycle(stages):
+            errors.append(f"profile {profile.profile_id} graph must be acyclic")
+        return errors
+
+    def profile_summary(self, profile: InferenceProfile) -> dict[str, object]:
+        """Return path-free profile discovery data for editor integrations."""
+        payload: dict[str, object] = {
+            "profile_id": profile.profile_id,
+            "capability": profile.capability,
+            "instruments": list(profile.instruments),
+            "required_components": list(profile.required_components),
+            "required_companions": [
+                self.companions[companion].as_json() for companion in profile.required_companions
+            ],
+            "difficulty_policies": list(profile.difficulty_policies),
+        }
+        if profile.graph is not None:
+            payload["composition"] = profile.graph.as_json()
+        return payload
 
     def compatibility_status(self) -> list[str]:
         """Describe compatibility declarations that cannot be verified locally."""
@@ -272,6 +536,198 @@ def _resolve_relative_path(root: Path, value: object, field: str, component: str
     except ValueError as error:
         raise BundleValidationError(f"{component}.{field} escapes the bundle root") from error
     return resolved
+
+
+def _parse_identifier(value: object, field: str) -> str:
+    if not isinstance(value, str) or not _IDENTIFIER_PATTERN.fullmatch(value):
+        raise BundleValidationError(f"{field} must be a lowercase stable identifier")
+    return value
+
+
+def _parse_identifier_list(
+    value: object, field: str, *, allow_empty: bool = True
+) -> tuple[str, ...]:
+    if not isinstance(value, list) or (not allow_empty and not value):
+        raise BundleValidationError(
+            f"{field} must be a {'non-empty ' if not allow_empty else ''}list"
+        )
+    values = tuple(_parse_identifier(item, f"{field} item") for item in value)
+    if len(set(values)) != len(values):
+        raise BundleValidationError(f"{field} must not contain duplicates")
+    return values
+
+
+def _parse_companion(name: str, value: object) -> RuntimeCompanion:
+    if not isinstance(value, dict):
+        raise BundleValidationError(f"companions.{name} must be an object")
+    unknown = set(value) - {"kind", "version"}
+    if unknown:
+        raise BundleValidationError(
+            f"companions.{name} has unknown field(s): {', '.join(sorted(unknown))}"
+        )
+    kind = value.get("kind")
+    version = value.get("version")
+    if kind not in {"runtime", "model_service"}:
+        raise BundleValidationError(f"companions.{name}.kind must be runtime or model_service")
+    if not isinstance(version, str) or not version.strip():
+        raise BundleValidationError(f"companions.{name}.version must be a non-empty string")
+    return RuntimeCompanion(companion_id=name, kind=kind, version=version)
+
+
+def _parse_profile_graph_stage(value: object, profile_name: str) -> ProfileGraphStage:
+    if not isinstance(value, dict):
+        raise BundleValidationError(f"profiles.{profile_name}.graph.stages items must be objects")
+    allowed = {
+        "id",
+        "kind",
+        "instrument",
+        "required",
+        "component_ids",
+        "companion_ids",
+        "depends_on",
+        "inputs",
+        "outputs",
+        "difficulty",
+        "difficulty_policies",
+    }
+    required = {
+        "id",
+        "kind",
+        "required",
+        "component_ids",
+        "companion_ids",
+        "depends_on",
+        "inputs",
+        "outputs",
+    }
+    unknown = set(value) - allowed
+    missing = required - set(value)
+    if unknown:
+        raise BundleValidationError(
+            f"profiles.{profile_name}.graph.stages has unknown field(s): {', '.join(sorted(unknown))}"
+        )
+    if missing:
+        raise BundleValidationError(
+            f"profiles.{profile_name}.graph.stages missing field(s): {', '.join(sorted(missing))}"
+        )
+    stage_id = _parse_identifier(value["id"], f"profiles.{profile_name}.graph.stages.id")
+    kind = _parse_identifier(value["kind"], f"profiles.{profile_name}.graph.stages.{stage_id}.kind")
+    instrument = value.get("instrument")
+    if instrument is not None:
+        instrument = _parse_identifier(
+            instrument, f"profiles.{profile_name}.graph.stages.{stage_id}.instrument"
+        )
+    stage_required = value["required"]
+    if not isinstance(stage_required, bool):
+        raise BundleValidationError(
+            f"profiles.{profile_name}.graph.stages.{stage_id}.required must be a boolean"
+        )
+    difficulty = value.get("difficulty")
+    if difficulty is not None and (not isinstance(difficulty, str) or not difficulty.strip()):
+        raise BundleValidationError(
+            f"profiles.{profile_name}.graph.stages.{stage_id}.difficulty must be a non-empty string"
+        )
+    policies_value = value.get("difficulty_policies", [])
+    if (
+        not isinstance(policies_value, list)
+        or not all(isinstance(policy, str) and policy for policy in policies_value)
+        or len(set(policies_value)) != len(policies_value)
+    ):
+        raise BundleValidationError(
+            f"profiles.{profile_name}.graph.stages.{stage_id}.difficulty_policies must be a unique string list"
+        )
+    return ProfileGraphStage(
+        stage_id=stage_id,
+        kind=kind,
+        instrument=instrument,
+        required=stage_required,
+        component_ids=_parse_identifier_list(
+            value["component_ids"], f"profiles.{profile_name}.graph.stages.{stage_id}.component_ids"
+        ),
+        companion_ids=_parse_identifier_list(
+            value["companion_ids"], f"profiles.{profile_name}.graph.stages.{stage_id}.companion_ids"
+        ),
+        depends_on=_parse_identifier_list(
+            value["depends_on"], f"profiles.{profile_name}.graph.stages.{stage_id}.depends_on"
+        ),
+        inputs=_parse_identifier_list(
+            value["inputs"], f"profiles.{profile_name}.graph.stages.{stage_id}.inputs"
+        ),
+        outputs=_parse_identifier_list(
+            value["outputs"], f"profiles.{profile_name}.graph.stages.{stage_id}.outputs"
+        ),
+        difficulty=difficulty,
+        difficulty_policies=tuple(policies_value),
+    )
+
+
+def _parse_profile_graph(value: object, profile_name: str) -> ProfileGraph:
+    if not isinstance(value, dict):
+        raise BundleValidationError(f"profiles.{profile_name}.graph must be an object")
+    unknown = set(value) - {"stages", "outputs"}
+    required = {"stages", "outputs"}
+    missing = required - set(value)
+    if unknown:
+        raise BundleValidationError(
+            f"profiles.{profile_name}.graph has unknown field(s): {', '.join(sorted(unknown))}"
+        )
+    if missing:
+        raise BundleValidationError(
+            f"profiles.{profile_name}.graph missing field(s): {', '.join(sorted(missing))}"
+        )
+    if not isinstance(value["stages"], list) or not value["stages"]:
+        raise BundleValidationError(
+            f"profiles.{profile_name}.graph.stages must be a non-empty list"
+        )
+    stages = tuple(_parse_profile_graph_stage(stage, profile_name) for stage in value["stages"])
+    stage_ids = {stage.stage_id for stage in stages}
+    if len(stage_ids) != len(stages):
+        raise BundleValidationError(f"profiles.{profile_name}.graph.stages must have unique ids")
+    if not isinstance(value["outputs"], list) or not value["outputs"]:
+        raise BundleValidationError(
+            f"profiles.{profile_name}.graph.outputs must be a non-empty list"
+        )
+    outputs: list[ProfileGraphOutput] = []
+    for output in value["outputs"]:
+        if not isinstance(output, dict):
+            raise BundleValidationError(
+                f"profiles.{profile_name}.graph.outputs items must be objects"
+            )
+        unknown_output = set(output) - {"instrument", "stage_id", "artifact_id", "difficulty"}
+        required_output = {"instrument", "stage_id", "artifact_id", "difficulty"}
+        missing_output = required_output - set(output)
+        if unknown_output or missing_output:
+            details = unknown_output or missing_output
+            raise BundleValidationError(
+                f"profiles.{profile_name}.graph.outputs has invalid field(s): {', '.join(sorted(details))}"
+            )
+        instrument = _parse_identifier(
+            output["instrument"], f"profiles.{profile_name}.graph.outputs.instrument"
+        )
+        stage_id = _parse_identifier(
+            output["stage_id"], f"profiles.{profile_name}.graph.outputs.stage_id"
+        )
+        artifact_id = _parse_identifier(
+            output["artifact_id"], f"profiles.{profile_name}.graph.outputs.artifact_id"
+        )
+        difficulty = output["difficulty"]
+        if not isinstance(difficulty, str) or not difficulty.strip():
+            raise BundleValidationError(
+                f"profiles.{profile_name}.graph.outputs.difficulty must be a non-empty string"
+            )
+        outputs.append(
+            ProfileGraphOutput(
+                instrument=instrument,
+                stage_id=stage_id,
+                artifact_id=artifact_id,
+                difficulty=difficulty,
+            )
+        )
+    if len({output.instrument for output in outputs}) != len(outputs):
+        raise BundleValidationError(
+            f"profiles.{profile_name}.graph.outputs must have one terminal output per instrument"
+        )
+    return ProfileGraph(stages=stages, outputs=tuple(outputs))
 
 
 def _parse_component(root: Path, name: str, value: object) -> ModelComponent:
@@ -364,10 +820,12 @@ def _parse_profile(root: Path, name: str, value: object) -> InferenceProfile:
         "capability",
         "instruments",
         "required_components",
+        "required_companions",
         "difficulty_policies",
         "configuration",
         "configuration_sha256",
         "configuration_byte_length",
+        "graph",
     }
     unknown = set(value) - allowed
     required = {"capability", "instruments", "required_components", "difficulty_policies"}
@@ -384,6 +842,7 @@ def _parse_profile(root: Path, name: str, value: object) -> InferenceProfile:
     instruments = value["instruments"]
     required_components = value["required_components"]
     difficulty_policies = value["difficulty_policies"]
+    required_companions = value.get("required_companions", [])
     if not isinstance(capability, str) or not capability.strip():
         raise BundleValidationError(f"profiles.{name}.capability must be a non-empty string")
     for field, candidate in (
@@ -408,6 +867,9 @@ def _parse_profile(root: Path, name: str, value: object) -> InferenceProfile:
         raise BundleValidationError(
             f"profiles.{name}.difficulty_policies must use expert_only, deterministic-v1, or learned:<id>"
         )
+    required_companion_ids = _parse_identifier_list(
+        required_companions, f"profiles.{name}.required_companions"
+    )
     configuration = _resolve_relative_path(
         root, value.get("configuration"), "configuration", f"profiles.{name}"
     )
@@ -429,15 +891,18 @@ def _parse_profile(root: Path, name: str, value: object) -> InferenceProfile:
         raise BundleValidationError(
             f"profiles.{name}.configuration_sha256 and configuration_byte_length require configuration"
         )
+    graph = _parse_profile_graph(value["graph"], name) if "graph" in value else None
     return InferenceProfile(
         profile_id=name,
         capability=capability,
         instruments=tuple(instruments),
         required_components=tuple(required_components),
+        required_companions=required_companion_ids,
         difficulty_policies=tuple(difficulty_policies),
         configuration=configuration,
         configuration_sha256=configuration_sha256,
         configuration_byte_length=configuration_byte_length,
+        graph=graph,
     )
 
 
@@ -461,7 +926,7 @@ def load_model_bundle(path: str | Path, *, check_files: bool = False) -> ModelBu
         raise BundleValidationError("bundle manifest must be a JSON object")
 
     required = {"schema_version", "model_id", "compatibility", "components"}
-    allowed = {*required, "profiles"}
+    allowed = {*required, "companions", "profiles"}
     unknown = set(raw) - allowed
     missing = required - set(raw)
     if unknown:
@@ -482,10 +947,18 @@ def load_model_bundle(path: str | Path, *, check_files: bool = False) -> ModelBu
         raise BundleValidationError("components must be a non-empty object")
     if "profiles" in raw and not isinstance(raw["profiles"], dict):
         raise BundleValidationError("profiles must be an object")
+    if "companions" in raw and not isinstance(raw["companions"], dict):
+        raise BundleValidationError("companions must be an object")
 
     root = manifest_path.parent.resolve()
     components = {
         name: _parse_component(root, name, value) for name, value in raw["components"].items()
+    }
+    companions = {
+        _parse_identifier(name, "companions key"): _parse_companion(
+            _parse_identifier(name, "companions key"), value
+        )
+        for name, value in raw.get("companions", {}).items()
     }
     profiles = {
         name: _parse_profile(root, name, value) for name, value in raw.get("profiles", {}).items()
@@ -496,6 +969,7 @@ def load_model_bundle(path: str | Path, *, check_files: bool = False) -> ModelBu
         schema_version=raw["schema_version"],
         compatibility=raw["compatibility"],
         components=components,
+        companions=companions,
         profiles=profiles,
         manifest_path=manifest_path,
     )
@@ -552,6 +1026,7 @@ def legacy_model_bundle(root: Path = PROJECT_ROOT) -> ModelBundle:
             "strum_version": f">={__version__}",
         },
         components=components,
+        companions={},
         profiles={},
         legacy=True,
     )

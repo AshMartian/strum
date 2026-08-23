@@ -801,8 +801,12 @@ def validate_inference_profile(
         "capability": profile.capability,
         "instruments": list(profile.instruments),
         "difficulty_policy": difficulty_policy,
+        "required_companions": [
+            bundle.companions[companion].as_json() for companion in profile.required_companions
+        ],
         "profile_configuration_sha256": profile.configuration_sha256,
         "profile_configuration_byte_length": profile.configuration_byte_length,
+        **({"composition": profile.graph.as_json()} if profile.graph is not None else {}),
     }
 
 
@@ -962,6 +966,136 @@ def _chart_result_contract(
     }
 
 
+def _resolved_profile_composition(
+    plan: dict[str, object], *, execution: str
+) -> tuple[dict[str, object], dict[str, object], dict[str, object]]:
+    """Resolve a declarative profile graph without inventing an executor.
+
+    The model-bundle graph is sufficient to validate every required component,
+    dependency, and declared runtime companion at profile-preflight time.  It
+    deliberately does not turn a graph into a chart handler: unless STRUM
+    registers a handler for the exact profile capability, required stages stay
+    ``unavailable`` and ``chart run`` remains fail-closed.
+    """
+    composition = plan.get("composition")
+    if not isinstance(composition, dict):
+        raise AssertionError("composed profile is missing its composition")
+    stages = composition.get("stages")
+    outputs = composition.get("outputs")
+    policy = plan.get("difficulty_policy")
+    requested_instruments = plan.get("instruments")
+    if (
+        not isinstance(stages, list)
+        or not isinstance(outputs, list)
+        or not isinstance(policy, str)
+        or not isinstance(requested_instruments, list)
+    ):
+        raise AssertionError("validated profile composition has an invalid shape")
+
+    resolved_stages: list[dict[str, object]] = []
+    stage_statuses: dict[str, str] = {}
+    for source_stage in stages:
+        if not isinstance(source_stage, dict):
+            raise AssertionError("validated profile composition has a non-object stage")
+        stage = _copy_chart_contract(source_stage)
+        stage_id = stage.get("id")
+        required = stage.get("required")
+        policies = stage.get("difficulty_policies", [])
+        if (
+            not isinstance(stage_id, str)
+            or not isinstance(required, bool)
+            or not isinstance(policies, list)
+        ):
+            raise AssertionError("validated profile composition has an invalid stage")
+        selected = not policies or policy in policies
+        if not selected:
+            status = "not_requested"
+            reason = "difficulty_policy_not_selected"
+        elif not required:
+            status = "not_requested"
+            reason = "optional_stage_not_selected"
+        elif execution == "available":
+            status = "ready"
+            reason = None
+        else:
+            status = "unavailable"
+            reason = "execution_handler_not_declared"
+        stage["status"] = status
+        if reason is not None:
+            stage["reason"] = reason
+        stage_statuses[stage_id] = status
+        resolved_stages.append(stage)
+
+    resolved_outputs: list[dict[str, object]] = []
+    terminal_stage_for_instrument: dict[str, str] = {}
+    terminal_difficulty: dict[str, str] = {}
+    for source_output in outputs:
+        if not isinstance(source_output, dict):
+            raise AssertionError("validated profile composition has a non-object output")
+        output = _copy_chart_contract(source_output)
+        instrument = output.get("instrument")
+        stage_id = output.get("stage_id")
+        difficulty = output.get("difficulty")
+        if not all(isinstance(value, str) for value in (instrument, stage_id, difficulty)):
+            raise AssertionError("validated profile composition has an invalid output")
+        output["status"] = stage_statuses[stage_id]
+        resolved_outputs.append(output)
+        terminal_stage_for_instrument[instrument] = stage_id
+        terminal_difficulty[instrument] = difficulty
+
+    instrument_results: dict[str, object] = {}
+    for instrument in requested_instruments:
+        if not isinstance(instrument, str):
+            raise AssertionError("validated chart plan has an invalid requested instrument")
+        instrument_stages = {
+            stage["id"]: {
+                key: value
+                for key, value in stage.items()
+                if key
+                in {
+                    "status",
+                    "required",
+                    "component_ids",
+                    "companion_ids",
+                    "depends_on",
+                    "difficulty",
+                    "reason",
+                }
+            }
+            for stage in resolved_stages
+            if stage.get("instrument") == instrument
+        }
+        terminal_status = stage_statuses[terminal_stage_for_instrument[instrument]]
+        instrument_results[instrument] = {
+            "status": "ready" if terminal_status == "ready" else "not_available",
+            "stages": instrument_stages,
+        }
+
+    target_difficulties = {
+        terminal_difficulty[instrument]
+        for instrument in requested_instruments
+        if isinstance(instrument, str) and instrument in terminal_difficulty
+    }
+    target_difficulty = target_difficulties.pop() if len(target_difficulties) == 1 else None
+    difficulty = {
+        "policy": policy,
+        "status": "ready" if execution == "available" else "not_available",
+        "source_difficulty": None,
+        "target_difficulty": target_difficulty,
+    }
+    return (
+        {
+            "format": composition["format"],
+            "stages": resolved_stages,
+            "outputs": resolved_outputs,
+            "required_components": [component["id"] for component in plan["components"]],
+            "required_companions": plan["required_companions"],
+        },
+        instrument_results,
+        difficulty,
+    )
+
+
 def _chart_execution_available(
     *, capability: str, difficulty_policy: str, instruments: Sequence[str]
 ) -> bool:
@@ -1114,13 +1248,19 @@ def preflight_chart_request(request_path: Path) -> dict[str, object]:
         )
         else "not_available"
     )
-    instrument_results, difficulty = _chart_result_contract(
-        plan,
-        execution=execution,
-        transform_instrument=transform_instrument,
-        transform_target_difficulty=transform_target_difficulty,
-    )
-    return {
+    if "composition" in plan:
+        composition, instrument_results, difficulty = _resolved_profile_composition(
+            plan, execution=execution
+        )
+    else:
+        composition = None
+        instrument_results, difficulty = _chart_result_contract(
+            plan,
+            execution=execution,
+            transform_instrument=transform_instrument,
+            transform_target_difficulty=transform_target_difficulty,
+        )
+    response: dict[str, object] = {
         "schema_version": 1,
         "format": CHART_PREFLIGHT_FORMAT,
         "status": "ready",
@@ -1133,11 +1273,15 @@ def preflight_chart_request(request_path: Path) -> dict[str, object]:
         "device": raw["device"],
         "manifest_sha256": plan["manifest_sha256"],
         "components": plan["components"],
+        "required_companions": plan["required_companions"],
         "profile_configuration_sha256": profile_configuration_sha256,
         "profile_configuration_byte_length": plan["profile_configuration_byte_length"],
         "instrument_results": instrument_results,
         "difficulty": difficulty,
     }
+    if composition is not None:
+        response["composition"] = composition
+    return response
 
 
 def _read_chart_run_request(request_path: Path, capability: str) -> dict[str, Any]:
@@ -3504,6 +3648,10 @@ def main() -> int:
                     "model_id": bundle.model_id,
                     "manifest_sha256": _manifest_sha256(bundle),
                     "components": sorted(bundle.components),
+                    "profiles": [
+                        bundle.profile_summary(bundle.profiles[profile_id])
+                        for profile_id in sorted(bundle.profiles)
+                    ],
                     "compatibility": bundle.compatibility,
                 }
             )

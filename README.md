@@ -729,9 +729,81 @@ through a legacy fallback. This lets OCTAVE distinguish a deliberately
 partial result from a complete multi-stage auto-chart graph.
 
 The contract never includes catalog, audio, MIDI, model-root, request, or
-output-directory paths. It is intentionally a contract for the existing
-single-profile executions, not a claim that STRUM's legacy multi-instrument
-batch assembly is already a declared worker graph.
+output-directory paths.
+
+### Composed profile graphs
+
+`strum-model-bundle.json` profiles may declare a path-free `graph` for a
+complete future auto-chart composition. The graph is deliberately separate
+from a chart handler: it describes what must be verified, while only STRUM
+code that explicitly registers the profile capability may execute it.
+`strum-worker checkpoint inspect` exposes these safe profile summaries for
+OCTAVE before it offers a profile selector.
+
+Each graph has dependency nodes and terminal chart outputs. A node
+declares its stable ID/kind, optional instrument and difficulty, required flag,
+bundle component IDs, versioned `companions`, upstream stage IDs, and typed
+input/output artifact identities. Inputs beginning `source.` are caller inputs;
+every other input must be emitted by a transitive dependency. Terminal outputs
+bind a declared instrument, producing stage, artifact identity, and difficulty.
+The loader rejects cycles, missing producers, unbound outputs, undeclared
+components/companions, and graph outputs that do not exactly cover the profile
+instruments.
+
+The bundle may declare non-checkpoint runtime companions such as Demucs,
+Basic Pitch, or Whisper in its top-level `companions` object:
+
+```json
+{
+  "companions": {
+    "demucs": { "kind": "runtime", "version": ">=4.0" }
+  },
+  "profiles": {
+    "guitar-composed": {
+      "required_companions": ["demucs"],
+      "graph": {
+        "stages": [
+          {
+            "id": "separate",
+            "kind": "audio_separation",
+            "required": true,
+            "component_ids": ["separation.demucs"],
+            "companion_ids": ["demucs"],
+            "depends_on": [],
+            "inputs": ["source.audio.mix"],
+            "outputs": ["artifact.stem.guitar"]
+          },
+          {
+            "id": "assemble",
+            "kind": "chart_assembly",
+            "instrument": "guitar",
+            "required": true,
+            "component_ids": [],
+            "companion_ids": [],
+            "depends_on": ["separate"],
+            "inputs": ["artifact.stem.guitar"],
+            "outputs": ["chart.guitar.expert"]
+          }
+        ],
+        "outputs": [
+          {
+            "instrument": "guitar",
+            "stage_id": "assemble",
+            "artifact_id": "chart.guitar.expert",
+            "difficulty": "Expert"
+          }
+        ]
+      }
+    }
+  }
+}
+```
+
+Profile validation hashes every required graph component and returns the safe
+companion/version requirements. Chart preflight resolves every graph stage and
+terminal output. If no handler exists for that exact profile capability, it
+reports `execution: not_available` and required stages as `unavailable`; it
+does not invoke the legacy batch pipeline or claim a deployable profile.
 
 The first chart execution capability is intentionally narrow:
 `guitar.hybrid-v2-rule/v1`. It requires a bundle-verified onset checkpoint and

@@ -167,3 +167,206 @@ def test_profile_configuration_is_relative_and_checked(tmp_path: Path) -> None:
 
     assert bundle.profile("guitar-rule").configuration == config
     assert bundle.profile("guitar-rule").configuration_sha256
+
+
+def test_profile_graph_declares_a_path_free_composed_profile(tmp_path: Path) -> None:
+    components: dict[str, dict[str, object]] = {}
+    for component_id in (
+        "separation.demucs",
+        "guitar.onset",
+        "guitar.mapper",
+        "guitar.assembly",
+    ):
+        checkpoint = tmp_path / "weights" / f"{component_id}.bin"
+        checkpoint.parent.mkdir(exist_ok=True)
+        checkpoint.write_bytes(component_id.encode())
+        components[component_id] = {
+            "checkpoint": checkpoint.relative_to(tmp_path).as_posix(),
+            "sha256": hashlib.sha256(checkpoint.read_bytes()).hexdigest(),
+            "byte_length": checkpoint.stat().st_size,
+        }
+    write_manifest(
+        tmp_path,
+        components,
+        companions={"demucs": {"kind": "runtime", "version": ">=4.0"}},
+        profiles={
+            "guitar-composed": {
+                "capability": "guitar.composed/v1",
+                "instruments": ["guitar"],
+                "required_components": list(components),
+                "required_companions": ["demucs"],
+                "difficulty_policies": ["expert_only"],
+                "graph": {
+                    "stages": [
+                        {
+                            "id": "separate",
+                            "kind": "audio_separation",
+                            "required": True,
+                            "component_ids": ["separation.demucs"],
+                            "companion_ids": ["demucs"],
+                            "depends_on": [],
+                            "inputs": ["source.audio.mix"],
+                            "outputs": ["artifact.stem.guitar"],
+                        },
+                        {
+                            "id": "detect",
+                            "kind": "onset_detection",
+                            "instrument": "guitar",
+                            "required": True,
+                            "component_ids": ["guitar.onset"],
+                            "companion_ids": [],
+                            "depends_on": ["separate"],
+                            "inputs": ["artifact.stem.guitar"],
+                            "outputs": ["artifact.guitar.onsets"],
+                            "difficulty": "Expert",
+                        },
+                        {
+                            "id": "map",
+                            "kind": "fret_mapping",
+                            "instrument": "guitar",
+                            "required": True,
+                            "component_ids": ["guitar.mapper"],
+                            "companion_ids": [],
+                            "depends_on": ["detect"],
+                            "inputs": ["artifact.guitar.onsets"],
+                            "outputs": ["artifact.guitar.events"],
+                            "difficulty": "Expert",
+                        },
+                        {
+                            "id": "assemble",
+                            "kind": "chart_assembly",
+                            "instrument": "guitar",
+                            "required": True,
+                            "component_ids": ["guitar.assembly"],
+                            "companion_ids": [],
+                            "depends_on": ["map"],
+                            "inputs": ["artifact.guitar.events"],
+                            "outputs": ["chart.guitar.expert"],
+                            "difficulty": "Expert",
+                        },
+                    ],
+                    "outputs": [
+                        {
+                            "instrument": "guitar",
+                            "stage_id": "assemble",
+                            "artifact_id": "chart.guitar.expert",
+                            "difficulty": "Expert",
+                        }
+                    ],
+                },
+            }
+        },
+    )
+
+    bundle = load_model_bundle(tmp_path, check_files=True)
+
+    profile = bundle.profile("guitar-composed")
+    assert profile is not None and profile.graph is not None
+    assert bundle.profile_summary(profile) == {
+        "profile_id": "guitar-composed",
+        "capability": "guitar.composed/v1",
+        "instruments": ["guitar"],
+        "required_components": list(components),
+        "required_companions": [{"id": "demucs", "kind": "runtime", "version": ">=4.0"}],
+        "difficulty_policies": ["expert_only"],
+        "composition": {
+            "format": "strum-profile-composition/v1",
+            "stages": [
+                {
+                    "id": "separate",
+                    "kind": "audio_separation",
+                    "required": True,
+                    "component_ids": ["separation.demucs"],
+                    "companion_ids": ["demucs"],
+                    "depends_on": [],
+                    "inputs": ["source.audio.mix"],
+                    "outputs": ["artifact.stem.guitar"],
+                },
+                {
+                    "id": "detect",
+                    "kind": "onset_detection",
+                    "required": True,
+                    "component_ids": ["guitar.onset"],
+                    "companion_ids": [],
+                    "depends_on": ["separate"],
+                    "inputs": ["artifact.stem.guitar"],
+                    "outputs": ["artifact.guitar.onsets"],
+                    "instrument": "guitar",
+                    "difficulty": "Expert",
+                },
+                {
+                    "id": "map",
+                    "kind": "fret_mapping",
+                    "required": True,
+                    "component_ids": ["guitar.mapper"],
+                    "companion_ids": [],
+                    "depends_on": ["detect"],
+                    "inputs": ["artifact.guitar.onsets"],
+                    "outputs": ["artifact.guitar.events"],
+                    "instrument": "guitar",
+                    "difficulty": "Expert",
+                },
+                {
+                    "id": "assemble",
+                    "kind": "chart_assembly",
+                    "required": True,
+                    "component_ids": ["guitar.assembly"],
+                    "companion_ids": [],
+                    "depends_on": ["map"],
+                    "inputs": ["artifact.guitar.events"],
+                    "outputs": ["chart.guitar.expert"],
+                    "instrument": "guitar",
+                    "difficulty": "Expert",
+                },
+            ],
+            "outputs": [
+                {
+                    "instrument": "guitar",
+                    "stage_id": "assemble",
+                    "artifact_id": "chart.guitar.expert",
+                    "difficulty": "Expert",
+                }
+            ],
+        },
+    }
+
+
+def test_profile_graph_rejects_an_undeclared_required_companion(tmp_path: Path) -> None:
+    write_manifest(
+        tmp_path,
+        {"guitar.onset": {"checkpoint": "weights/best.pt"}},
+        profiles={
+            "invalid-composed": {
+                "capability": "guitar.composed/v1",
+                "instruments": ["guitar"],
+                "required_components": ["guitar.onset"],
+                "difficulty_policies": ["expert_only"],
+                "graph": {
+                    "stages": [
+                        {
+                            "id": "detect",
+                            "kind": "onset_detection",
+                            "instrument": "guitar",
+                            "required": True,
+                            "component_ids": ["guitar.onset"],
+                            "companion_ids": ["demucs"],
+                            "depends_on": [],
+                            "inputs": ["source.audio.mix"],
+                            "outputs": ["chart.guitar.expert"],
+                        }
+                    ],
+                    "outputs": [
+                        {
+                            "instrument": "guitar",
+                            "stage_id": "detect",
+                            "artifact_id": "chart.guitar.expert",
+                            "difficulty": "Expert",
+                        }
+                    ],
+                },
+            }
+        },
+    )
+
+    with pytest.raises(BundleValidationError, match="undeclared companion demucs"):
+        load_model_bundle(tmp_path)

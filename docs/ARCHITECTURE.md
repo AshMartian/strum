@@ -425,6 +425,16 @@ than requiring STRUM to retain a private-path job. A model folder is validated
 separately from a STRUM runtime with `checkpoint inspect`, `inference profile
 validate`, `chart preflight`, and `chart run`.
 
+Model-bundle profiles can additionally carry a `strum-profile-composition/v1`
+graph. This is the safe declaration for a composed auto-chart profile: stages
+name component IDs, companion runtime IDs/versions, dependency edges, typed
+artifact inputs/outputs, and terminal per-instrument chart outputs. Bundle
+validation proves the graph is acyclic and complete without resolving a source
+or checkpoint path into a renderer payload. Preflight carries the resolved
+graph so OCTAVE can display required companions and every stage. A graph is
+not an execution adapter: unless STRUM implements the exact capability,
+preflight leaves required stages `unavailable` and `chart run` rejects it.
+
 ### Guitar V1 deployment gate
 
 `guitar.onset-fret/v1` produces an experiment bundle, not an auto-chart

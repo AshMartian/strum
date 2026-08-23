@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,12 +16,14 @@ from src.models.chart_transform import EventTransformMLP
 from src.worker import (
     PIPELINES,
     PROTOCOL_VERSION,
+    WorkerRequestError,
     _chart_result_contract,
     _revision,
     _run_without_legacy_output,
     _runtime_payload,
     _write_expert_guitar_midi,
     inspect_catalog,
+    main,
     preflight_bundle,
     preflight_chart_request,
     prepare_dataset_request,
@@ -48,6 +51,103 @@ def _bundle(root: Path, component: dict[str, object]) -> Path:
                 "model_id": "verified-test-bundle",
                 "compatibility": {"manifest_schema": 1, "strum_version": ">=0.1.0"},
                 "components": {"guitar.onset": component},
+            }
+        )
+    )
+    return root
+
+
+def _composed_profile_bundle(root: Path) -> Path:
+    components: dict[str, dict[str, object]] = {}
+    for component_id in (
+        "separation.demucs",
+        "guitar.onset",
+        "guitar.mapper",
+        "guitar.assembly",
+    ):
+        checkpoint = root / "weights" / f"{component_id}.bin"
+        checkpoint.parent.mkdir(exist_ok=True)
+        checkpoint.write_bytes(component_id.encode())
+        components[component_id] = {
+            "checkpoint": checkpoint.relative_to(root).as_posix(),
+            "sha256": hashlib.sha256(checkpoint.read_bytes()).hexdigest(),
+            "byte_length": checkpoint.stat().st_size,
+        }
+    (root / MANIFEST_FILENAME).write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "model_id": "composed-test-bundle",
+                "compatibility": {"manifest_schema": 1, "strum_version": ">=0.1.0"},
+                "components": components,
+                "companions": {"demucs": {"kind": "runtime", "version": ">=4.0"}},
+                "profiles": {
+                    "guitar-composed": {
+                        "capability": "guitar.composed/v1",
+                        "instruments": ["guitar"],
+                        "required_components": list(components),
+                        "required_companions": ["demucs"],
+                        "difficulty_policies": ["expert_only"],
+                        "graph": {
+                            "stages": [
+                                {
+                                    "id": "separate",
+                                    "kind": "audio_separation",
+                                    "required": True,
+                                    "component_ids": ["separation.demucs"],
+                                    "companion_ids": ["demucs"],
+                                    "depends_on": [],
+                                    "inputs": ["source.audio.mix"],
+                                    "outputs": ["artifact.stem.guitar"],
+                                },
+                                {
+                                    "id": "detect",
+                                    "kind": "onset_detection",
+                                    "instrument": "guitar",
+                                    "required": True,
+                                    "component_ids": ["guitar.onset"],
+                                    "companion_ids": [],
+                                    "depends_on": ["separate"],
+                                    "inputs": ["artifact.stem.guitar"],
+                                    "outputs": ["artifact.guitar.onsets"],
+                                    "difficulty": "Expert",
+                                },
+                                {
+                                    "id": "map",
+                                    "kind": "fret_mapping",
+                                    "instrument": "guitar",
+                                    "required": True,
+                                    "component_ids": ["guitar.mapper"],
+                                    "companion_ids": [],
+                                    "depends_on": ["detect"],
+                                    "inputs": ["artifact.guitar.onsets"],
+                                    "outputs": ["artifact.guitar.events"],
+                                    "difficulty": "Expert",
+                                },
+                                {
+                                    "id": "assemble",
+                                    "kind": "chart_assembly",
+                                    "instrument": "guitar",
+                                    "required": True,
+                                    "component_ids": ["guitar.assembly"],
+                                    "companion_ids": [],
+                                    "depends_on": ["map"],
+                                    "inputs": ["artifact.guitar.events"],
+                                    "outputs": ["chart.guitar.expert"],
+                                    "difficulty": "Expert",
+                                },
+                            ],
+                            "outputs": [
+                                {
+                                    "instrument": "guitar",
+                                    "stage_id": "assemble",
+                                    "artifact_id": "chart.guitar.expert",
+                                    "difficulty": "Expert",
+                                }
+                            ],
+                        },
+                    }
+                },
             }
         )
     )
@@ -886,6 +986,147 @@ def test_chart_preflight_returns_an_explicit_non_execution_plan(tmp_path: Path) 
         "source_difficulty": None,
         "target_difficulty": "Expert",
     }
+
+
+def test_composed_profile_preflight_resolves_every_stage_without_claiming_execution(
+    tmp_path: Path,
+) -> None:
+    root = _composed_profile_bundle(tmp_path)
+    request = tmp_path / "chart-request.json"
+    request.write_text(
+        json.dumps(
+            {
+                "model_root": str(root),
+                "profile_id": "guitar-composed",
+                "difficulty_policy": "expert_only",
+                "instruments": ["guitar"],
+                "device": "cpu",
+            }
+        )
+    )
+
+    validation = validate_inference_profile(
+        root, profile_id="guitar-composed", difficulty_policy="expert_only"
+    )
+    plan = preflight_chart_request(request)
+
+    assert validation["required_companions"] == [
+        {"id": "demucs", "kind": "runtime", "version": ">=4.0"}
+    ]
+    assert validation["composition"]["format"] == "strum-profile-composition/v1"
+    assert plan["status"] == "ready"
+    assert plan["execution"] == "not_available"
+    assert plan["composition"]["required_components"] == [
+        "separation.demucs",
+        "guitar.onset",
+        "guitar.mapper",
+        "guitar.assembly",
+    ]
+    assert plan["composition"]["required_companions"] == [
+        {"id": "demucs", "kind": "runtime", "version": ">=4.0"}
+    ]
+    assert [stage["status"] for stage in plan["composition"]["stages"]] == [
+        "unavailable",
+        "unavailable",
+        "unavailable",
+        "unavailable",
+    ]
+    assert plan["composition"]["outputs"] == [
+        {
+            "instrument": "guitar",
+            "stage_id": "assemble",
+            "artifact_id": "chart.guitar.expert",
+            "difficulty": "Expert",
+            "status": "unavailable",
+        }
+    ]
+    assert plan["instrument_results"] == {
+        "guitar": {
+            "status": "not_available",
+            "stages": {
+                "detect": {
+                    "status": "unavailable",
+                    "required": True,
+                    "component_ids": ["guitar.onset"],
+                    "companion_ids": [],
+                    "depends_on": ["separate"],
+                    "difficulty": "Expert",
+                    "reason": "execution_handler_not_declared",
+                },
+                "map": {
+                    "status": "unavailable",
+                    "required": True,
+                    "component_ids": ["guitar.mapper"],
+                    "companion_ids": [],
+                    "depends_on": ["detect"],
+                    "difficulty": "Expert",
+                    "reason": "execution_handler_not_declared",
+                },
+                "assemble": {
+                    "status": "unavailable",
+                    "required": True,
+                    "component_ids": ["guitar.assembly"],
+                    "companion_ids": [],
+                    "depends_on": ["map"],
+                    "difficulty": "Expert",
+                    "reason": "execution_handler_not_declared",
+                },
+            },
+        }
+    }
+    assert str(tmp_path) not in json.dumps(plan)
+
+    run_request = tmp_path / "chart-run.json"
+    run_request.write_text(
+        json.dumps(
+            {
+                "preflight_request": str(request),
+                "source_midi_path": str(tmp_path / "source.mid"),
+                "song_path": None,
+                "output_dir": str(tmp_path / "output"),
+                "threshold": 0.5,
+            }
+        )
+    )
+    with pytest.raises(WorkerRequestError, match="no worker chart execution handler"):
+        run_chart_request(run_request)
+
+
+def test_checkpoint_inspection_discovers_composed_profile_without_locations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _composed_profile_bundle(tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["strum-worker", "checkpoint", "inspect", "--model-root", str(root), "--json"],
+    )
+
+    assert main() == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert len(payload["profiles"]) == 1
+    profile = payload["profiles"][0]
+    assert profile["profile_id"] == "guitar-composed"
+    assert profile["required_companions"] == [
+        {"id": "demucs", "kind": "runtime", "version": ">=4.0"}
+    ]
+    assert profile["composition"]["format"] == "strum-profile-composition/v1"
+    assert [stage["id"] for stage in profile["composition"]["stages"]] == [
+        "separate",
+        "detect",
+        "map",
+        "assemble",
+    ]
+    assert profile["composition"]["outputs"] == [
+        {
+            "instrument": "guitar",
+            "stage_id": "assemble",
+            "artifact_id": "chart.guitar.expert",
+            "difficulty": "Expert",
+        }
+    ]
+    assert str(tmp_path) not in json.dumps(payload)
 
 
 @pytest.mark.parametrize(
