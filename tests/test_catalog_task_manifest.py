@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 from pathlib import Path
 
+import mido
 import pytest
 
 from src.catalog_task_manifest import (
@@ -29,6 +31,19 @@ def _asset(root: Path, payload: bytes, filename: str) -> dict[str, object]:
         "byte_length": len(payload),
         "media_type": None,
     }
+
+
+def _five_lane_midi() -> bytes:
+    midi = mido.MidiFile()
+    for track_name in ("PART GUITAR", "PART BASS"):
+        track = mido.MidiTrack()
+        midi.tracks.append(track)
+        track.append(mido.MetaMessage("track_name", name=track_name, time=0))
+        track.append(mido.Message("note_on", note=96, velocity=100, time=0))
+        track.append(mido.Message("note_off", note=96, velocity=0, time=480))
+    output = io.BytesIO()
+    midi.save(file=output)
+    return output.getvalue()
 
 
 def _record(root: Path, source_id: str, *, training_use: str = "allowed") -> dict[str, object]:
@@ -59,7 +74,7 @@ def _record(root: Path, source_id: str, *, training_use: str = "allowed") -> dic
         },
         "metadata": {"name": "Safe Song"},
         "chart": {
-            "notes_midi": _asset(root, f"{source_id}-midi".encode(), "notes.mid"),
+            "notes_midi": _asset(root, _five_lane_midi(), "notes.mid"),
             "instruments": instruments,
         },
         "audio": {
@@ -130,6 +145,18 @@ def test_rejects_task_label_schema_or_track_tampering(tmp_path: Path) -> None:
     manifest["songs"][0]["label_tracks"] = ["PART GUITAR"]
     with pytest.raises(CatalogValidationError, match="valid approved catalog task input"):
         resolve_catalog_task_manifest_songs(manifest, tmp_path)
+
+
+@pytest.mark.parametrize("task_kind", ("section_guitar", "section_bass"))
+def test_section_task_views_exclude_malformed_midi_sources(tmp_path: Path, task_kind: str) -> None:
+    record = _record(tmp_path, "octave-src-aaaaaaaa")
+    record["chart"]["notes_midi"] = _asset(tmp_path, b"not a midi file", "notes.mid")
+    _catalog(tmp_path, [record])
+
+    manifest = build_catalog_task_manifest(tmp_path, task_kind)
+
+    assert manifest["songs"] == []
+    assert manifest["summary"]["record_count"] == 0
 
 
 def test_pro_task_views_keep_exact_real_track_semantics(tmp_path: Path) -> None:

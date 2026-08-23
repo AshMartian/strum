@@ -16,6 +16,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from src.preprocessing.parsers.guitar_parser import GuitarParser
 from src.song_source_catalog import (
     AUDIO_ROLES,
     CATALOG_FILENAME,
@@ -195,6 +196,26 @@ def available_task_kinds() -> tuple[str, ...]:
     return tuple(sorted(PIPELINE_IDS))
 
 
+def _has_section_label_source(record: object, instrument: str) -> bool:
+    """Return whether an approved MIDI asset is usable by the Section labeler.
+
+    Catalog instrument coverage is intentionally lightweight: it establishes
+    that a source declared an instrument, not that every third-party MIDI byte
+    sequence can be decoded by STRUM's derived-label parser.  Section task
+    views must make that stronger promise because their trainer derives labels
+    directly from five-lane chart events.
+    """
+    notes_midi = getattr(record, "notes_midi", None)
+    path = getattr(notes_midi, "path", None)
+    if not isinstance(path, Path):
+        return False
+    try:
+        chart = GuitarParser().parse(path, instrument=instrument)
+    except (EOFError, OSError, ValueError):
+        return False
+    return bool(chart.notes)
+
+
 def _canonical_json_hash(value: object) -> str:
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode(
         "utf-8"
@@ -310,6 +331,10 @@ def build_catalog_task_manifest(
         record = records[source_id]
         role = selected_roles[source_id]
         coverage = record.instruments[instrument]
+        if task_kind in {"section_guitar", "section_bass"} and not _has_section_label_source(
+            record, instrument
+        ):
+            continue
         songs.append(
             {
                 "source_id": source_id,

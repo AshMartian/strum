@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 from pathlib import Path
 
+import mido
 import numpy as np
 import pytest
 
@@ -27,6 +29,19 @@ def _asset(root: Path, content: bytes, filename: str) -> dict[str, object]:
     }
 
 
+def _five_lane_midi(*track_names: str) -> bytes:
+    midi = mido.MidiFile()
+    for track_name in track_names:
+        track = mido.MidiTrack()
+        midi.tracks.append(track)
+        track.append(mido.MetaMessage("track_name", name=track_name, time=0))
+        track.append(mido.Message("note_on", note=96, velocity=100, time=0))
+        track.append(mido.Message("note_off", note=96, velocity=0, time=480))
+    output = io.BytesIO()
+    midi.save(file=output)
+    return output.getvalue()
+
+
 def _catalog(root: Path) -> None:
     records: list[dict[str, object]] = []
     for index in range(32):
@@ -42,7 +57,11 @@ def _catalog(root: Path) -> None:
                 },
                 "metadata": {"name": f"Section fixture {index}"},
                 "chart": {
-                    "notes_midi": _asset(root, f"midi-{index}".encode(), f"notes-{index}.mid"),
+                    "notes_midi": _asset(
+                        root,
+                        _five_lane_midi("PART GUITAR", "PART BASS"),
+                        f"notes-{index}.mid",
+                    ),
                     "instruments": {
                         "guitar": {
                             "status": "present",
