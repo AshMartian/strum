@@ -103,7 +103,15 @@ def _candidate_config(bundle: ModelBundle) -> dict[str, Any]:
     raw = _read_json(onset.config, "Guitar neural component configuration")
     if fret.config.read_bytes() != onset.config.read_bytes():
         raise BundleValidationError("Guitar neural components must use one identical configuration")
-    required = {"schema_version", "format", "preprocessing", "audio", "onset_model", "fret_model", "onset_inference"}
+    required = {
+        "schema_version",
+        "format",
+        "preprocessing",
+        "audio",
+        "onset_model",
+        "fret_model",
+        "onset_inference",
+    }
     if (
         set(raw) != required
         or raw.get("schema_version") != 1
@@ -136,13 +144,24 @@ def load_guitar_neural_expert_profile(
         raise BundleValidationError("profile is not a guitar.neural-v1-expert/v1 profile")
     if profile.instruments != ("guitar",) or profile.difficulty_policies != ("expert_only",):
         raise BundleValidationError("Guitar neural profile must declare Guitar Expert-only output")
-    if profile.required_components != (ONSET_COMPONENT, FRET_COMPONENT) or profile.configuration is None:
+    if (
+        profile.required_components != (ONSET_COMPONENT, FRET_COMPONENT)
+        or profile.configuration is None
+    ):
         raise BundleValidationError("Guitar neural profile requires onset, fret, and configuration")
     candidate = _candidate_config(bundle)
     raw = _read_json(profile.configuration, "Guitar neural profile configuration")
     required = {
-        "schema_version", "format", "preprocessing", "audio", "onset_model", "fret_model",
-        "onset_threshold", "peak_min_distance_frames", "fret_thresholds", "note_duration_ms",
+        "schema_version",
+        "format",
+        "preprocessing",
+        "audio",
+        "onset_model",
+        "fret_model",
+        "onset_threshold",
+        "peak_min_distance_frames",
+        "fret_thresholds",
+        "note_duration_ms",
         "evaluation",
     }
     if (
@@ -156,17 +175,27 @@ def load_guitar_neural_expert_profile(
     ):
         raise BundleValidationError("Guitar neural profile configuration is incompatible")
     onset_threshold, min_distance, note_duration, thresholds = (
-        raw.get("onset_threshold"), raw.get("peak_min_distance_frames"),
-        raw.get("note_duration_ms"), raw.get("fret_thresholds"),
+        raw.get("onset_threshold"),
+        raw.get("peak_min_distance_frames"),
+        raw.get("note_duration_ms"),
+        raw.get("fret_thresholds"),
     )
     if (
-        not isinstance(onset_threshold, (int, float)) or isinstance(onset_threshold, bool)
+        not isinstance(onset_threshold, (int, float))
+        or isinstance(onset_threshold, bool)
         or not 0 < onset_threshold <= 1
-        or not isinstance(min_distance, int) or isinstance(min_distance, bool) or min_distance < 1
-        or not isinstance(note_duration, (int, float)) or isinstance(note_duration, bool)
+        or not isinstance(min_distance, int)
+        or isinstance(min_distance, bool)
+        or min_distance < 1
+        or not isinstance(note_duration, (int, float))
+        or isinstance(note_duration, bool)
         or not 1 <= note_duration <= 10_000
-        or not isinstance(thresholds, list) or len(thresholds) != 5
-        or not all(isinstance(value, (int, float)) and not isinstance(value, bool) and 0 < value <= 1 for value in thresholds)
+        or not isinstance(thresholds, list)
+        or len(thresholds) != 5
+        or not all(
+            isinstance(value, (int, float)) and not isinstance(value, bool) and 0 < value <= 1
+            for value in thresholds
+        )
     ):
         raise BundleValidationError("Guitar neural profile configuration settings are out of range")
     evaluation = raw.get("evaluation")
@@ -178,7 +207,9 @@ def load_guitar_neural_expert_profile(
         "minimum_fret_f1",
     }:
         raise BundleValidationError("Guitar neural profile requires a verified evaluation artifact")
-    evaluation_path = _resolve_bundle_file(bundle, evaluation["artifact"], "Guitar evaluation artifact")
+    evaluation_path = _resolve_bundle_file(
+        bundle, evaluation["artifact"], "Guitar evaluation artifact"
+    )
     if (
         not isinstance(evaluation.get("sha256"), str)
         or not isinstance(evaluation.get("source_bundle_manifest_sha256"), str)
@@ -187,7 +218,9 @@ def load_guitar_neural_expert_profile(
     ):
         raise BundleValidationError("Guitar evaluation artifact hash does not match")
     if not all(
-        isinstance(evaluation[key], (int, float)) and not isinstance(evaluation[key], bool) and 0 < evaluation[key] <= 1
+        isinstance(evaluation[key], (int, float))
+        and not isinstance(evaluation[key], bool)
+        and 0 < evaluation[key] <= 1
         for key in ("minimum_onset_f1", "minimum_fret_f1")
     ):
         raise BundleValidationError("Guitar evaluation thresholds are invalid")
@@ -213,15 +246,23 @@ def load_guitar_neural_expert_profile(
         or not isinstance(report.get("task_view_sha256"), str)
         or len(report["task_view_sha256"]) != 64
         or report.get("split") != "val"
-        or not isinstance(report.get("records_evaluated"), int) or report["records_evaluated"] < 1
+        or not isinstance(report.get("records_evaluated"), int)
+        or report["records_evaluated"] < 1
         or not isinstance(report.get("alignment_tolerance_ms"), (int, float))
         or isinstance(report["alignment_tolerance_ms"], bool)
         or not 1 <= report["alignment_tolerance_ms"] <= 1_000
-        or not all(isinstance(metric_values.get(key), (int, float)) and not isinstance(metric_values[key], bool) and 0 <= metric_values[key] <= 1 for key in ("onset_f1", "fret_f1", "event_f1"))
+        or not all(
+            isinstance(metric_values.get(key), (int, float))
+            and not isinstance(metric_values[key], bool)
+            and 0 <= metric_values[key] <= 1
+            for key in ("onset_f1", "fret_f1", "event_f1")
+        )
         or metric_values["onset_f1"] < evaluation["minimum_onset_f1"]
         or metric_values["fret_f1"] < evaluation["minimum_fret_f1"]
     ):
-        raise BundleValidationError("Guitar evaluation artifact does not satisfy the deployment gate")
+        raise BundleValidationError(
+            "Guitar evaluation artifact does not satisfy the deployment gate"
+        )
     return GuitarNeuralExpertProfile(
         profile_id=profile_id,
         onset_component=ONSET_COMPONENT,

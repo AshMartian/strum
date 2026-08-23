@@ -63,7 +63,9 @@ def _read_json(path: Path, error_message: str) -> dict[str, Any]:
 
 def _safe_child(root: Path, name: object, label: str) -> Path:
     if not isinstance(name, str) or not name or Path(name).is_absolute():
-        raise DrumsProfilePackagingError(f"Drums experiment {label} is not a safe relative filename")
+        raise DrumsProfilePackagingError(
+            f"Drums experiment {label} is not a safe relative filename"
+        )
     child = (root / name).resolve()
     try:
         child.relative_to(root)
@@ -77,11 +79,24 @@ def _safe_child(root: Path, name: object, label: str) -> Path:
 def _load_experiment(experiment_root: Path) -> tuple[dict[str, Any], Path, Path, dict[str, object]]:
     ledger_path = experiment_root / "experiment.json"
     ledger = _read_json(ledger_path, "Drums experiment ledger is unreadable")
-    required = {"format", "pipeline", "model", "task_view", "preprocessing", "training", "checkpoint", "metrics"}
+    required = {
+        "format",
+        "pipeline",
+        "model",
+        "task_view",
+        "preprocessing",
+        "training",
+        "checkpoint",
+        "metrics",
+    }
     if set(ledger) != required or ledger.get("format") != EXPERIMENT_FORMAT:
         raise DrumsProfilePackagingError("Drums experiment ledger has unsupported fields")
     pipeline, model, training, checkpoint, metrics = (
-        ledger.get("pipeline"), ledger.get("model"), ledger.get("training"), ledger.get("checkpoint"), ledger.get("metrics")
+        ledger.get("pipeline"),
+        ledger.get("model"),
+        ledger.get("training"),
+        ledger.get("checkpoint"),
+        ledger.get("metrics"),
     )
     if (
         pipeline != {"id": "drums.onset-classifier/v1", "version": 1}
@@ -94,7 +109,9 @@ def _load_experiment(experiment_root: Path) -> tuple[dict[str, Any], Path, Path,
         or not isinstance(checkpoint, dict)
         or not isinstance(metrics, dict)
     ):
-        raise DrumsProfilePackagingError("Drums experiment ledger is not a supported V2 worker result")
+        raise DrumsProfilePackagingError(
+            "Drums experiment ledger is not a supported V2 worker result"
+        )
     config_path = _safe_child(experiment_root, training.get("config_name"), "config_name")
     checkpoint_path = _safe_child(experiment_root, checkpoint.get("name"), "checkpoint.name")
     if (
@@ -110,9 +127,13 @@ def _load_experiment(experiment_root: Path) -> tuple[dict[str, Any], Path, Path,
     try:
         config = OmegaConf.to_container(OmegaConf.load(config_path), resolve=True)
     except Exception as error:
-        raise DrumsProfilePackagingError("Drums experiment model configuration is unreadable") from error
+        raise DrumsProfilePackagingError(
+            "Drums experiment model configuration is unreadable"
+        ) from error
     if not isinstance(config, dict) or not isinstance(config.get("model"), dict):
-        raise DrumsProfilePackagingError("Drums experiment model configuration has no model settings")
+        raise DrumsProfilePackagingError(
+            "Drums experiment model configuration has no model settings"
+        )
     parameters = normalize_v2_model_parameters(dict(config["model"]))
     return ledger, config_path, checkpoint_path, parameters
 

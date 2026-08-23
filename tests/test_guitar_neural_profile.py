@@ -96,7 +96,9 @@ def _worker_experiment(root: Path) -> tuple[Path, Path]:
     )
     torch.save(
         {
-            "state_dict": GuitarFretClassifier(FretClassifierConfig(**config["fret_model"])).state_dict(),
+            "state_dict": GuitarFretClassifier(
+                FretClassifierConfig(**config["fret_model"])
+            ).state_dict(),
             "epoch": 1,
             "val_f1": 0.8,
         },
@@ -130,7 +132,10 @@ def _worker_experiment(root: Path) -> tuple[Path, Path]:
         "lifecycle": "completed",
         "pipeline": {"id": "guitar.onset-fret", "version": 1},
         "deployment_status": "requires_profile_packaging",
-        "model_bundle": {"model_id": "catalog-guitar-v1", "manifest_sha256": _sha256(manifest_path)},
+        "model_bundle": {
+            "model_id": "catalog-guitar-v1",
+            "manifest_sha256": _sha256(manifest_path),
+        },
     }
     (experiment / "experiment.json").write_text(json.dumps(experiment_data))
     return experiment, bundle
@@ -232,7 +237,9 @@ def test_profile_runtime_rejects_non_tensor_checkpoint_state(tmp_path: Path) -> 
         GuitarNeuralCharter.from_bundle_profile(packaged, profile, device="cpu")
 
 
-def test_chart_run_uses_only_typed_neural_profile(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_chart_run_uses_only_typed_neural_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     experiment, bundle = _worker_experiment(tmp_path)
     output_bundle = tmp_path / "deployable"
     package_guitar_profile(
@@ -260,7 +267,11 @@ def test_chart_run_uses_only_typed_neural_profile(tmp_path: Path, monkeypatch: p
     request = tmp_path / "run.json"
     request.write_text(
         json.dumps(
-            {"preflight_request": str(preflight), "audio_path": str(audio), "output_dir": str(tmp_path / "result")}
+            {
+                "preflight_request": str(preflight),
+                "audio_path": str(audio),
+                "output_dir": str(tmp_path / "result"),
+            }
         )
     )
     import scripts.preprocess_guitar_windows as preprocess

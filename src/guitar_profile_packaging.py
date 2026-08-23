@@ -128,7 +128,11 @@ def evaluate_guitar_candidate(
     task_view = _read_json(task_view_path, "Guitar task view")
     if task_view.get("format") != MANIFEST_FORMAT:
         raise GuitarProfilePackagingError("Guitar evaluation requires a Guitar catalog task view")
-    songs = [song for song in resolve_guitar_manifest_songs(task_view, catalog_root) if song["split"] == "val"]
+    songs = [
+        song
+        for song in resolve_guitar_manifest_songs(task_view, catalog_root)
+        if song["split"] == "val"
+    ]
     if limit_songs:
         songs = songs[:limit_songs]
     if not songs:
@@ -205,7 +209,9 @@ def _require_candidate_experiment(experiment_dir: Path) -> tuple[Path, dict[str,
     if errors:
         raise GuitarProfilePackagingError("Guitar experiment bundle failed verification")
     source = experiment["model_bundle"]
-    if source.get("model_id") != bundle.model_id or source.get("manifest_sha256") != _sha256(bundle.manifest_path):
+    if source.get("model_id") != bundle.model_id or source.get("manifest_sha256") != _sha256(
+        bundle.manifest_path
+    ):
         raise GuitarProfilePackagingError("Guitar experiment bundle provenance does not match")
     return bundle_root, experiment
 
@@ -235,7 +241,9 @@ def package_guitar_profile(
         isinstance(value, (int, float)) and not isinstance(value, bool) and 0 < value <= 1
         for value in (minimum_onset_f1, minimum_fret_f1)
     ):
-        raise GuitarProfilePackagingError("Guitar deployment metric gates must be between zero and one")
+        raise GuitarProfilePackagingError(
+            "Guitar deployment metric gates must be between zero and one"
+        )
     if not isinstance(note_duration_ms, (int, float)) or not 1 <= note_duration_ms <= 10_000:
         raise GuitarProfilePackagingError("Guitar note_duration_ms is invalid")
     bundle_root, experiment = _require_candidate_experiment(experiment_dir)
@@ -252,20 +260,35 @@ def package_guitar_profile(
         or report.get("bundle_manifest_sha256") != _sha256(bundle.manifest_path)
         or not isinstance(report.get("records_evaluated"), int)
         or report["records_evaluated"] < 1
-        or not all(isinstance(metrics.get(key), (int, float)) and not isinstance(metrics[key], bool) and 0 <= metrics[key] <= 1 for key in ("onset_f1", "fret_f1", "event_f1"))
+        or not all(
+            isinstance(metrics.get(key), (int, float))
+            and not isinstance(metrics[key], bool)
+            and 0 <= metrics[key] <= 1
+            for key in ("onset_f1", "fret_f1", "event_f1")
+        )
         or metrics["onset_f1"] < minimum_onset_f1
         or metrics["fret_f1"] < minimum_fret_f1
     ):
-        raise GuitarProfilePackagingError("Guitar evaluation does not satisfy the requested deployment gate")
+        raise GuitarProfilePackagingError(
+            "Guitar evaluation does not satisfy the requested deployment gate"
+        )
     inference = candidate["onset_inference"]
-    configured_onset_threshold = onset_threshold if onset_threshold is not None else inference.get("peak_threshold")
+    configured_onset_threshold = (
+        onset_threshold if onset_threshold is not None else inference.get("peak_threshold")
+    )
     min_distance = inference.get("peak_min_distance_frames")
     configured_fret_thresholds = fret_thresholds or (0.5,) * 5
     if (
-        not isinstance(configured_onset_threshold, (int, float)) or not 0 < configured_onset_threshold <= 1
-        or not isinstance(min_distance, int) or isinstance(min_distance, bool) or min_distance < 1
+        not isinstance(configured_onset_threshold, (int, float))
+        or not 0 < configured_onset_threshold <= 1
+        or not isinstance(min_distance, int)
+        or isinstance(min_distance, bool)
+        or min_distance < 1
         or len(configured_fret_thresholds) != 5
-        or not all(isinstance(value, (int, float)) and not isinstance(value, bool) and 0 < value <= 1 for value in configured_fret_thresholds)
+        or not all(
+            isinstance(value, (int, float)) and not isinstance(value, bool) and 0 < value <= 1
+            for value in configured_fret_thresholds
+        )
     ):
         raise GuitarProfilePackagingError("Guitar inference thresholds are invalid")
     shutil.copytree(bundle_root, output_dir)
@@ -293,7 +316,9 @@ def package_guitar_profile(
     }
     config_path = output_dir / "profiles" / f"{profile_id}.json"
     config_path.parent.mkdir(parents=True)
-    config_path.write_text(json.dumps(profile_config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    config_path.write_text(
+        json.dumps(profile_config, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
     manifest_path = output_dir / MANIFEST_FILENAME
     manifest = _read_json(manifest_path, "Guitar bundle manifest")
     profiles = manifest.setdefault("profiles", {})
@@ -308,10 +333,14 @@ def package_guitar_profile(
         "configuration_sha256": _sha256(config_path),
         "configuration_byte_length": config_path.stat().st_size,
     }
-    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
     provenance_path = output_dir / "provenance" / "source-experiment.json"
     provenance_path.parent.mkdir(parents=True)
-    provenance_path.write_text(json.dumps(experiment, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    provenance_path.write_text(
+        json.dumps(experiment, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
     return {
         "status": "packaged",
         "model_id": bundle.model_id,

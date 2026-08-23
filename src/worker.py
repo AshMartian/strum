@@ -595,7 +595,11 @@ def _chart_execution_available(
     if capability == "difficulty.transform/v1":
         return len(instruments) == 1 and difficulty_policy.startswith("learned:")
     required = expected.get(capability)
-    return required is not None and tuple(instruments) == (required[0],) and difficulty_policy == required[1]
+    return (
+        required is not None
+        and tuple(instruments) == (required[0],)
+        and difficulty_policy == required[1]
+    )
 
 
 def _complete_chart_stage(
@@ -1970,7 +1974,9 @@ def package_checkpoint_request(request_path: Path) -> dict[str, object]:
     try:
         raw = json.loads(request_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
-        raise WorkerRequestError("checkpoint package request is unreadable or not valid JSON") from error
+        raise WorkerRequestError(
+            "checkpoint package request is unreadable or not valid JSON"
+        ) from error
     if not isinstance(raw, dict) or set(raw) != {"pipeline_id", "experiment_root", "output"}:
         raise WorkerRequestError("checkpoint package request has unsupported fields")
     if raw.get("pipeline_id") != "drums.onset-classifier/v1":
@@ -2155,7 +2161,9 @@ def main() -> int:
                         )
                     )
                 except GuitarProfilePackagingError as error:
-                    raise WorkerRequestError("Guitar profile evaluation request is invalid") from error
+                    raise WorkerRequestError(
+                        "Guitar profile evaluation request is invalid"
+                    ) from error
                 return 0
             try:
                 fret_thresholds = (
@@ -2201,7 +2209,9 @@ def main() -> int:
         if args.command == "checkpoint" and args.checkpoint_command == "package":
             if args.json_events:
                 return _run_event_stream(
-                    args.request, "checkpoint_package", lambda: package_checkpoint_request(args.request)
+                    args.request,
+                    "checkpoint_package",
+                    lambda: package_checkpoint_request(args.request),
                 )
             _print_json(package_checkpoint_request(args.request))
             return 0

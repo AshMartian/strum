@@ -9,6 +9,7 @@ Produces a list of (time_sec, frets:set[int]) events from raw audio.
 Audio path → mono 22050 Hz → log-mel (matches preprocess_guitar_windows.py
 exactly) → onset CRNN → peak-pick → window slice → fret classifier.
 """
+
 from __future__ import annotations
 
 import logging
@@ -44,7 +45,7 @@ log = logging.getLogger("guitar_neural")
 @dataclass
 class GuitarEvent:
     time_sec: float
-    frets: tuple[int, ...]   # sorted, may be empty (open note)
+    frets: tuple[int, ...]  # sorted, may be empty (open note)
     onset_prob: float
     fret_probs: tuple[float, ...]  # per-bit sigmoid, length 5
 
@@ -100,7 +101,9 @@ class GuitarNeuralCharter:
             self.default_onset_thr = float(inf["peak_threshold"])
             self.default_min_dist_frames = int(inf["peak_min_distance_frames"])
         except (KeyError, TypeError, ValueError) as error:
-            raise BundleValidationError("Guitar neural inference configuration is invalid") from error
+            raise BundleValidationError(
+                "Guitar neural inference configuration is invalid"
+            ) from error
         self.default_fret_thr = 0.5
 
     @staticmethod
@@ -109,10 +112,15 @@ class GuitarNeuralCharter:
         try:
             raw = torch.load(path, map_location="cpu", weights_only=True)
         except Exception as error:  # torch may raise pickle-specific load errors.
-            raise BundleValidationError(f"Guitar {stage} checkpoint cannot be safely loaded") from error
+            raise BundleValidationError(
+                f"Guitar {stage} checkpoint cannot be safely loaded"
+            ) from error
         if not isinstance(raw, dict) or not isinstance(raw.get("state_dict"), dict):
             raise BundleValidationError(f"Guitar {stage} checkpoint has no tensor state dict")
-        if not all(isinstance(name, str) and isinstance(value, torch.Tensor) for name, value in raw["state_dict"].items()):
+        if not all(
+            isinstance(name, str) and isinstance(value, torch.Tensor)
+            for name, value in raw["state_dict"].items()
+        ):
             raise BundleValidationError(f"Guitar {stage} checkpoint state dict is invalid")
         return raw
 
@@ -125,7 +133,10 @@ class GuitarNeuralCharter:
         device: str | None,
     ) -> GuitarNeuralCharter:
         """Construct only from a typed profile and its declared components."""
-        onset, fret = bundle.component(profile.onset_component), bundle.component(profile.fret_component)
+        onset, fret = (
+            bundle.component(profile.onset_component),
+            bundle.component(profile.fret_component),
+        )
         if onset is None or fret is None or onset.checkpoint is None or fret.checkpoint is None:
             raise BundleValidationError("Guitar neural profile components are incomplete")
         return cls(
@@ -156,8 +167,8 @@ class GuitarNeuralCharter:
     @torch.inference_mode()
     def predict_onset_probs(self, log_mel: torch.Tensor) -> np.ndarray:
         """Run the onset CRNN over the full song. Returns (T,) sigmoid probs."""
-        x = log_mel.unsqueeze(0).unsqueeze(0).to(self.device)   # (1,1,M,T)
-        logits = self.onset(x).squeeze(0)                       # (T,)
+        x = log_mel.unsqueeze(0).unsqueeze(0).to(self.device)  # (1,1,M,T)
+        logits = self.onset(x).squeeze(0)  # (T,)
         probs = torch.sigmoid(logits).cpu().numpy()
         return probs.astype(np.float32)
 
@@ -166,7 +177,7 @@ class GuitarNeuralCharter:
         """Greedy local-max peak picking, returns frame indices."""
         above = probs >= threshold
         out: list[int] = []
-        last = -10**9
+        last = -(10**9)
         T = len(probs)
         for i in range(1, T - 1):
             if not above[i]:
@@ -251,7 +262,9 @@ class GuitarNeuralCharter:
                 Green-fret under-prediction in the flat-0.5 default.
         """
         thr_on = onset_threshold if onset_threshold is not None else self.default_onset_thr
-        min_d = min_distance_frames if min_distance_frames is not None else self.default_min_dist_frames
+        min_d = (
+            min_distance_frames if min_distance_frames is not None else self.default_min_dist_frames
+        )
         if fret_thresholds_per_bit is not None:
             thr_fr_arr = np.asarray(fret_thresholds_per_bit, dtype=np.float32)
             assert thr_fr_arr.shape == (5,), f"expected length-5, got {thr_fr_arr.shape}"
@@ -259,9 +272,9 @@ class GuitarNeuralCharter:
             scalar = fret_threshold if fret_threshold is not None else self.default_fret_thr
             thr_fr_arr = np.full(5, scalar, dtype=np.float32)
 
-        log_mel = self.compute_logmel(audio)                    # (M, T)
-        probs = self.predict_onset_probs(log_mel)               # (T,)
-        peaks = self.peak_pick(probs, thr_on, min_d)            # (N,) frame idx
+        log_mel = self.compute_logmel(audio)  # (M, T)
+        probs = self.predict_onset_probs(log_mel)  # (T,)
+        peaks = self.peak_pick(probs, thr_on, min_d)  # (N,) frame idx
 
         fret_probs, valid = self.predict_frets(log_mel, peaks)  # (N,5),(N,)
 
@@ -276,12 +289,14 @@ class GuitarNeuralCharter:
             # Fallback: if no bit crosses threshold, take argmax
             if not frets:
                 frets = (int(np.argmax(fret_probs[i])),)
-            events.append(GuitarEvent(
-                time_sec=t_sec,
-                frets=frets,
-                onset_prob=float(probs[fr]),
-                fret_probs=tuple(float(x) for x in fret_probs[i]),
-            ))
+            events.append(
+                GuitarEvent(
+                    time_sec=t_sec,
+                    frets=frets,
+                    onset_prob=float(probs[fr]),
+                    fret_probs=tuple(float(x) for x in fret_probs[i]),
+                )
+            )
         return events
 
 
@@ -310,6 +325,7 @@ def export_events_to_midi(
     track.append(mido.MetaMessage("set_tempo", tempo=tempo_us))
 
     tpb = mid.ticks_per_beat
+
     def sec_to_tick(seconds: float) -> int:
         return int(round(seconds * tempo_bpm / 60.0 * tpb))
 
@@ -323,15 +339,19 @@ def export_events_to_midi(
             note = FRET_TO_MIDI[f]
             msgs.append((on_t, True, note))
             msgs.append((off_t, False, note))
-    msgs.sort(key=lambda x: (x[0], x[1]))   # off before on at same tick
+    msgs.sort(key=lambda x: (x[0], x[1]))  # off before on at same tick
 
     last_t = 0
     for tick, is_on, note in msgs:
         delta = max(0, tick - last_t)
-        track.append(mido.Message(
-            "note_on" if is_on else "note_off",
-            note=note, velocity=100 if is_on else 0, time=delta,
-        ))
+        track.append(
+            mido.Message(
+                "note_on" if is_on else "note_off",
+                note=note,
+                velocity=100 if is_on else 0,
+                time=delta,
+            )
+        )
         last_t = tick
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -347,7 +367,7 @@ _DEFAULT_ONSET_CKPT = get_active_bundle().checkpoint(
     "guitar.onset", ROOT / "checkpoints" / "guitar_v2" / "guitar_v2_onset" / "best.pt"
 )
 assert _DEFAULT_ONSET_CKPT is not None
-_DEFAULT_FRET_CKPT  = ROOT / "checkpoints" / "guitar_v2" / "guitar_v2_fret"  / "best.pt"
+_DEFAULT_FRET_CKPT = ROOT / "checkpoints" / "guitar_v2" / "guitar_v2_fret" / "best.pt"
 
 # Per-bit fret thresholds tuned on the val split via
 # scripts/sweep_fret_thresholds.py. Lifts event F1 from 0.170 (flat 0.5)
@@ -409,7 +429,9 @@ def transcribe_guitar_neural(
     ch = _get_charter(device=device)
     events = ch.transcribe(
         audio,
-        onset_threshold=confidence_threshold if confidence_threshold is not None else _DEFAULT_ONSET_THRESHOLD,
+        onset_threshold=confidence_threshold
+        if confidence_threshold is not None
+        else _DEFAULT_ONSET_THRESHOLD,
         fret_thresholds_per_bit=_DEFAULT_FRET_THRESHOLDS,
     )
 
@@ -420,15 +442,19 @@ def transcribe_guitar_neural(
     for ev in events:
         t_ms = ev.time_sec * 1000.0
         if len(ev.frets) >= 2:
-            chart.chords.append(GuitarChord(
-                time_ms=t_ms,
-                frets=list(ev.frets),
-            ))
+            chart.chords.append(
+                GuitarChord(
+                    time_ms=t_ms,
+                    frets=list(ev.frets),
+                )
+            )
         elif len(ev.frets) == 1:
-            chart.notes.append(GuitarNote(
-                time_ms=t_ms,
-                fret=int(ev.frets[0]),
-            ))
+            chart.notes.append(
+                GuitarNote(
+                    time_ms=t_ms,
+                    fret=int(ev.frets[0]),
+                )
+            )
     return chart
 
 

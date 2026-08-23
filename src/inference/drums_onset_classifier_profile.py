@@ -91,7 +91,11 @@ def normalize_v2_model_parameters(raw: object) -> dict[str, object]:
         }.items()
     ):
         raise BundleValidationError("Drums V2 optional branches are unsupported")
-    if values["projection_dim"] != 128 or values["tom_head_hidden"] != 256 or values["crash_flux_dim"] != 32:
+    if (
+        values["projection_dim"] != 128
+        or values["tom_head_hidden"] != 256
+        or values["crash_flux_dim"] != 32
+    ):
         raise BundleValidationError("Drums V2 auxiliary parameters are incompatible")
     return values
 
@@ -127,8 +131,16 @@ def load_drums_onset_classifier_evaluation_profile(
         or component.preprocessing != PREPROCESSING
     ):
         raise BundleValidationError("Drums classifier profile has incomplete verified assets")
-    model_config = _load_json(component.config, "Drums classifier model configuration is unreadable")
-    if set(model_config) != {"schema_version", "format", "model_architecture", "preprocessing", "model_parameters"} or (
+    model_config = _load_json(
+        component.config, "Drums classifier model configuration is unreadable"
+    )
+    if set(model_config) != {
+        "schema_version",
+        "format",
+        "model_architecture",
+        "preprocessing",
+        "model_parameters",
+    } or (
         model_config.get("schema_version") != 1
         or model_config.get("format") != MODEL_CONFIG_FORMAT
         or model_config.get("model_architecture") != ARCHITECTURE
@@ -136,10 +148,20 @@ def load_drums_onset_classifier_evaluation_profile(
     ):
         raise BundleValidationError("Drums classifier model configuration has unsupported fields")
     parameters = normalize_v2_model_parameters(model_config.get("model_parameters"))
-    configuration = _load_json(profile.configuration, "Drums classifier profile configuration is unreadable")
+    configuration = _load_json(
+        profile.configuration, "Drums classifier profile configuration is unreadable"
+    )
     required = {
-        "schema_version", "format", "model_architecture", "preprocessing", "execution_scope",
-        "class_names", "fine_mel_shape", "coarse_mel_shape", "context_shape", "output_contract",
+        "schema_version",
+        "format",
+        "model_architecture",
+        "preprocessing",
+        "execution_scope",
+        "class_names",
+        "fine_mel_shape",
+        "coarse_mel_shape",
+        "context_shape",
+        "output_contract",
         "auto_chart_status",
     }
     if (
