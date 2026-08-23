@@ -442,11 +442,16 @@ the standard Expert lanes 96--100. The worker invokes the shared feature
 extractor with `--instrument bass`, then produces only `bass.onset` and
 `bass.fret` components with a `strum-bass-neural-model-config/v1` configuration.
 
-The resulting experiment has
-`deployment_status: requires_bass_profile_evaluation_and_packaging` and no
-`inference_capability`. It cannot be selected by `chart run`, cannot be
-packaged as `guitar.neural-v1-expert/v1`, and must receive a Bass-specific
-held-out evaluator plus a compatible runtime profile before deployment.
+The raw experiment has
+`deployment_status: requires_bass_profile_evaluation_and_packaging` and cannot
+be selected by `chart run` or packaged as `guitar.neural-v1-expert/v1`.
+`strum-worker bass profile evaluate` resolves the approved catalog only while
+it validates the held-out task-view split against `PART BASS`; it records only
+aggregate metrics and content hashes. `strum-worker bass profile package` then
+copies a gate-satisfying experiment into an immutable
+`bass.neural-v1-expert/v1` bundle. The typed runtime consumes only
+`bass.onset`/`bass.fret`, tensor-only checkpoints, and that profile's
+configuration, writes `PART BASS`, and supports only Expert output.
 
 ### Keys V1 experiment gate
 

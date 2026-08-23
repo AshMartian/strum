@@ -415,9 +415,10 @@ PIPELINES = (
         prepare_schema=_object_schema(CATALOG_AUDIO_OPTIONS),
         train_schema=BASS_TRAIN_SCHEMA,
         checkpoint_outputs=("bass.onset", "bass.fret"),
-        # These are training experiments only. A Bass evaluator and runtime
-        # profile must exist before a chart run can select them.
-        inference_capability=None,
+        # Raw experiments still require a held-out Bass evaluation and an
+        # immutable Bass-only profile.  The capability names the profile type,
+        # not an implicit promotion of every worker checkpoint.
+        inference_capability="bass.neural-v1-expert/v1",
         status="catalog_ready",
         preparation_status="available",
         training_status="available",
@@ -956,6 +957,7 @@ def _chart_execution_available(
     expected = {
         "guitar.hybrid-v2-rule/v1": ("guitar", "expert_only"),
         "guitar.neural-v1-expert/v1": ("guitar", "expert_only"),
+        "bass.neural-v1-expert/v1": ("bass", "expert_only"),
         "drums.v14-expert/v1": ("drums", "expert_only"),
     }
     if capability == "difficulty.transform/v1":
@@ -1049,6 +1051,14 @@ def preflight_chart_request(request_path: Path) -> dict[str, object]:
         bundle = load_model_bundle(raw["model_root"], check_files=True)
         typed = load_guitar_neural_expert_profile(bundle, raw["profile_id"])
         profile_configuration_sha256 = typed.configuration_sha256
+    elif plan["capability"] == "bass.neural-v1-expert/v1":
+        from src.inference.bass_neural_profile import (  # noqa: PLC0415
+            load_bass_neural_expert_profile,
+        )
+
+        bundle = load_model_bundle(raw["model_root"], check_files=True)
+        typed = load_bass_neural_expert_profile(bundle, raw["profile_id"])
+        profile_configuration_sha256 = typed.configuration_sha256
     elif plan["capability"] == "drums.v14-expert/v1":
         from src.inference.drums_v14_profile import (  # noqa: PLC0415
             load_drums_v14_expert_profile,
@@ -1117,7 +1127,12 @@ def _read_chart_run_request(request_path: Path, capability: str) -> dict[str, An
     expected = (
         {"preflight_request", "audio_path", "output_dir"}
         if capability
-        in {"guitar.hybrid-v2-rule/v1", "guitar.neural-v1-expert/v1", "drums.v14-expert/v1"}
+        in {
+            "guitar.hybrid-v2-rule/v1",
+            "guitar.neural-v1-expert/v1",
+            "bass.neural-v1-expert/v1",
+            "drums.v14-expert/v1",
+        }
         else {"preflight_request", "source_midi_path", "song_path", "output_dir", "threshold"}
     )
     if not isinstance(raw, dict) or set(raw) != expected:
@@ -1139,8 +1154,8 @@ def _read_chart_run_request(request_path: Path, capability: str) -> dict[str, An
     return raw
 
 
-def _write_expert_guitar_midi(chart: Any, output_path: Path) -> None:
-    """Write only Expert Guitar—lower difficulties need an explicit STRUM policy."""
+def _write_expert_five_lane_midi(chart: Any, output_path: Path, *, track_name: str) -> None:
+    """Write one explicit Expert five-lane track with no difficulty fallback."""
     import mido  # noqa: PLC0415
 
     ticks_per_beat = 480
@@ -1175,7 +1190,7 @@ def _write_expert_guitar_midi(chart: Any, output_path: Path) -> None:
     midi = mido.MidiFile(ticks_per_beat=ticks_per_beat)
     track = mido.MidiTrack()
     midi.tracks.append(track)
-    track.append(mido.MetaMessage("track_name", name="PART GUITAR", time=0))
+    track.append(mido.MetaMessage("track_name", name=track_name, time=0))
     track.append(mido.MetaMessage("set_tempo", tempo=tempo, time=0))
     previous = 0
     for tick, is_on, midi_note in messages:
@@ -1190,6 +1205,16 @@ def _write_expert_guitar_midi(chart: Any, output_path: Path) -> None:
         previous = tick
     output_path.parent.mkdir(parents=True, exist_ok=True)
     midi.save(output_path)
+
+
+def _write_expert_guitar_midi(chart: Any, output_path: Path) -> None:
+    """Write only Expert Guitar—lower difficulties need an explicit STRUM policy."""
+    _write_expert_five_lane_midi(chart, output_path, track_name="PART GUITAR")
+
+
+def _write_expert_bass_midi(chart: Any, output_path: Path) -> None:
+    """Write only Expert Bass—lower difficulties need an explicit STRUM policy."""
+    _write_expert_five_lane_midi(chart, output_path, track_name="PART BASS")
 
 
 def _write_five_lane_midi(
@@ -1428,6 +1453,71 @@ def run_chart_request(request_path: Path) -> dict[str, object]:
                 instrument_results,
                 difficulty,
                 instrument="guitar",
+                stage_name="expert_chart",
+                artifact_ids=("notes_midi",),
+            )
+            response = {"output_name": midi_path.name, "expert_event_count": len(events)}
+        elif plan["capability"] == "bass.neural-v1-expert/v1":
+            audio_path = Path(request["audio_path"])
+            if not audio_path.is_file():
+                raise WorkerRequestError("chart input audio is unavailable")
+            from scripts.preprocess_guitar_windows import load_audio_mono_22050  # noqa: PLC0415
+            from src.inference.bass_neural_profile import (  # noqa: PLC0415
+                BassNeuralCharter,
+                load_bass_neural_expert_profile,
+            )
+            from src.inference.guitar_bass import (  # noqa: PLC0415
+                GuitarChart,
+                GuitarChord,
+                GuitarNote,
+            )
+
+            audio = load_audio_mono_22050(audio_path)
+            if audio is None:
+                raise WorkerRequestError("chart input audio is unreadable")
+            profile = load_bass_neural_expert_profile(bundle, preflight_raw["profile_id"])
+            events = _run_without_legacy_output(
+                lambda: BassNeuralCharter.from_bundle_profile(
+                    bundle, profile, device=plan["device"]
+                ).transcribe(
+                    audio,
+                    onset_threshold=profile.onset_threshold,
+                    min_distance_frames=profile.peak_min_distance_frames,
+                    fret_thresholds_per_bit=profile.fret_thresholds,
+                )
+            )
+            chart = GuitarChart(tempo_bpm=120.0, instrument="bass")
+            for event in events:
+                if len(event.frets) >= 2:
+                    chart.chords.append(
+                        GuitarChord(
+                            time_ms=event.time_sec * 1000.0,
+                            frets=list(event.frets),
+                            duration_ms=profile.note_duration_ms,
+                        )
+                    )
+                elif event.frets:
+                    chart.notes.append(
+                        GuitarNote(
+                            time_ms=event.time_sec * 1000.0,
+                            fret=event.frets[0],
+                            duration_ms=profile.note_duration_ms,
+                        )
+                    )
+            midi_path = output_dir / "notes.mid"
+            _write_expert_bass_midi(chart, midi_path)
+            artifacts = {"notes_midi": {"name": midi_path.name, "sha256": _sha256(midi_path)}}
+            stages = {
+                "bass_neural": {
+                    "status": "succeeded",
+                    "expert_event_count": len(events),
+                    "evaluation_sha256": profile.evaluation_sha256,
+                }
+            }
+            _complete_chart_stage(
+                instrument_results,
+                difficulty,
+                instrument="bass",
                 stage_name="expert_chart",
                 artifact_ids=("notes_midi",),
             )
@@ -2714,6 +2804,34 @@ def _parse_args() -> argparse.Namespace:
     guitar_package.add_argument("--fret-thresholds", help="JSON array of exactly five values")
     guitar_package.add_argument("--note-duration-ms", type=float, default=100.0)
     guitar_package.add_argument("--json", action="store_true")
+    bass = commands.add_parser("bass", help="evaluate and package Bass V1 profiles")
+    bass_commands = bass.add_subparsers(dest="bass_command", required=True)
+    bass_profile = bass_commands.add_parser("profile", help="manage Bass neural profiles")
+    bass_profile_commands = bass_profile.add_subparsers(dest="bass_profile_command", required=True)
+    bass_evaluate = bass_profile_commands.add_parser(
+        "evaluate", help="evaluate an un-packaged catalog-trained Bass pair"
+    )
+    bass_evaluate.add_argument("--bundle-root", type=Path, required=True)
+    bass_evaluate.add_argument("--task-view", type=Path, required=True)
+    bass_evaluate.add_argument("--catalog-root", type=Path, required=True)
+    bass_evaluate.add_argument("--output", type=Path, required=True)
+    bass_evaluate.add_argument("--device", choices=("cpu", "cuda", "mps"), default="cpu")
+    bass_evaluate.add_argument("--tolerance-ms", type=float, default=50.0)
+    bass_evaluate.add_argument("--limit-songs", type=int, default=0)
+    bass_evaluate.add_argument("--json", action="store_true")
+    bass_package = bass_profile_commands.add_parser(
+        "package", help="copy an evaluated Bass experiment into a deployable bundle"
+    )
+    bass_package.add_argument("--experiment", type=Path, required=True)
+    bass_package.add_argument("--evaluation", type=Path, required=True)
+    bass_package.add_argument("--output", type=Path, required=True)
+    bass_package.add_argument("--profile", required=True)
+    bass_package.add_argument("--minimum-onset-f1", type=float, required=True)
+    bass_package.add_argument("--minimum-fret-f1", type=float, required=True)
+    bass_package.add_argument("--onset-threshold", type=float)
+    bass_package.add_argument("--fret-thresholds", help="JSON array of exactly five values")
+    bass_package.add_argument("--note-duration-ms", type=float, default=100.0)
+    bass_package.add_argument("--json", action="store_true")
     model = commands.add_parser("model", help="inspect model bundles")
     model_commands = model.add_subparsers(dest="model_command", required=True)
     preflight = model_commands.add_parser("preflight", help="validate a deployable model bundle")
@@ -2841,6 +2959,56 @@ def main() -> int:
                 )
             except GuitarProfilePackagingError as error:
                 raise WorkerRequestError("Guitar profile packaging request is invalid") from error
+            return 0
+        if args.command == "bass" and args.bass_command == "profile":
+            from src.bass_profile_packaging import (  # noqa: PLC0415
+                BassProfilePackagingError,
+                evaluate_bass_candidate,
+                package_bass_profile,
+            )
+
+            if args.bass_profile_command == "evaluate":
+                try:
+                    _print_json(
+                        evaluate_bass_candidate(
+                            bundle_root=args.bundle_root,
+                            task_view_path=args.task_view,
+                            catalog_root=args.catalog_root,
+                            output_path=args.output,
+                            device=args.device,
+                            tolerance_ms=args.tolerance_ms,
+                            limit_songs=args.limit_songs,
+                        )
+                    )
+                except BassProfilePackagingError as error:
+                    raise WorkerRequestError(
+                        "Bass profile evaluation request is invalid"
+                    ) from error
+                return 0
+            try:
+                fret_thresholds = (
+                    tuple(json.loads(args.fret_thresholds))
+                    if args.fret_thresholds is not None
+                    else None
+                )
+            except json.JSONDecodeError as error:
+                raise WorkerRequestError("Bass fret thresholds are invalid JSON") from error
+            try:
+                _print_json(
+                    package_bass_profile(
+                        experiment_dir=args.experiment,
+                        evaluation_path=args.evaluation,
+                        output_dir=args.output,
+                        profile_id=args.profile,
+                        minimum_onset_f1=args.minimum_onset_f1,
+                        minimum_fret_f1=args.minimum_fret_f1,
+                        onset_threshold=args.onset_threshold,
+                        fret_thresholds=fret_thresholds,
+                        note_duration_ms=args.note_duration_ms,
+                    )
+                )
+            except BassProfilePackagingError as error:
+                raise WorkerRequestError("Bass profile packaging request is invalid") from error
             return 0
         if args.command == "model" and args.model_command == "preflight":
             _print_json(

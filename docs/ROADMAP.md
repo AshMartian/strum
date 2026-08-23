@@ -11,7 +11,7 @@ auto-chart handler.
 | Family | Catalog task view | Worker training | Executable worker profile |
 | --- | --- | --- | --- |
 | Guitar onset + fret | Available | Available; experiment-only | `guitar.hybrid-v2-rule/v1`, or evaluated `guitar.neural-v1-expert/v1`; Expert only |
-| Bass onset + fret | Available | Available; experiment-only | Planned; requires a separate Bass evaluator and runtime profile |
+| Bass onset + fret | Available | Available; raw experiment gated | Evaluated `bass.neural-v1-expert/v1`; Expert only |
 | Keys onset + fret | Available | Available; experiment-only | Planned; requires a separate Keys evaluator and runtime profile |
 | Vocals activity + pitch | Available | Available; experiment-only | Planned; requires phrase/lyric/talky/harmony stages and Vocal evaluation |
 | Drums onset + classifier | Available | Available; V2 evaluation package | `drums.v14-expert/v1` direct Expert charts; V2 is evaluation-only |
@@ -60,8 +60,9 @@ presented as a successful OCTAVE auto-chart result.
   revalidated `PART GUITAR`, `PART BASS`, and `PART KEYS` task views; their
   components and experiment configuration IDs remain distinct. All raw
   experiments are non-deployable. Guitar V1 has an explicit
-  validation/packaging path; Bass and Keys require their own evaluator and
-  profile contracts before promotion.
+  validation/packaging path. Bass now has its own held-out `PART BASS`
+  evaluator and hash-verified Expert-only profile/runtime; Keys remains
+  profile-gated.
 - ✅ Catalog-backed, worker-trainable Vocal frame activity + sung-pitch
   experiments. `vocals_activity` selects only `PART VOCALS`, retains
   phrase/lyric metadata, and emits no inference profile: a playable Vocal
@@ -87,9 +88,9 @@ presented as a successful OCTAVE auto-chart result.
 1. Calibrate/evaluate Guitar, Bass, and Keys V1 on useful held-out catalogs and
    establish complete instrument-specific profiles. Guitar's packaging path
    verifies architecture, preprocessing, component hashes, tensor-only state
-   dictionaries, and a revalidated validation report. Bass and Keys must add
-   equivalent instrument-specific evaluation and packaging without reusing a
-   Guitar profile. The current V2 Drums package is intentionally Stage-2
+   dictionaries, and a revalidated validation report. Bass now has equivalent
+   instrument-specific evaluation and packaging without reusing a Guitar
+   profile; Keys must add its own. The current V2 Drums package is intentionally Stage-2
    evaluation only; no artifact is promoted solely because its checkpoint
    exists.
 2. Replace the remaining legacy auto-chart assembly behavior with declared,

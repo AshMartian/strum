@@ -170,7 +170,7 @@ def test_bass_pipeline_advertises_a_strict_worker_training_schema() -> None:
     assert descriptor.train_schema["required"] == ["model_id"]
     assert "catalog_root" not in descriptor.train_schema["properties"]
     assert descriptor.checkpoint_outputs == ("bass.onset", "bass.fret")
-    assert descriptor.inference_capability is None
+    assert descriptor.inference_capability == "bass.neural-v1-expert/v1"
 
 
 def test_five_lane_preprocessor_reads_part_bass_not_part_guitar(tmp_path: Path) -> None:

@@ -599,9 +599,13 @@ Bass invokes the same five-lane CRNN implementation only after STRUM has
 revalidated the dedicated `bass_onset_fret` task view and its `PART BASS`
 labels. It emits distinct `bass.onset` and `bass.fret` components plus a
 `strum-bass-neural-model-config/v1` configuration. Its experiment status is
-`requires_bass_profile_evaluation_and_packaging`: no Bass runtime profile or
-`inference_capability` exists yet, so this artifact cannot be selected for
-auto-charting or substituted for Guitar.
+`requires_bass_profile_evaluation_and_packaging`: that raw artifact cannot be
+selected for auto-charting or substituted for Guitar. A separate `bass profile
+evaluate` command revalidates held-out `PART BASS` labels and a `bass profile
+package` command may then copy it into a hash-verified
+`bass.neural-v1-expert/v1` bundle. The deployable profile emits only
+`PART BASS` Expert notes; lower difficulties remain an explicit STRUM
+difficulty-transform decision.
 
 Pro Guitar, Pro Bass, and Pro Keys are deliberately **not** aliases for those
 five-lane experiments. They are catalog-ready only. Their discovered
