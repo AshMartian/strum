@@ -232,6 +232,12 @@ def test_vocals_pipeline_exposes_strict_private_catalog_training_contract() -> N
         "vocals.lyric_alignment",
         "vocals.talky_activity",
     }
+    assert contract["available_source_policies"]["harmony"] == {
+        "pipeline_id": "vocals.harmony-source-policy/v1",
+        "task_format": "strum-vocal-harmony-source-task/v1",
+        "status": "prepare_only",
+        "shared_vocal_or_mix_fallback": False,
+    }
 
 
 def test_vocal_lyric_pipeline_packages_exact_part_vocals_experiment(

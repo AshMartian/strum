@@ -555,11 +555,19 @@ bounded component. Its labels are only duration-bearing note-96 spans on exact
 The trainer requires an observed note-96 span in both train and validation,
 which prevents an all-negative evaluation from becoming a plausible model.
 `HARM1`, `HARM2`, and `HARM3` are distinct source tracks and are deliberately
-not collapsed into a lead target or trained from a shared vocal stem without a
-separate harmony-source policy. The planned `strum.instrument-chart/vocals/v1`
-descriptor preserves harmony, composition, held-out evaluation, packaging, and
-execution requirements in a machine-readable non-executable contract. No
-Vocal worker path may invent those outputs from a raw component.
+not collapsed into a lead target or trained from a shared vocal stem. The
+catalog-preparation-only `vocals.harmony-source-policy/v1` worker path accepts
+only OCTAVE's hash-bound `vocal-harmony-sources.json` sidecar. Each selected
+track requires its own `harm1`, `harm2`, or `harm3` managed asset, the exact
+decoded HARM MIDI track, and either an attested original isolated stem or a
+separation output whose mix input, separator model, and configuration hashes
+are all pinned. There is no `vocals`/`mix` fallback; a catalog without the
+sidecar is ineligible. This produces a path-free source task only, not a
+Harmony checkpoint, profile, or chart handler. The planned
+`strum.instrument-chart/vocals/v1` descriptor preserves the remaining harmony
+model, composition, held-out evaluation, packaging, and execution requirements
+in a machine-readable non-executable contract. No Vocal worker path may invent
+those outputs from a raw component.
 
 ## 11. Hardware
 

@@ -88,7 +88,12 @@ presented as a successful OCTAVE auto-chart result.
   one-epoch result is not quality evidence; curation still needs substantially
   more held-out talky examples.
   The planned generic Vocal descriptor retains harmony, composition, held-out
-  evaluation, packaging, and execution stages.
+  evaluation, packaging, and execution stages. `vocals.harmony-source-policy/v1`
+  now exposes the preceding data boundary only: it prepares path-free HARM
+  source selections after OCTAVE supplies explicit `harm1`/`harm2`/`harm3`
+  assets and a hash-pinned original-stem or separation-provenance sidecar.
+  Shared vocal/mix assets and catalogs without that provenance remain ineligible;
+  this is not a Harmony trainer or profile.
 - ✅ Catalog-backed, worker-trainable Guitar/Bass fret-mapper experiments.
   They require the `pitch` extra, preserve catalog train/validation splits,
   record the Basic Pitch distribution/version that generated their features,

@@ -21,7 +21,14 @@ TRAINING_ALLOWED = "allowed"
 INSTRUMENTS = frozenset(
     {"drums", "guitar", "bass", "keys", "vocals", "pro_keys", "pro_guitar", "pro_bass"}
 )
-AUDIO_ROLES = frozenset({"mix", "drums", "guitar", "bass", "keys", "vocals", "other"})
+# ``harm1``/``harm2``/``harm3`` are intentionally distinct from the generic
+# ``vocals`` role.  The latter commonly contains lead and backing voices
+# together, so it is never sufficient evidence for an isolated Harmony target.
+# The additional roles are optional and only become usable through STRUM's
+# separately validated vocal-harmony source policy.
+AUDIO_ROLES = frozenset(
+    {"mix", "drums", "guitar", "bass", "keys", "vocals", "harm1", "harm2", "harm3", "other"}
+)
 DIFFICULTIES = frozenset({"easy", "medium", "hard", "expert"})
 SOURCE_ID_PATTERN = re.compile(r"^octave-src-[a-z0-9][a-z0-9-]{7,127}$")
 SHA256_PATTERN = re.compile(r"^[a-f0-9]{64}$")

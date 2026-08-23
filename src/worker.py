@@ -66,6 +66,11 @@ from src.song_source_catalog import (
     load_catalog,
     select_training_sources,
 )
+from src.vocal_harmony_catalog import (
+    build_vocal_harmony_source_task,
+    inspect_vocal_harmony_source_catalog,
+    write_vocal_harmony_source_task,
+)
 
 PROTOCOL_VERSION = 1
 MODEL_BUNDLE_SCHEMA_VERSIONS = (1,)
@@ -316,6 +321,14 @@ VOCALS_TRAINING_CONTRACT: dict[str, object] = {
         "vocals.lyric_alignment",
         "vocals.talky_activity",
     ],
+    "available_source_policies": {
+        "harmony": {
+            "pipeline_id": "vocals.harmony-source-policy/v1",
+            "task_format": "strum-vocal-harmony-source-task/v1",
+            "status": "prepare_only",
+            "shared_vocal_or_mix_fallback": False,
+        }
+    },
     "required_stages": list(PLANNED_TRAINING_REQUIREMENTS["vocals"]),
     "execution": {"status": "not_available", "inference_capability": None},
 }
@@ -430,6 +443,18 @@ VOCALS_ACTIVITY_TRAIN_SCHEMA = _object_schema(
         "seed": {"type": "integer", "minimum": 0, "default": 20260822},
     },
     required=("model_id",),
+)
+VOCAL_HARMONY_SOURCE_PREPARE_SCHEMA = _object_schema(
+    {
+        "harmony_tracks": {
+            "type": "array",
+            "items": {"type": "string", "enum": ["HARM1", "HARM2", "HARM3"]},
+            "minItems": 1,
+            "uniqueItems": True,
+        },
+        "split_ratios": {"type": "array", "items": {"type": "integer"}},
+        "split_seed": {"type": "string", "default": "catalog-source-id/v1"},
+    }
 )
 VOCALS_ACTIVITY_PREPARE_SCHEMA = _object_schema(
     {
@@ -551,6 +576,40 @@ PIPELINES = (
             "audio_feature_mode",
             "audio_role",
             "fallback_audio_role",
+        ),
+    ),
+    PipelineDescriptor(
+        id="vocals.harmony-source-policy/v1",
+        display_name="Vocal harmony isolated-source policy",
+        kind="dataset_policy",
+        version=1,
+        catalog_requirements={
+            "instrument": "vocals",
+            "difficulties": ["expert"],
+            "label_tracks": ["HARM1", "HARM2", "HARM3"],
+            "audio_roles": ["harm1", "harm2", "harm3"],
+            "audio_policy": "isolated_harmony_only:no_fallback_to_vocals_or_mix",
+            "source_policy_format": "octave-vocal-harmony-source-policy/v1",
+            "source_provenance": [
+                "isolated_source_stem/v1",
+                "isolated_separation_output/v1",
+            ],
+        },
+        prepare_schema=VOCAL_HARMONY_SOURCE_PREPARE_SCHEMA,
+        train_schema=None,
+        checkpoint_outputs=(),
+        inference_capability=None,
+        status="catalog_ready",
+        preparation_status="available",
+        training_status="not_available",
+        private_request_fields=("catalog_root",),
+        catalog_inspection_option_keys=("harmony_tracks",),
+        training_requirements=(
+            "vocal_harmony_model_component/v1",
+            "vocal_chart_composition_contract/v1",
+            "vocal_held_out_chart_evaluation/v1",
+            "vocal_profile_package/v1",
+            "vocal_chart_execution/v1",
         ),
     ),
     PipelineDescriptor(
@@ -2611,6 +2670,18 @@ def _inspect_pipeline_catalog(
 ) -> dict[str, object]:
     """Produce one uniform, path-free planning summary for a pipeline."""
     pipeline_id = descriptor.id
+    if pipeline_id == "vocals.harmony-source-policy/v1":
+        permitted = {"harmony_tracks"}
+        if set(options) - permitted:
+            raise WorkerRequestError("unsupported Vocal harmony source-policy inspection option")
+        tracks = options.get("harmony_tracks")
+        if tracks is not None and (
+            not isinstance(tracks, list) or not all(isinstance(track, str) for track in tracks)
+        ):
+            raise WorkerRequestError("vocal harmony harmony_tracks must be an array of strings")
+        result = inspect_vocal_harmony_source_catalog(catalog.root, harmony_tracks=tracks)
+        result["storage_estimate_semantics"] = CATALOG_STORAGE_ESTIMATE_SEMANTICS
+        return result
     if pipeline_id == "guitar.onset-fret/v1":
         permitted = {"audio_role", "fallback_audio_role", "required_difficulty"}
         if set(options) - permitted:
@@ -2838,6 +2909,36 @@ def prepare_dataset_request(request_path: Path) -> dict[str, object]:
         manifest = build_guitar_manifest(catalog_root, **options)
         written = write_guitar_manifest(output, manifest)
         record_count = manifest["summary"]["record_count"]
+        task_view_id = _task_view_digest(manifest)
+    elif pipeline_id == "vocals.harmony-source-policy/v1":
+        permitted = {"harmony_tracks", "split_ratios", "split_seed"}
+        if set(options) - permitted:
+            raise WorkerRequestError("unsupported Vocal harmony source-policy preparation option")
+        tracks = options.get("harmony_tracks")
+        ratios = options.get("split_ratios", (80, 10, 10))
+        seed = options.get("split_seed", "catalog-source-id/v1")
+        if (
+            not isinstance(ratios, list | tuple)
+            or len(ratios) != 3
+            or not all(isinstance(value, int) for value in ratios)
+        ):
+            raise WorkerRequestError("vocal harmony split_ratios must be three integers")
+        if not isinstance(seed, str):
+            raise WorkerRequestError("vocal harmony split_seed must be a string")
+        try:
+            manifest = build_vocal_harmony_source_task(
+                catalog_root,
+                harmony_tracks=tracks,
+                split_ratios=tuple(ratios),
+                split_seed=seed,
+            )
+        except (TypeError, ValueError) as error:
+            raise WorkerRequestError("vocal harmony source-policy preparation failed") from error
+        written = write_vocal_harmony_source_task(output, manifest)
+        summary = manifest["summary"]
+        assert isinstance(summary, dict)
+        record_count = summary["record_count"]
+        assert isinstance(record_count, int)
         task_view_id = _task_view_digest(manifest)
     elif pipeline_id == "bass.onset-fret/v1":
         permitted = {"audio_role", "fallback_audio_role", "required_difficulty"}

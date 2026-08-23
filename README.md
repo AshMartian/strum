@@ -644,8 +644,46 @@ pitchless/talky activity from duration-bearing MIDI note-96 spans on exact
 `PART VOCALS`, never from a sung-pitch label. It requires observed note-96
 spans in both train and validation splits and fails closed otherwise. All four
 raw components remain experiment-only. `HARM1`/`HARM2`/`HARM3` remain separate
-source tracks; a shared vocal stem is not evidence for an isolated harmony
-target, so no harmony worker is claimed until its source policy is explicit.
+source tracks. `vocals.harmony-source-policy/v1` is a catalog-preparation-only
+gate, not a model: OCTAVE must materialize a distinct `harm1`/`harm2`/`harm3`
+asset and a hash-bound `vocal-harmony-sources.json` sidecar for every selected
+target. The sidecar must attest either an original isolated source stem or a
+separation output pinned to its catalog mix input, separator model, and
+configuration hashes. Shared `vocals` and `mix` assets have no Harmony
+fallback. Existing catalogs without that policy are intentionally ineligible;
+no Harmony trainer, profile, or chart execution is claimed.
+
+The OCTAVE-managed sidecar is deliberately small and path-free:
+
+```json
+{
+  "schema_version": 1,
+  "format": "octave-vocal-harmony-source-policy/v1",
+  "policy_id": "curated-harmony-v1",
+  "catalog_id": "…",
+  "catalog_control_sha256": "…",
+  "records": [{
+    "source_id": "octave-src-…",
+    "track_name": "HARM1",
+    "audio": {"role": "harm1", "asset_id": "sha256:…", "sha256": "…"},
+    "provenance": {
+      "kind": "isolated_separation_output/v1",
+      "timeline": "same-master-timeline/v1",
+      "input": {"asset_id": "sha256:…", "sha256": "…"},
+      "separator": {
+        "id": "demucs", "version": "v4",
+        "model_sha256": "…", "configuration_sha256": "…"
+      }
+    }
+  }]
+}
+```
+
+For a licensed original stem, replace `provenance` with
+`{"kind":"isolated_source_stem/v1","timeline":"same-master-timeline/v1","attestation_id":"…"}`.
+The exact selected HARM track and asset identity are revalidated at Prepare;
+the policy cannot use `vocals` or `mix` in place of a `harmN` output role.
+
 The planned `strum.instrument-chart/vocals/v1` descriptor publishes those
 remaining machine-readable stages and rejects chart execution until a composed
 Vocal profile has passed held-out chart evaluation and packaging. OCTAVE must
