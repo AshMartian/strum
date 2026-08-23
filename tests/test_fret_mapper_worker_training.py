@@ -187,6 +187,13 @@ def test_guitar_fret_mapper_worker_uses_catalog_splits_and_packages_no_profile(
         "frame_threshold": 0.3,
         "min_note_length": 11,
     }
+    assert config["model"] == {
+        "format": "strum-fret-mapper-mlp/v1",
+        "input_dimension": 95,
+        "hidden": 256,
+        "output_dimension": 5,
+        "dropout": 0.2,
+    }
 
 
 def test_mapper_dataset_payload_keeps_the_catalog_split(tmp_path: Path) -> None:

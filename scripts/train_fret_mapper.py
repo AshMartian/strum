@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import sys
 import time
 from pathlib import Path
 
@@ -27,28 +28,14 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
+from src.models.fret_mapper import FretMapperMLP  # noqa: E402
+
 log = logging.getLogger("train_fret_mapper")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-
-
-class FretMapperMLP(nn.Module):
-    def __init__(self, in_dim: int = 95, hidden: int = 256, out_dim: int = 5, p_drop: float = 0.2):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(in_dim, hidden),
-            nn.GELU(),
-            nn.Dropout(p_drop),
-            nn.Linear(hidden, hidden),
-            nn.GELU(),
-            nn.Dropout(p_drop),
-            nn.Linear(hidden, hidden),
-            nn.GELU(),
-            nn.Dropout(p_drop),
-            nn.Linear(hidden, out_dim),
-        )
-
-    def forward(self, x):
-        return self.net(x)
 
 
 def load_cache(
@@ -240,12 +227,15 @@ def main():
     args.out.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
         {
+            "format": "strum-fret-mapper-weights/v1",
             "model_state": best_state,
-            "in_dim": Xtr.shape[1],
+            "input_dimension": Xtr.shape[1],
             "hidden": args.hidden,
-            "feature_mean": mu,
-            "feature_std": sd,
-            "best_val_f1": best_f1,
+            "output_dimension": 5,
+            # Keep this payload compatible with ``torch.load(weights_only=True)``.
+            # NumPy arrays would require unsafe pickle global allowlisting.
+            "feature_mean": torch.from_numpy(mu.copy()),
+            "feature_std": torch.from_numpy(sd.copy()),
         },
         args.out,
     )

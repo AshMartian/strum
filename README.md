@@ -604,6 +604,14 @@ schemas contain only bounded model/training knobs. The private top-level
 Keys, Drums, Vocals, and fret-mapper task-view revalidation, never a pipeline
 option or renderer control.
 
+New catalog mapper artifacts use `strum-fret-mapper-weights/v1`: their model
+state and feature normalization are CPU tensors, so STRUM's typed
+candidate-loader can use `torch.load(weights_only=True)` and strictly verify
+the declared MLP dimensions before any future evaluation or package step. It
+is intentionally not a chart handler and does not relax the remaining
+instrument-specific composition, Basic-Pitch runtime, Viterbi, or end-to-end
+held-out evaluation gates.
+
 Guitar invokes the established window-preprocessing and two-stage onset/fret
 trainers, then packages verified `guitar.onset` and `guitar.fret` bundle
 components with task-view lineage. Like the Drums path, its output is an

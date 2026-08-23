@@ -379,6 +379,13 @@ def run_catalog_fret_mapper_training(
         "preprocessing": PREPROCESSING_ID,
         "feature_dimension": 95,
         "label_schema": "five-lane-fret-mapper-midi/v1",
+        "model": {
+            "format": "strum-fret-mapper-mlp/v1",
+            "input_dimension": 95,
+            "hidden": options.hidden,
+            "output_dimension": 5,
+            "dropout": options.dropout,
+        },
         "basic_pitch": {
             "distribution": BASIC_PITCH_DISTRIBUTION,
             "version": basic_pitch_version,

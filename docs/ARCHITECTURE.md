@@ -370,6 +370,15 @@ script interfaces remain preparation-only; catalog readiness does not make a
 trainer worker-runnable, and any script output is not deployment-ready until
 STRUM evaluates and packages a model bundle/profile.
 
+Catalog fret-mapper components now have an equally narrow typed candidate
+loader. `strum-fret-mapper-weights/v1` contains only tensor state and tensor
+normalization values (plus primitive architecture metadata), and
+`load_fret_mapper_candidate` uses `torch.load(weights_only=True)`, checks the
+declared `FretMapperMLP/v1` dimensions, and loads state strictly. This is a
+checkpoint safety/evaluation boundary only: it is not a Guitar/Bass chart
+profile, has no worker execution capability, and does not bridge the Basic
+Pitch/Viterbi/held-out chart-evaluation requirements.
+
 Section training is also intentionally experiment-only. The established
 `SectionRouter` uses a librosa frontend, while the catalog worker trains with
 torchaudio features. The runtime must not substitute a worker checkpoint into
