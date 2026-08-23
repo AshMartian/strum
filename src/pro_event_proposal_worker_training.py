@@ -9,11 +9,9 @@ candidate: it cannot emit MIDI or execute an auto-chart run.
 from __future__ import annotations
 
 import json
-import re
 import shutil
 import subprocess
 import sys
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -30,7 +28,9 @@ from src.pro_event_proposal_preprocessing import (
     PRO_EVENT_PROPOSAL_PREPROCESSING_ID,
     ProEventProposalPreprocessError,
     prepare_pro_event_proposal_windows,
+    validate_pro_event_proposal_negative_policy,
 )
+from src.pro_event_proposal_training_options import ProEventProposalTrainingOptions
 from src.pro_event_worker_training import (
     _canonical_sha256,
     _resolve_device,
@@ -45,7 +45,6 @@ from src.song_source_catalog import CatalogValidationError
 
 EXPERIMENT_FORMAT = "strum-pro-event-proposal-candidate-experiment/v1"
 MODEL_IMPLEMENTATION = "ProEventProposalCNN/v1"
-_MODEL_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 _PIPELINE_BY_KIND = {
     "pro_guitar": "strum.instrument-chart/pro-guitar/v1",
     "pro_bass": "strum.instrument-chart/pro-bass/v1",
@@ -55,95 +54,6 @@ _PIPELINE_BY_KIND = {
 
 class ProEventProposalTrainingError(ValueError):
     """Raised when an event-proposal candidate cannot prove its inputs."""
-
-
-@dataclass(frozen=True)
-class ProEventProposalTrainingOptions:
-    model_id: str
-    epochs: int = 25
-    batch_size: int = 32
-    learning_rate: float = 0.0003
-    device: str = "auto"
-    limit_songs: int = 0
-    max_train_batches: int = 0
-    max_val_batches: int = 0
-    seed: int = 20260822
-    channels: int = 48
-    negative_ratio: int = 4
-    negative_exclusion_ms: int = 80
-
-    @classmethod
-    def from_mapping(cls, raw: dict[str, Any]) -> ProEventProposalTrainingOptions:
-        permitted = {
-            "model_id",
-            "epochs",
-            "batch_size",
-            "learning_rate",
-            "device",
-            "limit_songs",
-            "max_train_batches",
-            "max_val_batches",
-            "seed",
-            "channels",
-            "negative_ratio",
-            "negative_exclusion_ms",
-        }
-        if set(raw) - permitted:
-            raise ProEventProposalTrainingError("unsupported Pro event proposal training option")
-        model_id = raw.get("model_id")
-        if not isinstance(model_id, str) or not _MODEL_ID.fullmatch(model_id):
-            raise ProEventProposalTrainingError("Pro event proposal model_id is invalid")
-        values: dict[str, Any] = {"model_id": model_id}
-        for key, default, minimum in (
-            ("epochs", 25, 1),
-            ("batch_size", 32, 1),
-            ("limit_songs", 0, 0),
-            ("max_train_batches", 0, 0),
-            ("max_val_batches", 0, 0),
-            ("seed", 20260822, 0),
-            ("channels", 48, 1),
-            ("negative_ratio", 4, 1),
-            ("negative_exclusion_ms", 80, 0),
-        ):
-            value = raw.get(key, default)
-            if not isinstance(value, int) or isinstance(value, bool) or value < minimum:
-                raise ProEventProposalTrainingError(f"Pro event proposal {key} is invalid")
-            if key == "negative_ratio" and value > 32:
-                raise ProEventProposalTrainingError("Pro event proposal negative_ratio is invalid")
-            if key == "negative_exclusion_ms" and value > 5000:
-                raise ProEventProposalTrainingError(
-                    "Pro event proposal negative_exclusion_ms is invalid"
-                )
-            values[key] = value
-        learning_rate = raw.get("learning_rate", 0.0003)
-        if (
-            not isinstance(learning_rate, (int, float))
-            or isinstance(learning_rate, bool)
-            or learning_rate <= 0
-        ):
-            raise ProEventProposalTrainingError("Pro event proposal learning_rate is invalid")
-        values["learning_rate"] = float(learning_rate)
-        device = raw.get("device", "auto")
-        if device not in {"auto", "cpu", "cuda", "mps"}:
-            raise ProEventProposalTrainingError("Pro event proposal device is invalid")
-        values["device"] = device
-        return cls(**values)
-
-    def portable(self) -> dict[str, object]:
-        return {
-            "model_id": self.model_id,
-            "epochs": self.epochs,
-            "batch_size": self.batch_size,
-            "learning_rate": self.learning_rate,
-            "device": self.device,
-            "limit_songs": self.limit_songs,
-            "max_train_batches": self.max_train_batches,
-            "max_val_batches": self.max_val_batches,
-            "seed": self.seed,
-            "channels": self.channels,
-            "negative_ratio": self.negative_ratio,
-            "negative_exclusion_ms": self.negative_exclusion_ms,
-        }
 
 
 def _run_script(command: list[str]) -> None:
@@ -257,12 +167,24 @@ def run_catalog_pro_event_proposal_training(
     cache_preprocessing = cache_summary.get("preprocessing")
     if not isinstance(cache_preprocessing, dict):
         raise ProEventProposalTrainingError("Pro proposal preprocessing summary is invalid")
+    audio_features = cache_preprocessing.get("audio_features")
+    if not isinstance(audio_features, dict):
+        raise ProEventProposalTrainingError("Pro proposal audio feature policy is invalid")
     negative_policy = cache_preprocessing.get("negative_policy")
-    if (
-        not isinstance(negative_policy, dict)
-        or negative_policy.get("id") != PRO_EVENT_PROPOSAL_NEGATIVE_POLICY_ID
-    ):
-        raise ProEventProposalTrainingError("Pro proposal negative policy is invalid")
+    try:
+        negative_policy = validate_pro_event_proposal_negative_policy(
+            negative_policy,
+            audio_features=audio_features,
+        )
+    except ProEventProposalPreprocessError as error:
+        raise ProEventProposalTrainingError("Pro proposal negative policy is invalid") from error
+    expected_negative_options = {
+        "negative_ratio": options.negative_ratio,
+        "negative_exclusion_ms": options.negative_exclusion_ms,
+        "negative_seed": options.seed,
+    }
+    if negative_policy["requested_options"] != expected_negative_options:
+        raise ProEventProposalTrainingError("Pro proposal negative policy disagrees with training")
     device = _resolve_device(options.device)
     checkpoints = output_dir / "training-checkpoints" / "pro_event_proposal"
     _run_script(
@@ -312,9 +234,11 @@ def run_catalog_pro_event_proposal_training(
         "model_implementation": selected_contract.model_implementation,
         "preprocessing": {
             "id": PRO_EVENT_PROPOSAL_PREPROCESSING_ID,
-            # This is copied from the private cache summary, which includes
-            # the task view's effective window geometry.  It contains only
-            # identifiers, bounded options, and hashes/frames -- never paths.
+            # These are copied from the private cache summary.  Together they
+            # bind the public bundle to the actual feature geometry and full
+            # negative-selection rule used by the trainer; neither can carry
+            # a catalog path.
+            "audio_features": audio_features,
             "negative_policy": negative_policy,
         },
         "input_contract": selected_contract.input_contract,

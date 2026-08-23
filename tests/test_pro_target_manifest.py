@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import importlib.util
 import io
@@ -14,7 +15,7 @@ import pytest
 import torch
 
 from src.catalog_task_manifest import build_catalog_task_manifest
-from src.model_bundle import MANIFEST_FILENAME
+from src.model_bundle import MANIFEST_FILENAME, BundleValidationError
 from src.pro_audio_preprocessing import _tempo_segments, _tick_seconds, prepare_pro_audio_windows
 from src.pro_candidate_contract import (
     FREE_RUNNING_PROPOSAL_CANDIDATE_KIND,
@@ -26,13 +27,18 @@ from src.pro_candidate_contract import (
 from src.pro_event_proposal_preprocessing import (
     PRO_EVENT_PROPOSAL_NEGATIVE_POLICY_ID,
     _negative_centers,
+    canonical_pro_event_proposal_negative_policy,
     prepare_pro_event_proposal_windows,
+    validate_pro_event_proposal_negative_policy,
 )
+from src.pro_event_proposal_training_options import ProEventProposalTrainingOptions
+from src.pro_event_training_options import ProEventTrainingOptions
 from src.pro_event_worker_training import _source_inputs
 from src.pro_target_manifest import (
     PRO_AUDIO_PREPROCESSING_ID,
     PRO_TARGET_MANIFEST_FORMAT,
     build_catalog_pro_target_manifest,
+    normalize_pro_audio_preprocessing,
     resolve_catalog_pro_target_manifest_songs,
 )
 from src.song_source_catalog import CatalogValidationError
@@ -41,6 +47,41 @@ from src.worker import inspect_model_bundle, prepare_dataset_request, run_traini
 
 def _sha256_path(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _proposal_policy(
+    *, negative_ratio: int = 4, negative_exclusion_ms: int = 80, negative_seed: int = 20260822
+) -> tuple[dict[str, object], dict[str, object]]:
+    """Return the full policy emitted by the real proposal cache."""
+    audio_features = normalize_pro_audio_preprocessing(None)
+    policy = canonical_pro_event_proposal_negative_policy(
+        audio_features=audio_features,
+        requested_options={
+            "negative_ratio": negative_ratio,
+            "negative_exclusion_ms": negative_exclusion_ms,
+            "negative_seed": negative_seed,
+        },
+    )
+    return audio_features, policy
+
+
+def _proposal_training(
+    *,
+    model_id: str = "fixture",
+    negative_ratio: int = 4,
+    negative_exclusion_ms: int = 80,
+    seed: int = 20260822,
+) -> dict[str, object]:
+    return ProEventProposalTrainingOptions(
+        model_id=model_id,
+        negative_ratio=negative_ratio,
+        negative_exclusion_ms=negative_exclusion_ms,
+        seed=seed,
+    ).portable()
+
+
+def _known_event_training(*, model_id: str = "fixture") -> dict[str, object]:
+    return ProEventTrainingOptions(model_id=model_id).portable()
 
 
 def _write_selected_pro_candidate_bundle(
@@ -61,16 +102,19 @@ def _write_selected_pro_candidate_bundle(
         "model_implementation": contract.model_implementation,
         "input_contract": contract.input_contract,
         "output_contract": contract.output_contract,
-        "training": {"model_id": "fixture"},
+        "training": _known_event_training(),
     }
     if contract.target_contract is not None:
         config["target_contract"] = contract.target_contract
         config["preprocessing"] = contract.preprocessing["id"]
     else:
+        audio_features, policy = _proposal_policy()
         config["preprocessing"] = {
             "id": contract.preprocessing["id"],
-            "negative_policy": {"id": contract.preprocessing["negative_policy"]},
+            "audio_features": audio_features,
+            "negative_policy": policy,
         }
+        config["training"] = _proposal_training()
     config_path.write_text(json.dumps(config, sort_keys=True), encoding="utf-8")
     manifest = {
         "schema_version": 1,
@@ -135,6 +179,189 @@ def test_selected_pro_candidate_bundle_contract_rejects_combined_or_relabelled_o
     original["config_byte_length"] = config_path.stat().st_size
     (bundle / MANIFEST_FILENAME).write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
     with pytest.raises(ProCandidateContractError, match="config input_contract"):
+        validate_pro_candidate_bundle(bundle, contract)
+
+
+def test_known_event_bundle_requires_exact_writer_config_and_training(
+    tmp_path: Path,
+) -> None:
+    contract = resolve_pro_candidate_contract("pro_guitar", KNOWN_EVENT_CANDIDATE_KIND)
+    bundle, manifest = _write_selected_pro_candidate_bundle(
+        tmp_path / "known-event-config",
+        task_kind="pro_guitar",
+        candidate_kind=KNOWN_EVENT_CANDIDATE_KIND,
+    )
+    config_path = bundle / "configs" / "candidate.json"
+    base_config = json.loads(config_path.read_text(encoding="utf-8"))
+    assert validate_pro_candidate_bundle(bundle, contract).profiles == {}
+
+    def rewrite_config(config: dict[str, object]) -> None:
+        config_path.write_text(json.dumps(config, sort_keys=True), encoding="utf-8")
+        component = manifest["components"][contract.component_id]
+        assert isinstance(component, dict)
+        component["config_sha256"] = _sha256_path(config_path)
+        component["config_byte_length"] = config_path.stat().st_size
+        (bundle / MANIFEST_FILENAME).write_text(
+            json.dumps(manifest, sort_keys=True), encoding="utf-8"
+        )
+
+    for container, key, value, message in (
+        ("config", "unrelated", "benign", "known-event config has unsupported fields"),
+        (
+            "config",
+            "unrelated_path",
+            "/run/media/ash/portable-ai",
+            "known-event config has unsupported fields",
+        ),
+        ("training", "unrelated", "benign", "known-event training options"),
+        (
+            "training",
+            "unrelated_path",
+            "/run/media/ash/portable-ai",
+            "known-event training options",
+        ),
+    ):
+        changed = copy.deepcopy(base_config)
+        destination = changed if container == "config" else changed["training"]
+        assert isinstance(destination, dict)
+        destination[key] = value
+        rewrite_config(changed)
+        with pytest.raises(ProCandidateContractError, match=message):
+            validate_pro_candidate_bundle(bundle, contract)
+
+
+def test_proposal_bundle_requires_full_canonical_cache_negative_policy(tmp_path: Path) -> None:
+    contract = resolve_pro_candidate_contract("pro_guitar", FREE_RUNNING_PROPOSAL_CANDIDATE_KIND)
+    bundle, manifest = _write_selected_pro_candidate_bundle(
+        tmp_path / "proposal-policy",
+        task_kind="pro_guitar",
+        candidate_kind=FREE_RUNNING_PROPOSAL_CANDIDATE_KIND,
+    )
+    config_path = bundle / "configs" / "candidate.json"
+    base_config = json.loads(config_path.read_text(encoding="utf-8"))
+    policy = base_config["preprocessing"]["negative_policy"]
+    assert policy == _proposal_policy()[1]
+    assert validate_pro_candidate_bundle(bundle, contract).profiles == {}
+
+    def rewrite_config(config: dict[str, object]) -> None:
+        config_path.write_text(json.dumps(config, sort_keys=True), encoding="utf-8")
+        component = manifest["components"][contract.component_id]
+        assert isinstance(component, dict)
+        component["config_sha256"] = _sha256_path(config_path)
+        component["config_byte_length"] = config_path.stat().st_size
+        (bundle / MANIFEST_FILENAME).write_text(
+            json.dumps(manifest, sort_keys=True), encoding="utf-8"
+        )
+
+    mutations = (
+        ("selection", lambda value: value.__setitem__("selection", "caller-selected/v1")),
+        (
+            "requested_options",
+            lambda value: value["requested_options"].__setitem__("negative_ratio", 1),
+        ),
+        (
+            "feature_window",
+            lambda value: value["feature_window"].__setitem__("window_after_frames", 1),
+        ),
+        (
+            "real_event_exclusion",
+            lambda value: value["real_event_exclusion"][
+                "invalid_negative_center_offset_frames"
+            ].__setitem__("minimum", 0),
+        ),
+    )
+    for label, mutate in mutations:
+        changed = copy.deepcopy(base_config)
+        changed_policy = changed["preprocessing"]["negative_policy"]
+        assert isinstance(changed_policy, dict)
+        mutate(changed_policy)
+        rewrite_config(changed)
+        with pytest.raises(
+            ProCandidateContractError, match="proposal negative policy|config training"
+        ):
+            validate_pro_candidate_bundle(bundle, contract)
+        assert label
+
+    for field, value in (
+        ("negative_ratio", 4.0),
+        ("negative_exclusion_ms", 80.0),
+        ("seed", 20260822.0),
+        ("negative_ratio", True),
+        ("negative_exclusion_ms", True),
+        ("seed", True),
+    ):
+        changed = copy.deepcopy(base_config)
+        training = changed["training"]
+        assert isinstance(training, dict)
+        training[field] = value
+        rewrite_config(changed)
+        with pytest.raises(ProCandidateContractError, match="proposal training options"):
+            validate_pro_candidate_bundle(bundle, contract)
+
+    for container, key, value, message in (
+        ("config", "unrelated", "benign", "proposal config has unsupported fields"),
+        (
+            "config",
+            "unrelated_path",
+            "/run/media/ash/portable-ai",
+            "proposal config has unsupported fields",
+        ),
+        ("training", "unrelated", "benign", "proposal training options"),
+        ("training", "unrelated_path", "/run/media/ash/portable-ai", "proposal training options"),
+    ):
+        changed = copy.deepcopy(base_config)
+        destination = changed if container == "config" else changed["training"]
+        assert isinstance(destination, dict)
+        destination[key] = value
+        rewrite_config(changed)
+        with pytest.raises(ProCandidateContractError, match=message):
+            validate_pro_candidate_bundle(bundle, contract)
+
+
+def test_proposal_bundle_rejects_profile_companion_and_checkpoint_identity_changes(
+    tmp_path: Path,
+) -> None:
+    contract = resolve_pro_candidate_contract("pro_guitar", FREE_RUNNING_PROPOSAL_CANDIDATE_KIND)
+    bundle, manifest = _write_selected_pro_candidate_bundle(
+        tmp_path / "proposal-identity",
+        task_kind="pro_guitar",
+        candidate_kind=FREE_RUNNING_PROPOSAL_CANDIDATE_KIND,
+    )
+    component = manifest["components"][contract.component_id]
+    assert isinstance(component, dict)
+
+    for field, value, message in (
+        ("sha256", "0" * 64, "checkpoint sha256 mismatch"),
+        ("byte_length", component["byte_length"] + 1, "checkpoint byte length mismatch"),
+    ):
+        changed = copy.deepcopy(manifest)
+        changed_component = changed["components"][contract.component_id]
+        assert isinstance(changed_component, dict)
+        changed_component[field] = value
+        (bundle / MANIFEST_FILENAME).write_text(
+            json.dumps(changed, sort_keys=True), encoding="utf-8"
+        )
+        with pytest.raises((ProCandidateContractError, BundleValidationError), match=message):
+            validate_pro_candidate_bundle(bundle, contract)
+
+    (bundle / MANIFEST_FILENAME).write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
+    changed = copy.deepcopy(manifest)
+    changed["companions"] = {"forbidden-runtime": {"kind": "runtime", "version": "v1"}}
+    (bundle / MANIFEST_FILENAME).write_text(json.dumps(changed, sort_keys=True), encoding="utf-8")
+    with pytest.raises(ProCandidateContractError, match="companions"):
+        validate_pro_candidate_bundle(bundle, contract)
+
+    changed = copy.deepcopy(manifest)
+    changed["profiles"] = {
+        "forbidden-profile": {
+            "capability": "pro.raw-candidate/v1",
+            "instruments": ["guitar"],
+            "required_components": [contract.component_id],
+            "difficulty_policies": ["expert_only"],
+        }
+    }
+    (bundle / MANIFEST_FILENAME).write_text(json.dumps(changed, sort_keys=True), encoding="utf-8")
+    with pytest.raises(ProCandidateContractError, match="profiles"):
         validate_pro_candidate_bundle(bundle, contract)
 
 
@@ -486,6 +713,13 @@ def test_worker_runs_pro_candidate_with_dirty_provenance_and_no_deployment_profi
     assert "profiles" not in manifest
     assert experiment["candidate_scope"] == "known_reference_event_attributes_only"
     assert experiment["runtime"]["strum_source_dirty"] is True
+    assert (
+        validate_pro_candidate_bundle(
+            output_dir / "bundle",
+            resolve_pro_candidate_contract("pro_guitar", KNOWN_EVENT_CANDIDATE_KIND),
+        ).profiles
+        == {}
+    )
     assert str(tmp_path) not in json.dumps(result)
     assert str(tmp_path) not in json.dumps(inspection)
     assert str(tmp_path) not in json.dumps(manifest)
@@ -558,10 +792,14 @@ def test_worker_runs_proposal_candidate_without_midi_or_profile(
     def fake_preprocess(**kwargs: object) -> dict[str, object]:
         assert kwargs["splits"] == ("train", "val")
         assert kwargs["negative_ratio"] == 2
+        assert kwargs["negative_exclusion_ms"] == 80
+        assert kwargs["negative_seed"] == 20260822
+        audio_features, negative_policy = _proposal_policy(negative_ratio=2)
         return {
             "preprocessing": {
                 "id": "pro-logmel-event-proposal-windows/v1",
-                "negative_policy": {"id": "pro-event-proposal-asymmetric-window-exclusion/v1"},
+                "audio_features": audio_features,
+                "negative_policy": negative_policy,
             },
             "splits": {
                 "train": {"positive_window_count": 3, "negative_window_count": 6},
@@ -616,9 +854,11 @@ def test_worker_runs_proposal_candidate_without_midi_or_profile(
     assert "profiles" not in manifest
     assert experiment["candidate_scope"] == "free_running_audio_event_proposal_only"
     assert experiment["release_requirements"]["status"] == "blocked"
+    audio_features, negative_policy = _proposal_policy(negative_ratio=2)
     assert config["preprocessing"] == {
         "id": "pro-logmel-event-proposal-windows/v1",
-        "negative_policy": {"id": "pro-event-proposal-asymmetric-window-exclusion/v1"},
+        "audio_features": audio_features,
+        "negative_policy": negative_policy,
     }
     assert experiment["preprocessing"]["negative_policy_id"] == (
         "pro-event-proposal-asymmetric-window-exclusion/v1"
@@ -715,6 +955,20 @@ def test_pro_proposal_preprocessing_generates_deterministic_negative_audio_windo
     assert first == second
     policy = first["preprocessing"]["negative_policy"]
     assert policy["id"] == PRO_EVENT_PROPOSAL_NEGATIVE_POLICY_ID
+    assert policy == canonical_pro_event_proposal_negative_policy(
+        audio_features=first["preprocessing"]["audio_features"],
+        requested_options={
+            "negative_ratio": 2,
+            "negative_exclusion_ms": 80,
+            "negative_seed": 31,
+        },
+    )
+    assert (
+        validate_pro_event_proposal_negative_policy(
+            policy, audio_features=first["preprocessing"]["audio_features"]
+        )
+        == policy
+    )
     assert policy["feature_window"] == {
         "center": "candidate_center_frame",
         "window_before_ms": 100,

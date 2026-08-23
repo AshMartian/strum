@@ -115,17 +115,38 @@ def _negative_centers(
     return ranked[:count]
 
 
-def _effective_negative_policy(
+def canonical_pro_event_proposal_negative_policy(
     *,
-    options: Mapping[str, int],
-    settings: Mapping[str, object],
-    before: int,
-    after: int,
-    local_exclusion: int,
+    audio_features: Mapping[str, object],
+    requested_options: Mapping[str, object] | None,
 ) -> dict[str, object]:
-    """Persist the exact feature geometry and rejection interval used by a cache."""
-    if before < 0 or after < 0 or local_exclusion < 0:
-        raise ProEventProposalPreprocessError("Pro proposal negative policy is invalid")
+    """Build the one permitted path-free effective negative-sampling policy.
+
+    The proposal bundle must preserve this complete policy, rather than just
+    its identifier.  Keeping the constructor beside the cache prevents a
+    trainer and a bundle validator from independently reimplementing its
+    feature-window arithmetic.
+    """
+    try:
+        settings = normalize_pro_audio_preprocessing(audio_features)
+    except CatalogValidationError as error:
+        raise ProEventProposalPreprocessError("Pro proposal audio features are invalid") from error
+    options = normalize_pro_event_proposal_options(requested_options)
+    before = round(
+        int(settings["window_before_ms"])
+        * int(settings["sample_rate"])
+        / (1000 * int(settings["hop_length"]))
+    )
+    after = round(
+        int(settings["window_after_ms"])
+        * int(settings["sample_rate"])
+        / (1000 * int(settings["hop_length"]))
+    )
+    local_exclusion = math.ceil(
+        options["negative_exclusion_ms"]
+        * int(settings["sample_rate"])
+        / (1000 * int(settings["hop_length"]))
+    )
     return {
         "id": PRO_EVENT_PROPOSAL_NEGATIVE_POLICY_ID,
         "selection": "deterministic-sha256-ranked-audio-frames/v1",
@@ -151,6 +172,30 @@ def _effective_negative_policy(
             },
         },
     }
+
+
+def validate_pro_event_proposal_negative_policy(
+    raw: object, *, audio_features: Mapping[str, object]
+) -> dict[str, object]:
+    """Require a serialized policy to be the exact cache-produced policy.
+
+    This is deliberately equality-based rather than a permissive schema
+    check: no caller may omit the selection method, truncate requested
+    options, or weaken the feature-window/exclusion geometry in a portable
+    candidate configuration.
+    """
+    if not isinstance(raw, Mapping):
+        raise ProEventProposalPreprocessError("Pro proposal negative policy is invalid")
+    requested_options = raw.get("requested_options")
+    if not isinstance(requested_options, Mapping):
+        raise ProEventProposalPreprocessError("Pro proposal negative policy is invalid")
+    canonical = canonical_pro_event_proposal_negative_policy(
+        audio_features=audio_features,
+        requested_options=requested_options,
+    )
+    if dict(raw) != canonical:
+        raise ProEventProposalPreprocessError("Pro proposal negative policy is not canonical")
+    return canonical
 
 
 def _positive_events(
@@ -231,28 +276,13 @@ def prepare_pro_event_proposal_windows(
     if manifest.get("format") != PRO_TARGET_MANIFEST_FORMAT:
         raise ProEventProposalPreprocessError("Pro proposal target view format is invalid")
     safe_lineage = _safe_source_lineage(manifest)
-    before = round(
-        int(settings["window_before_ms"])
-        * int(settings["sample_rate"])
-        / (1000 * int(settings["hop_length"]))
+    negative_policy = canonical_pro_event_proposal_negative_policy(
+        audio_features=settings,
+        requested_options=options,
     )
-    after = round(
-        int(settings["window_after_ms"])
-        * int(settings["sample_rate"])
-        / (1000 * int(settings["hop_length"]))
-    )
-    local_exclusion = math.ceil(
-        options["negative_exclusion_ms"]
-        * int(settings["sample_rate"])
-        / (1000 * int(settings["hop_length"]))
-    )
-    negative_policy = _effective_negative_policy(
-        options=options,
-        settings=settings,
-        before=before,
-        after=after,
-        local_exclusion=local_exclusion,
-    )
+    before = int(negative_policy["feature_window"]["window_before_frames"])
+    after = int(negative_policy["feature_window"]["window_after_frames"])
+    local_exclusion = int(negative_policy["real_event_exclusion"]["local_onset_exclusion_frames"])
     cache_dir.mkdir(parents=True, exist_ok=True)
     summary: dict[str, object] = {
         "schema_version": 1,

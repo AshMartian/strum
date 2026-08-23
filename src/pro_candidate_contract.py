@@ -19,12 +19,46 @@ from src.model_bundle import BundleValidationError, ModelBundle, load_model_bund
 from src.pro_event_proposal_preprocessing import (
     PRO_EVENT_PROPOSAL_NEGATIVE_POLICY_ID,
     PRO_EVENT_PROPOSAL_PREPROCESSING_ID,
+    ProEventProposalPreprocessError,
+    validate_pro_event_proposal_negative_policy,
 )
+from src.pro_event_proposal_training_options import (
+    ProEventProposalTrainingOptions,
+    ProEventProposalTrainingOptionsError,
+)
+from src.pro_event_training_options import ProEventTrainingOptions, ProEventTrainingOptionsError
 
 KNOWN_EVENT_CANDIDATE_KIND = "known_event_attributes/v1"
 FREE_RUNNING_PROPOSAL_CANDIDATE_KIND = "free_running_event_proposal/v1"
 KNOWN_EVENT_PREPROCESSING_ID = "pro-logmel-event-windows/v1"
 PRO_CANDIDATE_OUTPUT_CONTRACT_FORMAT = "strum-candidate-checkpoint-output-contracts/v1"
+_PROPOSAL_CONFIG_FIELDS = frozenset(
+    {
+        "schema_version",
+        "format",
+        "task_kind",
+        "pipeline_id",
+        "model_implementation",
+        "preprocessing",
+        "input_contract",
+        "output_contract",
+        "training",
+    }
+)
+_KNOWN_EVENT_CONFIG_FIELDS = frozenset(
+    {
+        "schema_version",
+        "format",
+        "task_kind",
+        "pipeline_id",
+        "model_implementation",
+        "preprocessing",
+        "input_contract",
+        "output_contract",
+        "target_contract",
+        "training",
+    }
+)
 
 _PIPELINE_BY_TASK_KIND = {
     "pro_guitar": "strum.instrument-chart/pro-guitar/v1",
@@ -223,6 +257,80 @@ def _load_config(path: Path) -> dict[str, Any]:
     return raw
 
 
+def _require_exact_mapping(label: str, actual: object, expected: dict[str, object]) -> None:
+    """Require a portable mapping's keys, values, and scalar types exactly."""
+    if not isinstance(actual, dict) or set(actual) != set(expected):
+        raise ProCandidateContractError(f"Pro candidate bundle {label} is invalid")
+    for key, expected_value in expected.items():
+        actual_value = actual[key]
+        if type(actual_value) is not type(expected_value) or actual_value != expected_value:
+            raise ProCandidateContractError(
+                f"Pro candidate bundle {label} disagrees with selected contract"
+            )
+
+
+def _validate_proposal_preprocessing(config: dict[str, Any]) -> None:
+    """Prove a proposal bundle retained its full cache-produced policy."""
+    if set(config) != _PROPOSAL_CONFIG_FIELDS:
+        raise ProCandidateContractError("Pro candidate proposal config has unsupported fields")
+    preprocessing = config.get("preprocessing")
+    if not isinstance(preprocessing, dict):
+        raise ProCandidateContractError("Pro candidate proposal preprocessing is invalid")
+    if set(preprocessing) != {"id", "audio_features", "negative_policy"}:
+        raise ProCandidateContractError("Pro candidate proposal preprocessing is invalid")
+    _require_equal(
+        "config preprocessing id", preprocessing.get("id"), PRO_EVENT_PROPOSAL_PREPROCESSING_ID
+    )
+    audio_features = preprocessing.get("audio_features")
+    if not isinstance(audio_features, dict):
+        raise ProCandidateContractError("Pro candidate proposal audio features are invalid")
+    try:
+        negative_policy = validate_pro_event_proposal_negative_policy(
+            preprocessing.get("negative_policy"), audio_features=audio_features
+        )
+    except ProEventProposalPreprocessError as error:
+        raise ProCandidateContractError(
+            "Pro candidate proposal negative policy is invalid"
+        ) from error
+    training = config.get("training")
+    if not isinstance(training, dict):
+        raise ProCandidateContractError("Pro candidate proposal training is invalid")
+    try:
+        training_options = ProEventProposalTrainingOptions.from_mapping(training)
+    except ProEventProposalTrainingOptionsError as error:
+        raise ProCandidateContractError(
+            "Pro candidate proposal training options are invalid"
+        ) from error
+    requested_options = negative_policy["requested_options"]
+    assert isinstance(requested_options, dict)
+    _require_exact_mapping("config training", training, training_options.portable())
+    _require_equal(
+        "config training options",
+        {
+            "negative_ratio": training_options.negative_ratio,
+            "negative_exclusion_ms": training_options.negative_exclusion_ms,
+            "negative_seed": training_options.seed,
+        },
+        requested_options,
+    )
+
+
+def _validate_known_event_config(config: dict[str, Any]) -> None:
+    """Prove a known-event bundle contains only writer-produced config data."""
+    if set(config) != _KNOWN_EVENT_CONFIG_FIELDS:
+        raise ProCandidateContractError("Pro candidate known-event config has unsupported fields")
+    training = config.get("training")
+    if not isinstance(training, dict):
+        raise ProCandidateContractError("Pro candidate known-event training is invalid")
+    try:
+        training_options = ProEventTrainingOptions.from_mapping(training)
+    except ProEventTrainingOptionsError as error:
+        raise ProCandidateContractError(
+            "Pro candidate known-event training options are invalid"
+        ) from error
+    _require_exact_mapping("known-event config training", training, training_options.portable())
+
+
 def validate_pro_candidate_bundle(path: str | Path, contract: ProCandidateContract) -> ModelBundle:
     """Require a produced bundle to exactly match one selected raw candidate.
 
@@ -273,11 +381,7 @@ def validate_pro_candidate_bundle(path: str | Path, contract: ProCandidateContra
         _require_equal(
             "config preprocessing", config.get("preprocessing"), contract.preprocessing["id"]
         )
+        _validate_known_event_config(config)
     else:
-        preprocessing = config.get("preprocessing")
-        expected_preprocessing = {
-            "id": contract.preprocessing["id"],
-            "negative_policy": {"id": contract.preprocessing["negative_policy"]},
-        }
-        _require_equal("config preprocessing", preprocessing, expected_preprocessing)
+        _validate_proposal_preprocessing(config)
     return bundle
