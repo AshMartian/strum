@@ -82,6 +82,10 @@ class PipelineDescriptor:
     # in STRUM's descriptor avoids a growing OCTAVE-side list of pipeline IDs.
     private_request_fields: tuple[str, ...] = ()
     catalog_inspection_option_keys: tuple[str, ...] = ()
+    # Stable capability identifiers explaining a runtime prerequisite or the
+    # next STRUM-owned contract. Hosts can display these without treating a
+    # task view or raw experiment as a deployment claim.
+    training_requirements: tuple[str, ...] = ()
 
     def as_json(self) -> dict[str, object]:
         data = asdict(self)
@@ -90,6 +94,7 @@ class PipelineDescriptor:
         data["catalog_inspection_option_keys"] = list(
             self.catalog_inspection_option_keys
         )
+        data["training_requirements"] = list(self.training_requirements)
         return data
 
 
@@ -182,6 +187,61 @@ KEYS_TRAIN_SCHEMA = _object_schema(
     },
     required=("model_id",),
 )
+FRET_MAPPER_TRAIN_SCHEMA = _object_schema(
+    {
+        "model_id": {"type": "string"},
+        "epochs": {"type": "integer", "minimum": 1, "default": 30},
+        "batch_size": {"type": "integer", "minimum": 1, "default": 4096},
+        "learning_rate": {"type": "number", "exclusiveMinimum": 0, "default": 0.001},
+        "hidden": {"type": "integer", "minimum": 1, "default": 256},
+        "dropout": {"type": "number", "minimum": 0, "maximum": 1, "default": 0.2},
+        "pos_weight_cap": {"type": "number", "exclusiveMinimum": 0, "default": 5.0},
+        "device": {"type": "string", "enum": ["auto", "cuda", "mps", "cpu"], "default": "auto"},
+        "max_songs": {"type": "integer", "minimum": 0, "default": 0},
+        "workers": {"type": "integer", "minimum": 1, "default": 2},
+        "onset_threshold": {"type": "number", "minimum": 0, "maximum": 1, "default": 0.5},
+        "frame_threshold": {"type": "number", "minimum": 0, "maximum": 1, "default": 0.3},
+        "min_note_length": {"type": "integer", "minimum": 1, "default": 11},
+        "seed": {"type": "integer", "minimum": 0, "default": 42},
+    },
+    required=("model_id",),
+)
+PLANNED_TRAINING_REQUIREMENTS: dict[str, tuple[str, ...]] = {
+    "vocals": (
+        "vocal_pitch_phrase_lyrics_preprocessor",
+        "vocals_training_architecture",
+        "profile_evaluation",
+        "profile_packaging",
+    ),
+    "pro_guitar": (
+        "pro_string_fret_target_encoder",
+        "pro_guitar_training_architecture",
+        "profile_evaluation",
+        "profile_packaging",
+    ),
+    "pro_bass": (
+        "pro_string_fret_target_encoder",
+        "pro_bass_training_architecture",
+        "profile_evaluation",
+        "profile_packaging",
+    ),
+    "pro_keys": (
+        "pro_keys_pitch_target_encoder",
+        "pro_keys_training_architecture",
+        "profile_evaluation",
+        "profile_packaging",
+    ),
+    "section_guitar": (
+        "section_window_preprocessor",
+        "section_training_worker",
+        "section_runtime_integration",
+    ),
+    "section_bass": (
+        "section_window_preprocessor",
+        "section_training_worker",
+        "section_runtime_integration",
+    ),
+}
 DRUMS_ONSET_TRAIN_SCHEMA = _object_schema(
     {
         "model_id": {"type": "string"},
@@ -351,17 +411,35 @@ PIPELINES = (
                     "preprocessing": {"type": "object", "default": {}},
                 }
             ),
-            train_schema=None,
-            checkpoint_outputs=(task_kind,),
+            train_schema=(
+                FRET_MAPPER_TRAIN_SCHEMA if task_kind.startswith("fret_mapper_") else None
+            ),
+            checkpoint_outputs=(
+                (f"fret_mapper.{task_kind.removeprefix('fret_mapper_')}",)
+                if task_kind.startswith("fret_mapper_")
+                else (task_kind,)
+            ),
             inference_capability=None,
             status="catalog_ready",
             preparation_status="available",
-            training_status="planned",
+            training_status="available" if task_kind.startswith("fret_mapper_") else "planned",
+            private_request_fields=("catalog_root",)
+            if task_kind.startswith("fret_mapper_")
+            else (),
             catalog_inspection_option_keys=(
                 "audio_role",
                 "fallback_audio_role",
                 "disable_fallback",
                 "required_difficulty",
+            ),
+            training_requirements=(
+                (
+                    "strum_pitch_extra",
+                    "instrument_specific_profile_evaluation",
+                    "instrument_specific_profile_packaging",
+                )
+                if task_kind.startswith("fret_mapper_")
+                else PLANNED_TRAINING_REQUIREMENTS.get(task_kind, ())
             ),
         )
         for task_kind, pipeline_id in sorted(CATALOG_TASK_PIPELINES.items())
@@ -1834,6 +1912,8 @@ def _read_train_request(request_path: Path) -> dict[str, Any]:
         "bass.onset-fret/v1",
         "keys.onset-fret/v1",
         "drums.onset-classifier/v1",
+        "strum.fret-mapper/guitar/v1",
+        "strum.fret-mapper/bass/v1",
     }:
         if set(raw) != base_fields | {"catalog_root"}:
             raise WorkerRequestError("catalog-backed training request has unsupported fields")
@@ -2072,6 +2152,48 @@ def run_training_request(request_path: Path) -> dict[str, object]:
         except (KeysTrainingError, OSError, TypeError, ValueError) as error:
             raise WorkerRequestError(
                 "Keys training request failed validation or execution"
+            ) from error
+        return {
+            "status": "completed",
+            "pipeline_id": pipeline_id,
+            "model_id": preflight["model_id"],
+            "bundle_name": Path(result["bundle_dir"]).name,
+            "manifest_sha256": preflight["manifest_sha256"],
+            "components": preflight["components"],
+            "metrics": result["metrics"],
+            "deployment_status": result["deployment_status"],
+        }
+    if pipeline_id in {"strum.fret-mapper/guitar/v1", "strum.fret-mapper/bass/v1"}:
+        from src.fret_mapper_worker_training import (  # noqa: PLC0415
+            FretMapperTrainingError,
+            FretMapperTrainingOptions,
+            run_catalog_fret_mapper_training,
+        )
+
+        if "parent_bundle" in request:
+            raise WorkerRequestError("fret-mapper training does not accept parent_bundle")
+        catalog_root = request.get("catalog_root")
+        if not isinstance(catalog_root, str) or not catalog_root:
+            raise WorkerRequestError("fret-mapper training requires worker-local catalog_root")
+        try:
+            options = FretMapperTrainingOptions.from_mapping(request["options"])
+            revision, _dirty = _revision()
+            result = run_catalog_fret_mapper_training(
+                task_view_path=Path(request["task_view"]),
+                output_dir=Path(request["output"]),
+                catalog_root=Path(catalog_root),
+                pipeline_id=pipeline_id,
+                options=options,
+                strum_revision=revision,
+            )
+            preflight = preflight_bundle(
+                result["bundle_dir"], required_components=descriptor.checkpoint_outputs
+            )
+        except (BundleValidationError, CatalogValidationError):
+            raise
+        except (FretMapperTrainingError, OSError, TypeError, ValueError) as error:
+            raise WorkerRequestError(
+                "fret-mapper training request failed validation or execution"
             ) from error
         return {
             "status": "completed",

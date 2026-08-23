@@ -172,7 +172,17 @@ def match_bp_to_gt(
 
 # ─────────────────────────── Per-song worker ────────────────────────────────
 def process_song(args: tuple) -> dict:
-    song_id, audio_path, midi_path, cache_dir, onset_thr, frame_thr, min_note_len, instrument = args
+    (
+        song_id,
+        audio_path,
+        midi_path,
+        cache_dir,
+        onset_thr,
+        frame_thr,
+        min_note_len,
+        instrument,
+        split,
+    ) = args
     audio_path = Path(audio_path)
     midi_path = Path(midi_path)
     cache_dir = Path(cache_dir)
@@ -225,6 +235,10 @@ def process_song(args: tuple) -> dict:
             n_gt=len(gt_onsets),
             n_matched=len(pairs),
             bp_seconds=bp_t,
+            # A catalog task view owns split assignment.  Persist it with the
+            # derived examples so the trainer cannot re-shuffle songs and leak
+            # samples across the OCTAVE-approved validation boundary.
+            split=split,
         )
         return {"song": song_id, "status": "ok", "n": len(pairs), "bp_t": bp_t}
     except Exception as e:
@@ -265,13 +279,23 @@ def main():
             ap.error("catalog manifest must use fret_mapper_guitar or fret_mapper_bass")
         instrument = task["instrument"]
         candidates = [
-            (song["source_id"], Path(song["audio_path"]), Path(song["midi_path"]))
+            (
+                song["source_id"],
+                Path(song["audio_path"]),
+                Path(song["midi_path"]),
+                song["split"],
+            )
             for song in resolve_catalog_task_manifest_songs(manifest, args.catalog_root)
         ]
     else:
         instrument = "guitar"
         candidates = [
-            (f"{path.parent.parent.name}__{path.parent.name}", path, path.parent / "notes.mid")
+            (
+                f"{path.parent.parent.name}__{path.parent.name}",
+                path,
+                path.parent / "notes.mid",
+                "legacy",
+            )
             for path in args.songs_root.rglob("guitar.ogg")
             if (path.parent / "notes.mid").exists()
         ]
@@ -292,7 +316,7 @@ def main():
             args.min_note_length,
             instrument,
         )
-        for song_id, audio_path, midi_path in candidates
+        for song_id, audio_path, midi_path, split in candidates
     ]
 
     n_ok = n_err = n_cached = n_skip = 0

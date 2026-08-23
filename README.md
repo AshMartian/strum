@@ -558,11 +558,16 @@ For example, a Guitar task-view request is:
 ```
 
 `guitar.onset-fret/v1`, `bass.onset-fret/v1`, `keys.onset-fret/v1`,
-`drums.onset-classifier/v1`, and `chart_transform.five_lane/v1` are
-worker-trainable. Their renderer-visible
+`drums.onset-classifier/v1`, `chart_transform.five_lane/v1`, and the separate
+`strum.fret-mapper/guitar/v1` / `strum.fret-mapper/bass/v1` derived-label
+pipelines are worker-trainable. Fret-mapper training builds Basic-Pitch
+features only from its revalidated approved task view, preserves the catalog's
+song-level train/validation split, and requires the STRUM `pitch` extra. It
+produces an experiment component, not an auto-chart profile. Their renderer-visible
 schemas contain only bounded model/training knobs. The private top-level
 `catalog_root` request field is worker-local configuration for Guitar, Bass,
-Keys, and Drums task-view revalidation, never a pipeline option or renderer control.
+Keys, Drums, and fret-mapper task-view revalidation, never a pipeline option or
+renderer control.
 
 Guitar invokes the established window-preprocessing and two-stage onset/fret
 trainers, then packages verified `guitar.onset` and `guitar.fret` bundle

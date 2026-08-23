@@ -351,13 +351,17 @@ src/
 | Drum classifier ensemble | `train_onset_classifier.py` | `preprocess_onset_windows.py` | `onset_classifier_*.yaml` |
 | Tom-refinement CNN | `train_tom_refinement.py` | (uses Demucs drum stem) | inline |
 | Five-lane Guitar/Bass onset + fret CRNN (V1) | `train_guitar_v1.py` | revalidated Guitar/Bass catalog task view → `preprocess_guitar_windows.py` | `guitar_v1.yaml` |
-| Pitch→fret mapper (V4) | `train_fret_mapper.py` | `build_mapper_dataset.py` | inline |
+| Pitch→fret mapper (V4) | worker-owned `strum.fret-mapper/{guitar,bass}/v1` → `train_fret_mapper.py` | catalog task view → `build_mapper_dataset.py` | worker bundle config |
 | Section classifier | `train_section_classifier.py` | `build_section_labels.py` → `preprocess_section_windows.py` | inline |
 
-All trainers log to W&B (`WANDB_MODE=offline` to disable). These are legacy
-script interfaces; catalog readiness does not make a trainer worker-runnable,
-and script output is not deployment-ready until STRUM packages and validates a
-model bundle/profile.
+All trainers log to W&B (`WANDB_MODE=offline` to disable). The Guitar/Bass
+fret-mapper worker is a narrow exception: it invokes the established builder
+and MLP trainer only after catalog revalidation, persists the task-view split
+in each derived cache file, and packages a hash-verified component with no
+inference profile. It requires the `pitch` optional dependency. Other legacy
+script interfaces remain preparation-only; catalog readiness does not make a
+trainer worker-runnable, and any script output is not deployment-ready until
+STRUM evaluates and packages a model bundle/profile.
 
 ## 10. Catalog and worker contract
 
@@ -366,6 +370,12 @@ assets. STRUM validates it, selects only `training_use: allowed` records, and
 creates path-free task views. STRUM never imports `.sng`, `.rb3con`, ZIP, or
 original source folders, and task/experiment/checkpoint manifests must not
 contain those locations.
+
+Each discovered pipeline reports independent `preparation_status`,
+`training_status`, and stable `training_requirements`. This makes a catalog
+task view useful without overstating worker training or deployment support:
+for example, Pro descriptors name their target-encoder and architecture gaps,
+while section descriptors name their preprocessor, worker, and runtime gaps.
 
 Discovery is dynamic rather than hard-coded in OCTAVE:
 
