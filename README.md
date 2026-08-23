@@ -788,13 +788,17 @@ strum-worker transform profile evaluate \
 strum-worker transform profile package \
   --experiment /private/raw-transform \
   --evaluation /private/held-out-report.json \
+  --dataset-manifest /private/dataset-manifest.json \
   --output /private/promoted-transform \
   --profile difficulty-transform-guitar-promoted --json
 ```
 
 The report records verifiable held-out metrics and hashes; it deliberately
-does not invent a universal quality threshold. The explicit package command
-binds that report to copied tensor weights and configuration. Only the
+does not invent a universal quality threshold. The raw candidate embeds a
+path-free catalog task-view, dataset, and song-split lineage. Packaging reruns
+the held-out evaluation from that exact supplied task view and rejects any
+report whose complete evidence (including metrics) differs, then binds the
+recomputed report to copied tensor weights and configuration. Only the
 promoted profile can be checked with `strum-worker inference profile validate`
 or executed through `strum-worker chart run`: it consumes an
 explicit Expert five-lane `notes.mid` and writes only its declared learned

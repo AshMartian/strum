@@ -362,6 +362,83 @@ def _canonical_sha256(value: object) -> str:
     ).hexdigest()
 
 
+def _candidate_lineage(
+    *,
+    config: TrainingConfig,
+    dataset_manifest: dict[str, Any],
+    dataset_manifest_path: Path,
+    train_pairs: list[ChartPair],
+    validation_pairs: list[ChartPair],
+    audio_manifest_sha256: str | None,
+) -> dict[str, Any]:
+    """Return the path-free, hash-bound evidence a candidate is trained from.
+
+    A local manifest path is deliberately not portable evidence.  Promotion is
+    only available for catalog task views, whose immutable task ID commits to
+    the source inputs and split assignments.  Local ad-hoc datasets still
+    retain their dataset/split identity for experiment diagnostics, but cannot
+    become a deployable transform profile.
+    """
+    records_path = _resolve_dataset_path(dataset_manifest_path.parent, dataset_manifest["records"])
+    assignments = {pair.song_id: "train" for pair in train_pairs} | {
+        pair.song_id: "validation" for pair in validation_pairs
+    }
+    task_view = dataset_manifest.get("task_view")
+    task_lineage: dict[str, Any] | None = None
+    if isinstance(task_view, dict):
+        task_lineage = {
+            "task_view_id": task_view["task_view_id"],
+            "task_view_sha256": _canonical_sha256(task_view),
+            "pipeline": task_view["pipeline"],
+            "catalog": task_view["catalog"],
+        }
+        split = task_view["split"]
+        split_lineage = {
+            "unit": "song_id",
+            "algorithm": split["algorithm"],
+            "seed": split["seed"],
+            "validation_fraction": split["validation_fraction"],
+            "assignments_sha256": _canonical_sha256(assignments),
+            "train_song_ids": sorted(
+                assignments_id for assignments_id, value in assignments.items() if value == "train"
+            ),
+            "validation_song_ids": sorted(
+                assignments_id
+                for assignments_id, value in assignments.items()
+                if value == "validation"
+            ),
+        }
+    else:
+        split_lineage = {
+            "unit": "song_id",
+            "algorithm": "random-shuffle-song-id/v1",
+            "seed": config.seed,
+            "validation_fraction": config.validation_fraction,
+            "assignments_sha256": _canonical_sha256(assignments),
+            "train_song_ids": sorted(
+                assignments_id for assignments_id, value in assignments.items() if value == "train"
+            ),
+            "validation_song_ids": sorted(
+                assignments_id
+                for assignments_id, value in assignments.items()
+                if value == "validation"
+            ),
+        }
+    return {
+        "schema_version": 1,
+        "format": "strum-chart-transform-candidate-lineage/v1",
+        "dataset": {
+            "dataset_id": dataset_manifest["dataset_id"],
+            "format": dataset_manifest["format"],
+            "manifest_sha256": _sha256(dataset_manifest_path),
+            "records_sha256": _sha256(records_path),
+        },
+        "task_view": task_lineage,
+        "split": split_lineage,
+        "audio_manifest_sha256": audio_manifest_sha256,
+    }
+
+
 def _resolve_dataset_path(root: Path, relative: str) -> Path:
     path = Path(relative)
     if path.is_absolute():
@@ -776,6 +853,14 @@ def train(config: TrainingConfig) -> dict[str, Any]:
     for local_field in ("dataset_manifest", "output_dir", "audio_manifest", "init_checkpoint"):
         portable_config[local_field] = None
     portable_config["instrument"] = dataset_manifest["instrument"]
+    portable_config["lineage"] = _candidate_lineage(
+        config=config,
+        dataset_manifest=dataset_manifest,
+        dataset_manifest_path=Path(config.dataset_manifest).expanduser().resolve(),
+        train_pairs=train_pairs,
+        validation_pairs=validation_pairs,
+        audio_manifest_sha256=audio_manifest_sha256,
+    )
     model_config_path.write_text(
         json.dumps(portable_config, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )

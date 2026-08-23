@@ -9,10 +9,13 @@ from types import SimpleNamespace
 
 import mido
 import pytest
-import torch
 
+from scripts.train_chart_transform import TrainingConfig, train
+from src.chart_transform_profile import (
+    evaluate_chart_transform_candidate,
+    package_chart_transform_profile,
+)
 from src.model_bundle import MANIFEST_FILENAME, BundleValidationError
-from src.models.chart_transform import EventTransformMLP
 from src.worker import (
     PIPELINES,
     PROTOCOL_VERSION,
@@ -1393,87 +1396,97 @@ def test_direct_chart_profiles_declare_the_omitted_difficulty_stage(
 
 
 def test_chart_transform_profile_runs_from_expert_midi_without_path_leaks(tmp_path: Path) -> None:
-    root = tmp_path / "transform-bundle"
-    checkpoint_path = root / "weights" / "chart_transform.pt"
-    checkpoint_path.parent.mkdir(parents=True)
-    model = EventTransformMLP(lane_count=5, hidden_dim=4, audio_feature_dim=0)
-    torch.save(
-        {
-            "model_type": "EventTransformMLP",
-            "lane_count": 5,
-            "hidden_dim": 4,
-            "audio_feature_dim": 0,
-            "model_state_dict": model.state_dict(),
-        },
-        checkpoint_path,
-    )
-    config_path = root / "configs" / "training-config.json"
-    config_path.parent.mkdir()
-    config_path.write_text(json.dumps({"instrument": "guitar", "target_difficulty": "Hard"}))
     component_id = "chart_transform.guitar.expert_to_hard"
-    evaluation_path = root / "evaluations" / "held-out.json"
-    evaluation_path.parent.mkdir()
-    evaluation_path.write_text(
-        json.dumps(
-            {
-                "format": "strum-chart-transform-held-out-evaluation/v1",
-                "candidate_manifest_sha256": "a" * 64,
-                "component_id": component_id,
-                "component_sha256": hashlib.sha256(checkpoint_path.read_bytes()).hexdigest(),
-            }
-        )
-    )
-    profile_config_path = root / "profiles" / "difficulty-transform-guitar.json"
-    profile_config_path.parent.mkdir()
-    profile_config_path.write_text(
+    dataset = tmp_path / "dataset"
+    dataset.mkdir()
+    pairs = [
+        {
+            "song_id": "train-song",
+            "source_id": "train-song",
+            "notes_midi_sha256": "a" * 64,
+            "split": "train",
+            "instrument": "guitar",
+            "source_difficulty": "Expert",
+            "target_difficulty": "Hard",
+            "source_events": [{"time_ms": 0, "lanes": [0]}],
+            "target_events": [{"time_ms": 0, "lanes": [0]}],
+        },
+        {
+            "song_id": "held-out-song",
+            "source_id": "held-out-song",
+            "notes_midi_sha256": "b" * 64,
+            "split": "validation",
+            "instrument": "guitar",
+            "source_difficulty": "Expert",
+            "target_difficulty": "Hard",
+            "source_events": [{"time_ms": 0, "lanes": [1]}],
+            "target_events": [{"time_ms": 0, "lanes": [1]}],
+        },
+    ]
+    task_view = {
+        "pipeline": {"id": "chart_transform.five_lane", "version": 1},
+        "catalog": {
+            "catalog_id": "runtime-fixture-catalog",
+            "manifest_sha256": "c" * 64,
+            "records_sha256": "d" * 64,
+        },
+        "source_inputs": [
+            {"source_id": pair["source_id"], "notes_midi_sha256": pair["notes_midi_sha256"]}
+            for pair in pairs
+        ],
+        "split": {
+            "algorithm": "sha256-source-id-rank/v1",
+            "seed": 7,
+            "validation_fraction": 0.5,
+            "assignments": {pair["source_id"]: pair["split"] for pair in pairs},
+        },
+        "preprocessing": {"config_sha256": "e" * 64},
+    }
+    task_view["task_view_id"] = hashlib.sha256(
+        json.dumps(task_view, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    (dataset / "pairs.jsonl").write_text("\n".join(json.dumps(pair) for pair in pairs) + "\n")
+    dataset_manifest = dataset / "dataset-manifest.json"
+    dataset_manifest.write_text(
         json.dumps(
             {
                 "schema_version": 1,
-                "format": "strum-chart-transform-promoted-profile/v1",
-                "candidate_manifest_sha256": "a" * 64,
-                "component_id": component_id,
-                "component_sha256": hashlib.sha256(checkpoint_path.read_bytes()).hexdigest(),
-                "evaluation": {
-                    "path": "evaluations/held-out.json",
-                    "sha256": hashlib.sha256(evaluation_path.read_bytes()).hexdigest(),
-                    "byte_length": evaluation_path.stat().st_size,
-                },
+                "format": "strum-chart-pairs/v1",
+                "dataset_id": "runtime-transform-fixture",
+                "records": "pairs.jsonl",
+                "provenance": "synthetic test fixture",
+                "license": "test-only",
+                "instrument": "guitar",
+                "task_view": task_view,
             }
         )
     )
-    (root / MANIFEST_FILENAME).write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "model_id": "transform-fixture",
-                "compatibility": {"manifest_schema": 1, "strum_version": ">=0.1.0"},
-                "components": {
-                    component_id: {
-                        "checkpoint": "weights/chart_transform.pt",
-                        "sha256": hashlib.sha256(checkpoint_path.read_bytes()).hexdigest(),
-                        "byte_length": checkpoint_path.stat().st_size,
-                        "config": "configs/training-config.json",
-                        "config_sha256": hashlib.sha256(config_path.read_bytes()).hexdigest(),
-                        "config_byte_length": config_path.stat().st_size,
-                        "architecture": "EventTransformMLP/v1",
-                        "preprocessing": "midi-five-lane-events/v1",
-                    }
-                },
-                "profiles": {
-                    "difficulty-transform-guitar": {
-                        "capability": "difficulty.transform/v1",
-                        "instruments": ["guitar"],
-                        "required_components": [component_id],
-                        "difficulty_policies": [f"learned:{component_id}"],
-                        "configuration": "profiles/difficulty-transform-guitar.json",
-                        "configuration_sha256": hashlib.sha256(
-                            profile_config_path.read_bytes()
-                        ).hexdigest(),
-                        "configuration_byte_length": profile_config_path.stat().st_size,
-                    }
-                },
-            }
+    candidate = tmp_path / "raw-transform"
+    train(
+        TrainingConfig(
+            dataset_manifest=str(dataset_manifest),
+            output_dir=str(candidate),
+            model_id="runtime-transform-fixture",
+            source_difficulty="Expert",
+            target_difficulty="Hard",
+            hidden_dim=4,
+            epochs=1,
+            device="cpu",
         )
+    )
+    held_out = tmp_path / "held-out.json"
+    evaluate_chart_transform_candidate(
+        bundle_root=candidate,
+        dataset_manifest=dataset_manifest,
+        output_path=held_out,
+    )
+    root = tmp_path / "transform-bundle"
+    package_chart_transform_profile(
+        experiment_dir=candidate,
+        evaluation_path=held_out,
+        dataset_manifest=dataset_manifest,
+        output_dir=root,
+        profile_id="difficulty-transform-guitar",
     )
     source_midi = tmp_path / "expert.mid"
     source = mido.MidiFile(ticks_per_beat=480)

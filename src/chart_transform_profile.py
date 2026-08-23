@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import shutil
 import tempfile
 from dataclasses import replace
@@ -44,6 +45,7 @@ CAPABILITY = "difficulty.transform/v1"
 ARCHITECTURE = "EventTransformMLP/v1"
 PREPROCESSING = "midi-five-lane-events/v1"
 DEPLOYMENT_STATUS = "requires_transform_profile_evaluation_and_promotion"
+CANDIDATE_LINEAGE_FORMAT = "strum-chart-transform-candidate-lineage/v1"
 
 
 class ChartTransformPromotionError(ValueError):
@@ -75,6 +77,92 @@ def _component_id(config: dict[str, Any]) -> str:
     if not all(isinstance(value, str) and value for value in (instrument, source, target)):
         raise ChartTransformPromotionError("candidate configuration has invalid transform identity")
     return f"chart_transform.{instrument}.{source.lower()}_to_{target.lower()}"
+
+
+def _is_sha256(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _canonical_sha256(value: object) -> str:
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _candidate_lineage(config: dict[str, Any]) -> dict[str, Any]:
+    """Validate the catalog lineage embedded in a promotion-eligible candidate."""
+    lineage = config.get("lineage")
+    if not isinstance(lineage, dict):
+        raise ChartTransformPromotionError("transform candidate lacks immutable lineage")
+    required = {
+        "schema_version",
+        "format",
+        "dataset",
+        "task_view",
+        "split",
+        "audio_manifest_sha256",
+    }
+    dataset = lineage.get("dataset")
+    task_view = lineage.get("task_view")
+    split = lineage.get("split")
+    if (
+        set(lineage) != required
+        or lineage.get("schema_version") != 1
+        or lineage.get("format") != CANDIDATE_LINEAGE_FORMAT
+        or not isinstance(dataset, dict)
+        or set(dataset) != {"dataset_id", "format", "manifest_sha256", "records_sha256"}
+        or not isinstance(dataset.get("dataset_id"), str)
+        or not dataset["dataset_id"]
+        or dataset.get("format") != "strum-chart-pairs/v1"
+        or not _is_sha256(dataset.get("manifest_sha256"))
+        or not _is_sha256(dataset.get("records_sha256"))
+        or not isinstance(task_view, dict)
+        or set(task_view) != {"task_view_id", "task_view_sha256", "pipeline", "catalog"}
+        or not _is_sha256(task_view.get("task_view_id"))
+        or not _is_sha256(task_view.get("task_view_sha256"))
+        or task_view.get("pipeline") != {"id": "chart_transform.five_lane", "version": 1}
+        or not isinstance(task_view.get("catalog"), dict)
+        or set(task_view["catalog"]) != {"catalog_id", "manifest_sha256", "records_sha256"}
+        or not isinstance(task_view["catalog"].get("catalog_id"), str)
+        or not task_view["catalog"]["catalog_id"]
+        or not _is_sha256(task_view["catalog"].get("manifest_sha256"))
+        or not _is_sha256(task_view["catalog"].get("records_sha256"))
+        or not isinstance(split, dict)
+        or set(split)
+        != {
+            "unit",
+            "algorithm",
+            "seed",
+            "validation_fraction",
+            "assignments_sha256",
+            "train_song_ids",
+            "validation_song_ids",
+        }
+        or split.get("unit") != "song_id"
+        or not isinstance(split.get("algorithm"), str)
+        or not split["algorithm"]
+        or not isinstance(split.get("seed"), int)
+        or not isinstance(split.get("validation_fraction"), (int, float))
+        or not 0 < float(split["validation_fraction"]) < 1
+        or not _is_sha256(split.get("assignments_sha256"))
+        or not isinstance(split.get("train_song_ids"), list)
+        or not isinstance(split.get("validation_song_ids"), list)
+        or not all(isinstance(song_id, str) and song_id for song_id in split["train_song_ids"])
+        or not all(isinstance(song_id, str) and song_id for song_id in split["validation_song_ids"])
+        or not split["train_song_ids"]
+        or not split["validation_song_ids"]
+        or set(split["train_song_ids"]) & set(split["validation_song_ids"])
+        or (
+            lineage["audio_manifest_sha256"] is not None
+            and not _is_sha256(lineage["audio_manifest_sha256"])
+        )
+    ):
+        raise ChartTransformPromotionError("transform candidate lineage is invalid")
+    return lineage
 
 
 def _candidate(bundle_root: str | Path) -> tuple[ModelBundle, str, dict[str, Any]]:
@@ -129,6 +217,7 @@ def _candidate(bundle_root: str | Path) -> tuple[ModelBundle, str, dict[str, Any
         "parent_provenance",
         "strum_revision",
         "instrument",
+        "lineage",
     }
     if (
         set(config) != required
@@ -136,6 +225,7 @@ def _candidate(bundle_root: str | Path) -> tuple[ModelBundle, str, dict[str, Any
         or config.get("output_dir") is not None
     ):
         raise ChartTransformPromotionError("transform candidate configuration is unsupported")
+    _candidate_lineage(config)
     return bundle, component.name, config
 
 
@@ -177,6 +267,61 @@ def _candidate_state(
     return model
 
 
+def _verify_declared_lineage(
+    *,
+    lineage: dict[str, Any],
+    dataset_manifest: dict[str, Any],
+    dataset_manifest_path: Path,
+    pairs: list[Any],
+    train_pairs: list[Any],
+    validation_pairs: list[Any],
+    audio_manifest_sha256: str | None,
+) -> None:
+    """Prove the supplied local task view is the one the candidate declares."""
+    dataset = lineage["dataset"]
+    task_lineage = lineage["task_view"]
+    split_lineage = lineage["split"]
+    task_view = dataset_manifest.get("task_view")
+    if not isinstance(task_view, dict):
+        raise ChartTransformPromotionError("held-out evaluation requires a catalog task view")
+    records_value = dataset_manifest.get("records")
+    if not isinstance(records_value, str):
+        raise ChartTransformPromotionError("held-out transform dataset is invalid")
+    records_path = (dataset_manifest_path.parent / records_value).resolve()
+    try:
+        records_path.relative_to(dataset_manifest_path.parent.resolve())
+    except ValueError as error:
+        raise ChartTransformPromotionError("held-out transform dataset is invalid") from error
+    assignments = {pair.song_id: pair.split for pair in pairs}
+    expected_assignments = {pair.song_id: "train" for pair in train_pairs} | {
+        pair.song_id: "validation" for pair in validation_pairs
+    }
+    if (
+        not records_path.is_file()
+        or dataset.get("dataset_id") != dataset_manifest.get("dataset_id")
+        or dataset.get("format") != dataset_manifest.get("format")
+        or dataset.get("manifest_sha256") != _sha256(dataset_manifest_path)
+        or dataset.get("records_sha256") != _sha256(records_path)
+        or task_lineage.get("task_view_id") != task_view.get("task_view_id")
+        or task_lineage.get("task_view_sha256") != _canonical_sha256(task_view)
+        or task_lineage.get("pipeline") != task_view.get("pipeline")
+        or task_lineage.get("catalog") != task_view.get("catalog")
+        or assignments != expected_assignments
+        or split_lineage.get("algorithm") != task_view.get("split", {}).get("algorithm")
+        or split_lineage.get("seed") != task_view.get("split", {}).get("seed")
+        or split_lineage.get("validation_fraction")
+        != task_view.get("split", {}).get("validation_fraction")
+        or split_lineage.get("assignments_sha256") != _canonical_sha256(assignments)
+        or split_lineage.get("train_song_ids") != sorted(pair.song_id for pair in train_pairs)
+        or split_lineage.get("validation_song_ids")
+        != sorted(pair.song_id for pair in validation_pairs)
+        or lineage.get("audio_manifest_sha256") != audio_manifest_sha256
+    ):
+        raise ChartTransformPromotionError(
+            "held-out transform dataset does not match candidate lineage"
+        )
+
+
 def evaluate_chart_transform_candidate(
     *,
     bundle_root: str | Path,
@@ -193,8 +338,10 @@ def evaluate_chart_transform_candidate(
     local seed after training.
     """
     bundle, component_id, portable = _candidate(bundle_root)
+    lineage = _candidate_lineage(portable)
     values = dict(portable)
     values.pop("instrument", None)
+    values.pop("lineage", None)
     values.update(
         {
             "dataset_manifest": str(dataset_manifest),
@@ -207,10 +354,6 @@ def evaluate_chart_transform_candidate(
     try:
         config = TrainingConfig.from_mapping(values)
         pairs, manifest = load_dataset(config)
-        if {pair.split for pair in pairs} != {"train", "validation"}:
-            raise ChartTransformPromotionError(
-                "held-out evaluation requires declared train and validation splits"
-            )
         assets, audio_manifest_sha256 = _load_audio_assets(config, pairs)
         pairs = [replace(pair, audio_path=assets.get(pair.song_id)) for pair in pairs]
         train_pairs, validation_pairs = split_by_song(
@@ -220,6 +363,15 @@ def evaluate_chart_transform_candidate(
             raise ChartTransformPromotionError(
                 "held-out evaluation requires non-empty train and validation songs"
             )
+        _verify_declared_lineage(
+            lineage=lineage,
+            dataset_manifest=manifest,
+            dataset_manifest_path=Path(dataset_manifest).expanduser().resolve(),
+            pairs=pairs,
+            train_pairs=train_pairs,
+            validation_pairs=validation_pairs,
+            audio_manifest_sha256=audio_manifest_sha256,
+        )
         _, _, _ = _make_tensors(train_pairs, config)
         features, targets, _ = _make_tensors(validation_pairs, config)
     except DatasetValidationError as error:
@@ -240,8 +392,13 @@ def evaluate_chart_transform_candidate(
         "component_id": component_id,
         "component_sha256": component.sha256,
         "component_configuration_sha256": component.config_sha256,
+        "candidate_lineage_sha256": _canonical_sha256(lineage),
         "dataset_manifest_sha256": _sha256(Path(dataset_manifest)),
+        "dataset_records_sha256": lineage["dataset"]["records_sha256"],
         "dataset_id": manifest["dataset_id"],
+        "task_view_id": lineage["task_view"]["task_view_id"],
+        "task_view_sha256": lineage["task_view"]["task_view_sha256"],
+        "split_assignments_sha256": lineage["split"]["assignments_sha256"],
         "instrument": manifest["instrument"],
         "source_difficulty": config.source_difficulty,
         "target_difficulty": config.target_difficulty,
@@ -262,6 +419,7 @@ def _require_report(
     report_path: Path, bundle: ModelBundle, component_id: str, config: dict[str, Any]
 ) -> dict[str, Any]:
     report = _read_json(report_path, "transform held-out evaluation report")
+    lineage = _candidate_lineage(config)
     component = bundle.component(component_id)
     assert bundle.manifest_path is not None and component is not None
     required = {
@@ -272,8 +430,13 @@ def _require_report(
         "component_id",
         "component_sha256",
         "component_configuration_sha256",
+        "candidate_lineage_sha256",
         "dataset_manifest_sha256",
+        "dataset_records_sha256",
         "dataset_id",
+        "task_view_id",
+        "task_view_sha256",
+        "split_assignments_sha256",
         "instrument",
         "source_difficulty",
         "target_difficulty",
@@ -294,18 +457,28 @@ def _require_report(
         or report.get("component_id") != component_id
         or report.get("component_sha256") != component.sha256
         or report.get("component_configuration_sha256") != component.config_sha256
+        or report.get("candidate_lineage_sha256") != _canonical_sha256(lineage)
+        or report.get("dataset_manifest_sha256") != lineage["dataset"]["manifest_sha256"]
+        or report.get("dataset_records_sha256") != lineage["dataset"]["records_sha256"]
+        or report.get("dataset_id") != lineage["dataset"]["dataset_id"]
+        or report.get("task_view_id") != lineage["task_view"]["task_view_id"]
+        or report.get("task_view_sha256") != lineage["task_view"]["task_view_sha256"]
+        or report.get("split_assignments_sha256") != lineage["split"]["assignments_sha256"]
         or report.get("instrument") != config["instrument"]
         or report.get("source_difficulty") != config["source_difficulty"]
         or report.get("target_difficulty") != config["target_difficulty"]
         or report.get("split") != "validation"
         or report.get("split_unit") != "song_id"
         or not isinstance(report.get("held_out_song_ids"), list)
-        or not report["held_out_song_ids"]
+        or report["held_out_song_ids"] != lineage["split"]["validation_song_ids"]
         or not isinstance(report.get("records_evaluated"), int)
         or report["records_evaluated"] < 1
         or not isinstance(metrics, dict)
         or set(metrics) != {"loss", "lane_precision", "lane_recall", "lane_f1"}
-        or not all(isinstance(value, (int, float)) for value in metrics.values())
+        or not all(
+            isinstance(value, (int, float)) and math.isfinite(float(value))
+            for value in metrics.values()
+        )
     ):
         raise ChartTransformPromotionError("transform held-out evaluation report is invalid")
     return report
@@ -315,10 +488,18 @@ def package_chart_transform_profile(
     *,
     experiment_dir: str | Path,
     evaluation_path: str | Path,
+    dataset_manifest: str | Path,
     output_dir: str | Path,
     profile_id: str,
+    device: str = "cpu",
+    audio_manifest: str | Path | None = None,
 ) -> dict[str, object]:
-    """Create an immutable executable profile from one evaluated raw candidate."""
+    """Create an executable profile after independently reproducing evaluation.
+
+    The caller's report is review evidence, not a promotion authority.  The
+    package step reruns evaluation from the candidate's declared catalog task
+    view and refuses any report whose complete, canonical contents differ.
+    """
     if not profile_id or any(
         character not in "abcdefghijklmnopqrstuvwxyz0123456789.-" for character in profile_id
     ):
@@ -340,10 +521,21 @@ def package_chart_transform_profile(
         model_config = staging / "configs" / "training-config.json"
         evaluation = staging / "evaluations" / "held-out.json"
         profile_config = staging / "profiles" / f"{profile_id}.json"
+        evaluate_chart_transform_candidate(
+            bundle_root=experiment_dir,
+            dataset_manifest=dataset_manifest,
+            output_path=evaluation,
+            device=device,
+            audio_manifest=audio_manifest,
+        )
+        recomputed_report = _require_report(evaluation, bundle, component_id, config)
+        if _canonical_sha256(report) != _canonical_sha256(recomputed_report):
+            raise ChartTransformPromotionError(
+                "transform held-out evaluation report does not match independently recomputed evidence"
+            )
         for source, destination in (
             (component.checkpoint, weights),
             (component.config, model_config),
-            (report_path, evaluation),
         ):
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(source, destination)
@@ -353,6 +545,9 @@ def package_chart_transform_profile(
             "candidate_manifest_sha256": report["candidate_manifest_sha256"],
             "component_id": component_id,
             "component_sha256": _sha256(weights),
+            "component_configuration_sha256": _sha256(model_config),
+            "candidate_lineage_sha256": report["candidate_lineage_sha256"],
+            "lineage": config["lineage"],
             "evaluation": {
                 "path": "evaluations/held-out.json",
                 "sha256": _sha256(evaluation),
@@ -425,6 +620,17 @@ def validate_promoted_chart_transform_profile(bundle: ModelBundle, profile_id: s
         raise BundleValidationError("difficulty transform profile has invalid component")
     config = _read_json(profile.configuration, "difficulty transform promotion configuration")
     evaluation = config.get("evaluation") if isinstance(config.get("evaluation"), dict) else {}
+    if component.config is None or component.config_sha256 is None:
+        raise BundleValidationError(
+            "difficulty transform profile has incomplete component configuration"
+        )
+    candidate_config = _read_json(component.config, "difficulty transform candidate configuration")
+    try:
+        lineage = _candidate_lineage(candidate_config)
+    except ChartTransformPromotionError as error:
+        raise BundleValidationError(
+            "difficulty transform profile has invalid candidate lineage"
+        ) from error
     if (
         set(config)
         != {
@@ -433,12 +639,18 @@ def validate_promoted_chart_transform_profile(bundle: ModelBundle, profile_id: s
             "candidate_manifest_sha256",
             "component_id",
             "component_sha256",
+            "component_configuration_sha256",
+            "candidate_lineage_sha256",
+            "lineage",
             "evaluation",
         }
         or config.get("schema_version") != 1
         or config.get("format") != PROFILE_FORMAT
         or config.get("component_id") != component.name
         or config.get("component_sha256") != component.sha256
+        or config.get("component_configuration_sha256") != component.config_sha256
+        or config.get("candidate_lineage_sha256") != _canonical_sha256(lineage)
+        or config.get("lineage") != lineage
         or set(evaluation) != {"path", "sha256", "byte_length"}
         or not isinstance(evaluation.get("path"), str)
         or Path(evaluation["path"]).is_absolute()
@@ -462,12 +674,57 @@ def validate_promoted_chart_transform_profile(bundle: ModelBundle, profile_id: s
     ):
         raise BundleValidationError("difficulty transform evaluation report does not match profile")
     report = _read_json(report_path, "difficulty transform evaluation report")
+    required_report = {
+        "schema_version",
+        "format",
+        "model_id",
+        "candidate_manifest_sha256",
+        "component_id",
+        "component_sha256",
+        "component_configuration_sha256",
+        "candidate_lineage_sha256",
+        "dataset_manifest_sha256",
+        "dataset_records_sha256",
+        "dataset_id",
+        "task_view_id",
+        "task_view_sha256",
+        "split_assignments_sha256",
+        "instrument",
+        "source_difficulty",
+        "target_difficulty",
+        "split",
+        "split_unit",
+        "held_out_song_ids",
+        "records_evaluated",
+        "metrics",
+        "audio_manifest_sha256",
+    }
+    metrics = report.get("metrics")
     if (
-        report.get("format") != EVALUATION_FORMAT
+        set(report) != required_report
+        or report.get("schema_version") != 1
+        or report.get("format") != EVALUATION_FORMAT
         or report.get("candidate_manifest_sha256") != config["candidate_manifest_sha256"]
         or report.get("component_id") != component.name
         or report.get("component_sha256") != component.sha256
-    ):
-        raise BundleValidationError(
-            "difficulty transform evaluation report is not bound to profile"
+        or report.get("component_configuration_sha256") != component.config_sha256
+        or report.get("candidate_lineage_sha256") != config["candidate_lineage_sha256"]
+        or report.get("dataset_manifest_sha256") != lineage["dataset"]["manifest_sha256"]
+        or report.get("dataset_records_sha256") != lineage["dataset"]["records_sha256"]
+        or report.get("dataset_id") != lineage["dataset"]["dataset_id"]
+        or report.get("task_view_id") != lineage["task_view"]["task_view_id"]
+        or report.get("task_view_sha256") != lineage["task_view"]["task_view_sha256"]
+        or report.get("split_assignments_sha256") != lineage["split"]["assignments_sha256"]
+        or report.get("held_out_song_ids") != lineage["split"]["validation_song_ids"]
+        or report.get("split") != "validation"
+        or report.get("split_unit") != "song_id"
+        or not isinstance(report.get("records_evaluated"), int)
+        or report["records_evaluated"] < 1
+        or not isinstance(metrics, dict)
+        or set(metrics) != {"loss", "lane_precision", "lane_recall", "lane_f1"}
+        or not all(
+            isinstance(value, (int, float)) and math.isfinite(float(value))
+            for value in metrics.values()
         )
+    ):
+        raise BundleValidationError("difficulty transform evaluation evidence is invalid")

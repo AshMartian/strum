@@ -1,3 +1,4 @@
+import hashlib
 import json
 import math
 import shutil
@@ -21,7 +22,7 @@ from src.chart_transform_profile import (
     evaluate_chart_transform_candidate,
     package_chart_transform_profile,
 )
-from src.model_bundle import load_model_bundle
+from src.model_bundle import MANIFEST_FILENAME, BundleValidationError, load_model_bundle
 from src.models.chart_audio import AudioFeatureError, event_audio_features
 from src.models.chart_transform import EventTransformMLP
 from src.worker import inspect_model_bundle, preflight_chart_request
@@ -52,14 +53,15 @@ def _write_test_song(path: Path, frequency_hz: float) -> None:
         output.writeframes(samples.tobytes())
 
 
-def test_transform_requires_held_out_evaluation_and_immutable_promotion(tmp_path: Path) -> None:
-    dataset = tmp_path / "dataset"
-    dataset.mkdir()
+def _catalog_task_dataset(path: Path) -> Path:
+    """Create the smallest genuine, hash-bound catalog task-view fixture."""
     records = [
         {
             "song_id": "train-song",
-            "instrument": "guitar",
+            "source_id": "train-song",
+            "notes_midi_sha256": "a" * 64,
             "split": "train",
+            "instrument": "guitar",
             "source_difficulty": "Expert",
             "target_difficulty": "Hard",
             "source_events": [{"time_ms": 0, "lanes": [0]}],
@@ -67,16 +69,40 @@ def test_transform_requires_held_out_evaluation_and_immutable_promotion(tmp_path
         },
         {
             "song_id": "held-out-song",
-            "instrument": "guitar",
+            "source_id": "held-out-song",
+            "notes_midi_sha256": "b" * 64,
             "split": "validation",
+            "instrument": "guitar",
             "source_difficulty": "Expert",
             "target_difficulty": "Hard",
             "source_events": [{"time_ms": 0, "lanes": [1]}],
             "target_events": [{"time_ms": 0, "lanes": [1]}],
         },
     ]
-    (dataset / "pairs.jsonl").write_text("\n".join(json.dumps(item) for item in records) + "\n")
-    manifest = dataset / "dataset-manifest.json"
+    task_view = {
+        "pipeline": {"id": "chart_transform.five_lane", "version": 1},
+        "catalog": {
+            "catalog_id": "promotion-fixture-catalog",
+            "manifest_sha256": "c" * 64,
+            "records_sha256": "d" * 64,
+        },
+        "source_inputs": [
+            {"source_id": item["source_id"], "notes_midi_sha256": item["notes_midi_sha256"]}
+            for item in records
+        ],
+        "split": {
+            "algorithm": "sha256-source-id-rank/v1",
+            "seed": 7,
+            "validation_fraction": 0.5,
+            "assignments": {item["source_id"]: item["split"] for item in records},
+        },
+        "preprocessing": {"config_sha256": "e" * 64},
+    }
+    task_view["task_view_id"] = hashlib.sha256(
+        json.dumps(task_view, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    (path / "pairs.jsonl").write_text("\n".join(json.dumps(item) for item in records) + "\n")
+    manifest = path / "dataset-manifest.json"
     manifest.write_text(
         json.dumps(
             {
@@ -87,9 +113,17 @@ def test_transform_requires_held_out_evaluation_and_immutable_promotion(tmp_path
                 "provenance": "synthetic test fixture",
                 "license": "test-only",
                 "instrument": "guitar",
+                "task_view": task_view,
             }
         )
     )
+    return manifest
+
+
+def test_transform_requires_held_out_evaluation_and_immutable_promotion(tmp_path: Path) -> None:
+    dataset = tmp_path / "dataset"
+    dataset.mkdir()
+    manifest = _catalog_task_dataset(dataset)
     candidate = tmp_path / "candidate"
     train(
         TrainingConfig(
@@ -103,6 +137,11 @@ def test_transform_requires_held_out_evaluation_and_immutable_promotion(tmp_path
             device="cpu",
         )
     )
+    candidate_config = json.loads((candidate / "configs" / "training-config.json").read_text())
+    assert candidate_config["lineage"]["dataset"]["dataset_id"] == "promotion-fixture"
+    assert candidate_config["lineage"]["task_view"]["task_view_id"]
+    assert candidate_config["lineage"]["split"]["validation_song_ids"] == ["held-out-song"]
+    assert str(dataset) not in json.dumps(candidate_config["lineage"])
     assert inspect_model_bundle(candidate)["deployment_status"] == "not_deployable"
     report = tmp_path / "held-out.json"
     result = evaluate_chart_transform_candidate(
@@ -114,6 +153,7 @@ def test_transform_requires_held_out_evaluation_and_immutable_promotion(tmp_path
     packaged = package_chart_transform_profile(
         experiment_dir=candidate,
         evaluation_path=report,
+        dataset_manifest=manifest,
         output_dir=promoted,
         profile_id="difficulty-transform-guitar-promoted",
     )
@@ -133,15 +173,88 @@ def test_transform_requires_held_out_evaluation_and_immutable_promotion(tmp_path
     )
     assert preflight_chart_request(request)["execution"] == "available"
     report_data = json.loads(report.read_text())
-    report_data["component_sha256"] = "0" * 64
+    report_data["metrics"]["loss"] += 1.0
+    report.write_text(json.dumps(report_data))
+    with pytest.raises(ChartTransformPromotionError, match="independently recomputed"):
+        package_chart_transform_profile(
+            experiment_dir=candidate,
+            evaluation_path=report,
+            dataset_manifest=manifest,
+            output_dir=tmp_path / "altered-metrics",
+            profile_id="altered-metrics",
+        )
+    report_data = json.loads((promoted / "evaluations" / "held-out.json").read_text())
+    report_data["held_out_song_ids"] = ["different-song"]
     report.write_text(json.dumps(report_data))
     with pytest.raises(ChartTransformPromotionError, match="invalid"):
         package_chart_transform_profile(
             experiment_dir=candidate,
             evaluation_path=report,
-            output_dir=tmp_path / "invalid",
-            profile_id="invalid-transform",
+            dataset_manifest=manifest,
+            output_dir=tmp_path / "altered-held-out",
+            profile_id="altered-held-out",
         )
+    report_data = json.loads((promoted / "evaluations" / "held-out.json").read_text())
+    report_data["dataset_manifest_sha256"] = "0" * 64
+    report.write_text(json.dumps(report_data))
+    with pytest.raises(ChartTransformPromotionError, match="invalid"):
+        package_chart_transform_profile(
+            experiment_dir=candidate,
+            evaluation_path=report,
+            dataset_manifest=manifest,
+            output_dir=tmp_path / "altered-dataset-lineage",
+            profile_id="altered-dataset-lineage",
+        )
+    report_data = json.loads((promoted / "evaluations" / "held-out.json").read_text())
+    report_data.pop("candidate_lineage_sha256")
+    report.write_text(json.dumps(report_data))
+    with pytest.raises(ChartTransformPromotionError, match="invalid"):
+        package_chart_transform_profile(
+            experiment_dir=candidate,
+            evaluation_path=report,
+            dataset_manifest=manifest,
+            output_dir=tmp_path / "missing-evidence",
+            profile_id="missing-evidence",
+        )
+    report.write_text((promoted / "evaluations" / "held-out.json").read_text())
+    original_manifest = manifest.read_text()
+    altered_manifest = json.loads(original_manifest)
+    altered_manifest["provenance"] = "altered after candidate training"
+    manifest.write_text(json.dumps(altered_manifest))
+    with pytest.raises(ChartTransformPromotionError, match="does not match candidate lineage"):
+        package_chart_transform_profile(
+            experiment_dir=candidate,
+            evaluation_path=report,
+            dataset_manifest=manifest,
+            output_dir=tmp_path / "altered-input-lineage",
+            profile_id="altered-input-lineage",
+        )
+    manifest.write_text(original_manifest)
+    forged = tmp_path / "manually-fabricated-profile"
+    shutil.copytree(promoted, forged)
+    forged_profile = forged / "profiles" / "difficulty-transform-guitar-promoted.json"
+    forged_config = json.loads(forged_profile.read_text())
+    forged_config.pop("lineage")
+    forged_profile.write_text(json.dumps(forged_config))
+    forged_manifest_path = forged / MANIFEST_FILENAME
+    forged_manifest = json.loads(forged_manifest_path.read_text())
+    profile_entry = forged_manifest["profiles"]["difficulty-transform-guitar-promoted"]
+    profile_entry["configuration_sha256"] = hashlib.sha256(forged_profile.read_bytes()).hexdigest()
+    profile_entry["configuration_byte_length"] = forged_profile.stat().st_size
+    forged_manifest_path.write_text(json.dumps(forged_manifest))
+    request.write_text(
+        json.dumps(
+            {
+                "model_root": str(forged),
+                "profile_id": "difficulty-transform-guitar-promoted",
+                "difficulty_policy": "learned:chart_transform.guitar.expert_to_hard",
+                "instruments": ["guitar"],
+                "device": "cpu",
+            }
+        )
+    )
+    with pytest.raises(BundleValidationError, match="promotion configuration"):
+        preflight_chart_request(request)
 
 
 @pytest.mark.parametrize("time_ms", [-1, float("nan"), float("inf")])

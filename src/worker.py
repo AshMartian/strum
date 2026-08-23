@@ -4192,8 +4192,11 @@ def _parse_args() -> argparse.Namespace:
     )
     transform_package.add_argument("--experiment", type=Path, required=True)
     transform_package.add_argument("--evaluation", type=Path, required=True)
+    transform_package.add_argument("--dataset-manifest", type=Path, required=True)
     transform_package.add_argument("--output", type=Path, required=True)
     transform_package.add_argument("--profile", required=True)
+    transform_package.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
+    transform_package.add_argument("--audio-manifest", type=Path)
     transform_package.add_argument("--json", action="store_true")
     model = commands.add_parser("model", help="inspect model bundles")
     model_commands = model.add_subparsers(dest="model_command", required=True)
@@ -4487,8 +4490,11 @@ def main() -> int:
                         package_chart_transform_profile(
                             experiment_dir=args.experiment,
                             evaluation_path=args.evaluation,
+                            dataset_manifest=args.dataset_manifest,
                             output_dir=args.output,
                             profile_id=args.profile,
+                            device=args.device,
+                            audio_manifest=args.audio_manifest,
                         )
                     )
             except ChartTransformPromotionError as error:
