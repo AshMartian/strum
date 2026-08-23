@@ -16,7 +16,8 @@ fails closed to the profiles declared by a validated model bundle:
 | `guitar.hybrid-v2-rule/v1` | Executable | Expert Guitar only |
 | `drums.v14-expert/v1` | Executable | Expert Drums only, direct V14 (no legacy ensemble/fallbacks) |
 | `difficulty.transform/v1` | Executable | Learned five-lane Expert → Hard/Medium/Easy transform for Guitar, Bass, Keys, or Drums |
-| Guitar onset/fret / Drums onset classifier | Worker-trainable, experiment-only | Safe task views plus path-free experiment bundles; profile packaging remains required |
+| Guitar onset/fret | Worker-trainable, experiment-only | Safe task views plus path-free experiment bundles; auto-chart profile packaging remains required |
+| `drums.onset-classifier-evaluation/v1` | Executable evaluator only | Prepared V2 onset windows → eight class probabilities; explicitly not a chart handler |
 | Bass, Keys, Vocals, Pro instruments, mapper, section | Catalog-ready task views, training planned | No worker trainer or deployable profile |
 | Legacy batch pipeline | Research / compatibility scripts | Not a worker execution handler |
 
@@ -26,6 +27,23 @@ checkpoint/profile compatibility, and difficulty semantics. In particular,
 OCTAVE must not implement a deterministic Expert-to-lower-difficulty mapper:
 an Expert worker output stays Expert-only until a declared STRUM learned
 difficulty profile is run.
+
+### Drums classifier evaluation package boundary
+
+`strum-worker checkpoint package --request …` may package a completed
+catalog-worker `drums.onset-classifier/v1` experiment only after it verifies
+the experiment ledger, original configuration hash, checkpoint hash/length,
+and the exact V2 architecture/preprocessing contract. The portable bundle
+contains a Stage-2 `OnsetClassifier/v2` evaluator. It takes only prepared
+fine/coarse mel windows plus the 64-value onset context and returns eight
+sigmoid class probabilities. It has no audio onset detector, velocity head, or
+MIDI writer, so chart preflight reports `execution: not_available` for it.
+
+The direct `drums.v14-expert/v1` profile remains the only executable Expert
+Drums chart path. A future replacement must package and evaluate a compatible
+onset detector, classifier/velocity semantics, preprocessing, calibration,
+and chart output contract together; a V2 classifier checkpoint alone is not
+such a profile.
 
 ## 1. Legacy system overview
 

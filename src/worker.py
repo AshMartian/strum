@@ -302,6 +302,7 @@ def _runtime_payload() -> dict[str, object]:
         "typed_chart_results",
         "model_bundle_preflight",
         "checkpoint_inspect",
+        "checkpoint_package",
     ]
     return {
         "protocol_version": PROTOCOL_VERSION,
@@ -1889,6 +1890,29 @@ def run_training_request(request_path: Path) -> dict[str, object]:
     }
 
 
+def package_checkpoint_request(request_path: Path) -> dict[str, object]:
+    """Package one worker-owned experiment through a strict, path-private request."""
+    try:
+        raw = json.loads(request_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise WorkerRequestError("checkpoint package request is unreadable or not valid JSON") from error
+    if not isinstance(raw, dict) or set(raw) != {"pipeline_id", "experiment_root", "output"}:
+        raise WorkerRequestError("checkpoint package request has unsupported fields")
+    if raw.get("pipeline_id") != "drums.onset-classifier/v1":
+        raise WorkerRequestError("checkpoint package pipeline is unsupported")
+    if not all(isinstance(raw.get(key), str) and raw[key] for key in ("experiment_root", "output")):
+        raise WorkerRequestError("checkpoint package locations must be non-empty strings")
+    from src.drums_onset_profile_package import (  # noqa: PLC0415
+        DrumsProfilePackagingError,
+        package_drums_onset_experiment,
+    )
+
+    try:
+        return package_drums_onset_experiment(raw["experiment_root"], raw["output"])
+    except DrumsProfilePackagingError as error:
+        raise WorkerRequestError("Drums checkpoint package request failed validation") from error
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Versioned STRUM worker contract")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -1938,6 +1962,12 @@ def _parse_args() -> argparse.Namespace:
     inspect = checkpoint_commands.add_parser("inspect", help="inspect a checkpoint bundle")
     inspect.add_argument("--model-root", type=Path, required=True)
     inspect.add_argument("--json", action="store_true")
+    package = checkpoint_commands.add_parser(
+        "package", help="package a worker experiment as an evaluation-only bundle"
+    )
+    package.add_argument("--request", type=Path, required=True)
+    package.add_argument("--json", action="store_true")
+    package.add_argument("--json-events", action="store_true")
     inference = commands.add_parser("inference", help="validate deployable inference profiles")
     inference_commands = inference.add_subparsers(dest="inference_command", required=True)
     profile = inference_commands.add_parser("profile", help="inspect one inference profile")
@@ -2014,6 +2044,13 @@ def main() -> int:
                     "compatibility": bundle.compatibility,
                 }
             )
+            return 0
+        if args.command == "checkpoint" and args.checkpoint_command == "package":
+            if args.json_events:
+                return _run_event_stream(
+                    args.request, "checkpoint_package", lambda: package_checkpoint_request(args.request)
+                )
+            _print_json(package_checkpoint_request(args.request))
             return 0
         if (
             args.command == "inference"

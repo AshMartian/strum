@@ -11,7 +11,7 @@ auto-chart handler.
 | Family | Catalog task view | Worker training | Executable worker profile |
 | --- | --- | --- | --- |
 | Guitar onset + fret | Available | Available; experiment-only | `guitar.hybrid-v2-rule/v1`, Expert only |
-| Drums onset + classifier | Available | Available; experiment-only | `drums.v14-expert/v1`, Expert only direct V14 |
+| Drums onset + classifier | Available | Available; V2 evaluation package | `drums.v14-expert/v1` direct Expert charts; V2 is evaluation-only |
 | Five-lane difficulty transform (Guitar/Bass/Keys/Drums) | Available | Available | `difficulty.transform/v1` |
 | Bass / Keys / Vocals / Pro Guitar / Pro Bass / Pro Keys | Available | Planned | Planned |
 | Guitar/Bass fret mapper and section classifier | Available | Planned worker handler | Planned |
@@ -48,15 +48,21 @@ presented as a successful OCTAVE auto-chart result.
   classifier experiments. Both reuse their established preprocessing/trainers,
   record path-free provenance, and remain non-deployable until a compatible
   auto-chart profile is explicitly packaged and validated.
+- ✅ A catalog-worker Drums V2 experiment can be integrity-packaged as
+  `drums.onset-classifier-evaluation/v1`. Its hash-verified runtime accepts
+  only STRUM's prepared onset windows and returns eight class probabilities;
+  it cannot detect onsets, emit velocity, write a chart, or replace the direct
+  `drums.v14-expert/v1` profile.
 - ✅ Legacy model/training research assets: two-stage drums, Guitar onset,
   mapper, section, vocals, keys, tempo/grid, MIDI export, and batch assembly.
 
 ## Next worker milestones
 
-1. Package and evaluate compatible Guitar and Drums auto-chart profiles from
-   worker-produced experiments. This requires architecture/preprocessing and
-   companion-model compatibility checks; it must not promote an experiment
-   solely because its checkpoint file exists.
+1. Package and evaluate compatible Guitar auto-chart profiles, and establish
+   a complete, evaluated Drums onset-plus-classifier profile if one is trained
+   and validated as a single execution contract. The current V2 Drums package
+   is intentionally Stage-2 evaluation only; it must not be promoted solely
+   because its checkpoint file exists.
 2. Replace the remaining legacy auto-chart assembly behavior with declared,
    component-level bundle requirements and typed stage graphs. The current
    typed manifests cover each executable single-profile run; the full

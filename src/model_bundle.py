@@ -401,7 +401,8 @@ def _parse_profile(root: Path, name: str, value: object) -> InferenceProfile:
                 f"profiles.{name}.{field} must be a unique non-empty string list"
             )
     if any(
-        policy not in {"expert_only", "deterministic-v1"} and not policy.startswith("learned:")
+        policy not in {"expert_only", "deterministic-v1", "evaluation_only"}
+        and not policy.startswith("learned:")
         for policy in difficulty_policies
     ):
         raise BundleValidationError(
