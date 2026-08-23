@@ -37,6 +37,9 @@ from src.catalog_task_manifest import (
     TASK_INSTRUMENTS as CATALOG_TASK_INSTRUMENTS,
 )
 from src.catalog_task_manifest import (
+    TASK_LABEL_SCHEMAS as CATALOG_TASK_LABEL_SCHEMAS,
+)
+from src.catalog_task_manifest import (
     build_catalog_task_manifest,
     write_catalog_task_manifest,
 )
@@ -86,6 +89,10 @@ class PipelineDescriptor:
     # next STRUM-owned contract. Hosts can display these without treating a
     # task view or raw experiment as a deployment claim.
     training_requirements: tuple[str, ...] = ()
+    # Optional structured requirements for an intentionally planned training
+    # path.  This lets a host explain why a catalog-ready task cannot train or
+    # chart yet without guessing from a prose status string.
+    training_contract: dict[str, object] | None = None
 
     def as_json(self) -> dict[str, object]:
         data = asdict(self)
@@ -93,6 +100,8 @@ class PipelineDescriptor:
         data["private_request_fields"] = list(self.private_request_fields)
         data["catalog_inspection_option_keys"] = list(self.catalog_inspection_option_keys)
         data["training_requirements"] = list(self.training_requirements)
+        if data["training_contract"] is None:
+            data.pop("training_contract")
         return data
 
 
@@ -212,22 +221,31 @@ PLANNED_TRAINING_REQUIREMENTS: dict[str, tuple[str, ...]] = {
         "profile_packaging",
     ),
     "pro_guitar": (
-        "pro_string_fret_target_encoder",
-        "pro_guitar_training_architecture",
-        "profile_evaluation",
-        "profile_packaging",
+        "pro_string_fret_target_encoder/v1",
+        "pro_string_fret_track_variant_encoder/v1",
+        "pro_guitar_audio_preprocessor/v1",
+        "pro_guitar_sequence_trainer/v1",
+        "pro_guitar_held_out_evaluation/v1",
+        "pro_guitar_profile_package/v1",
+        "pro_guitar_chart_execution/v1",
     ),
     "pro_bass": (
-        "pro_string_fret_target_encoder",
-        "pro_bass_training_architecture",
-        "profile_evaluation",
-        "profile_packaging",
+        "pro_string_fret_target_encoder/v1",
+        "pro_string_fret_track_variant_encoder/v1",
+        "pro_bass_audio_preprocessor/v1",
+        "pro_bass_sequence_trainer/v1",
+        "pro_bass_held_out_evaluation/v1",
+        "pro_bass_profile_package/v1",
+        "pro_bass_chart_execution/v1",
     ),
     "pro_keys": (
-        "pro_keys_pitch_target_encoder",
-        "pro_keys_training_architecture",
-        "profile_evaluation",
-        "profile_packaging",
+        "pro_keys_expert_track_decoder/v1",
+        "pro_keys_pitch_target_encoder/v1",
+        "pro_keys_audio_preprocessor/v1",
+        "pro_keys_sequence_trainer/v1",
+        "pro_keys_held_out_evaluation/v1",
+        "pro_keys_profile_package/v1",
+        "pro_keys_chart_execution/v1",
     ),
     "section_guitar": (
         "section_window_preprocessor",
@@ -239,6 +257,67 @@ PLANNED_TRAINING_REQUIREMENTS: dict[str, tuple[str, ...]] = {
         "section_training_worker",
         "section_runtime_integration",
     ),
+}
+
+
+PRO_TRAINING_CONTRACTS: dict[str, dict[str, object]] = {
+    "pro_guitar": {
+        "format": "strum-planned-training-contract/v1",
+        "training_status": "planned",
+        "label_source": {
+            "schema_id": "pro-string-fret-midi/v1",
+            "selection": "exact-real-track-identities/v1",
+            "tracks": ["PART REAL_GUITAR", "PART REAL_GUITAR_22"],
+            "required_difficulty": "expert",
+            # The encoder must retain this source distinction.  A generic
+            # five-lane output or a merged 17/22-fret target is invalid.
+            "target_semantics": [
+                "note_timing_and_duration",
+                "string_fret_events",
+                "track_variant",
+                "pro_technique_events",
+            ],
+        },
+        "required_stages": list(PLANNED_TRAINING_REQUIREMENTS["pro_guitar"]),
+        "execution": {"status": "not_available", "inference_capability": None},
+    },
+    "pro_bass": {
+        "format": "strum-planned-training-contract/v1",
+        "training_status": "planned",
+        "label_source": {
+            "schema_id": "pro-string-fret-midi/v1",
+            "selection": "exact-real-track-identities/v1",
+            "tracks": ["PART REAL_BASS", "PART REAL_BASS_22"],
+            "required_difficulty": "expert",
+            "target_semantics": [
+                "note_timing_and_duration",
+                "string_fret_events",
+                "track_variant",
+                "pro_technique_events",
+            ],
+        },
+        "required_stages": list(PLANNED_TRAINING_REQUIREMENTS["pro_bass"]),
+        "execution": {"status": "not_available", "inference_capability": None},
+    },
+    "pro_keys": {
+        "format": "strum-planned-training-contract/v1",
+        "training_status": "planned",
+        "label_source": {
+            "schema_id": "pro-keys-pitch-midi/v1",
+            "selection": "exact-real-track-identities/v1",
+            "tracks": ["PART REAL_KEYS_X"],
+            "required_difficulty": "expert",
+            # Lower-difficulty REAL_KEYS tracks are not inputs to this Expert
+            # label path.  STRUM's learned difficulty stage owns that later.
+            "target_semantics": [
+                "note_timing_and_duration",
+                "midi_pitch_events",
+                "expert_difficulty_track",
+            ],
+        },
+        "required_stages": list(PLANNED_TRAINING_REQUIREMENTS["pro_keys"]),
+        "execution": {"status": "not_available", "inference_capability": None},
+    },
 }
 DRUMS_ONSET_TRAIN_SCHEMA = _object_schema(
     {
@@ -458,6 +537,17 @@ PIPELINES = (
                 "instrument": task_kind.replace("fret_mapper_", "").replace("section_", ""),
                 "difficulties": ["expert"],
                 "audio_policy": "task-specific managed role with mix fallback",
+                **(
+                    {
+                        "label_schema": CATALOG_TASK_LABEL_SCHEMAS[task_kind]["id"],
+                        "label_tracks": CATALOG_TASK_LABEL_SCHEMAS[task_kind].get(
+                            "track_names",
+                            CATALOG_TASK_LABEL_SCHEMAS[task_kind].get("track_prefixes", []),
+                        ),
+                    }
+                    if task_kind in PRO_TRAINING_CONTRACTS
+                    else {}
+                ),
             },
             prepare_schema=_object_schema(
                 {
@@ -498,6 +588,7 @@ PIPELINES = (
                 if task_kind.startswith("fret_mapper_")
                 else PLANNED_TRAINING_REQUIREMENTS.get(task_kind, ())
             ),
+            training_contract=PRO_TRAINING_CONTRACTS.get(task_kind),
         )
         for task_kind, pipeline_id in sorted(CATALOG_TASK_PIPELINES.items())
         if task_kind not in {"bass_onset_fret", "keys_onset_fret", "vocals_activity"}

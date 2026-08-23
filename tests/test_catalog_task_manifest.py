@@ -132,6 +132,42 @@ def test_rejects_task_label_schema_or_track_tampering(tmp_path: Path) -> None:
         resolve_catalog_task_manifest_songs(manifest, tmp_path)
 
 
+def test_pro_task_views_keep_exact_real_track_semantics(tmp_path: Path) -> None:
+    record = _record(tmp_path, "octave-src-aaaaaaaa")
+    # Prefix matching must not turn similarly named chart/authoring tracks
+    # into Pro training labels, and an Expert Pro Keys task must not consume
+    # lower-difficulty REAL_KEYS tracks.
+    record["chart"]["instruments"]["pro_guitar"]["track_names"] = [
+        "PART REAL_GUITAR",
+        "PART REAL_GUITAR_22",
+        "PART REAL_GUITAR_PREVIEW",
+    ]
+    record["chart"]["instruments"]["pro_bass"]["track_names"] = [
+        "PART REAL_BASS_22",
+        "PART REAL_BASS_AUTHORING",
+    ]
+    record["chart"]["instruments"]["pro_keys"]["track_names"] = [
+        "PART REAL_KEYS_E",
+        "PART REAL_KEYS_M",
+        "PART REAL_KEYS_H",
+        "PART REAL_KEYS_X",
+        "PART REAL_KEYS_X_PREVIEW",
+    ]
+    _catalog(tmp_path, [record])
+
+    guitar = build_catalog_task_manifest(tmp_path, "pro_guitar")
+    assert guitar["songs"][0]["label_tracks"] == ["PART REAL_GUITAR", "PART REAL_GUITAR_22"]
+    bass = build_catalog_task_manifest(tmp_path, "pro_bass")
+    assert bass["songs"][0]["label_tracks"] == ["PART REAL_BASS_22"]
+    keys = build_catalog_task_manifest(tmp_path, "pro_keys")
+    assert keys["songs"][0]["label_tracks"] == ["PART REAL_KEYS_X"]
+    assert keys["task"]["label_schema"]["track_names"] == ["PART REAL_KEYS_X"]
+
+    keys["songs"][0]["label_tracks"] = ["PART REAL_KEYS_H"]
+    with pytest.raises(CatalogValidationError, match="valid approved catalog task input"):
+        resolve_catalog_task_manifest_songs(keys, tmp_path)
+
+
 def test_rejects_tampered_preprocessing_and_catalog_lineage(tmp_path: Path) -> None:
     _catalog(tmp_path, [_record(tmp_path, "octave-src-aaaaaaaa")])
     manifest = build_catalog_task_manifest(tmp_path, "section_guitar")

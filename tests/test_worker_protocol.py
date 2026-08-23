@@ -151,6 +151,60 @@ def test_pipeline_descriptors_advertise_safe_host_orchestration_requirements() -
         assert "strum_pitch_extra" in descriptor.training_requirements
 
 
+@pytest.mark.parametrize(
+    ("pipeline_id", "task_kind", "schema_id", "tracks", "required_stages"),
+    [
+        (
+            "strum.instrument-chart/pro-guitar/v1",
+            "pro_guitar",
+            "pro-string-fret-midi/v1",
+            ["PART REAL_GUITAR", "PART REAL_GUITAR_22"],
+            {"pro_string_fret_target_encoder/v1", "pro_guitar_chart_execution/v1"},
+        ),
+        (
+            "strum.instrument-chart/pro-bass/v1",
+            "pro_bass",
+            "pro-string-fret-midi/v1",
+            ["PART REAL_BASS", "PART REAL_BASS_22"],
+            {"pro_string_fret_track_variant_encoder/v1", "pro_bass_chart_execution/v1"},
+        ),
+        (
+            "strum.instrument-chart/pro-keys/v1",
+            "pro_keys",
+            "pro-keys-pitch-midi/v1",
+            ["PART REAL_KEYS_X"],
+            {"pro_keys_expert_track_decoder/v1", "pro_keys_chart_execution/v1"},
+        ),
+    ],
+)
+def test_pro_descriptors_publish_non_executable_real_midi_training_contracts(
+    pipeline_id: str,
+    task_kind: str,
+    schema_id: str,
+    tracks: list[str],
+    required_stages: set[str],
+) -> None:
+    descriptor = next(item for item in PIPELINES if item.id == pipeline_id)
+
+    assert descriptor.training_status == "planned"
+    assert descriptor.train_schema is None
+    assert descriptor.inference_capability is None
+    assert descriptor.catalog_requirements["label_schema"] == schema_id
+    assert descriptor.catalog_requirements["label_tracks"] == tracks
+    contract = descriptor.as_json()["training_contract"]
+    assert contract == {
+        **contract,
+        "format": "strum-planned-training-contract/v1",
+        "training_status": "planned",
+        "execution": {"status": "not_available", "inference_capability": None},
+    }
+    assert contract["label_source"]["schema_id"] == schema_id
+    assert contract["label_source"]["tracks"] == tracks
+    assert set(contract["required_stages"]) == set(descriptor.training_requirements)
+    assert required_stages <= set(contract["required_stages"])
+    assert task_kind in pipeline_id.replace("-", "_")
+
+
 def test_legacy_inference_output_is_not_exposed_to_worker_clients(
     capfd: pytest.CaptureFixture[str],
 ) -> None:

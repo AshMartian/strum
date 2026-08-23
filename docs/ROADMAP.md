@@ -36,6 +36,12 @@ presented as a successful OCTAVE auto-chart result.
   Vocals, Pro instruments, fret mapper, and section families, including
   declared event/label-source schemas and catalog-validated MIDI track
   selection for every future trainer family.
+- ✅ Pro task views now use exact REAL_* track identities rather than prefix
+  matching. Expert Pro Keys uses only `PART REAL_KEYS_X`; Pro Guitar/Bass
+  preserve standard and `_22` source variants. Their planned descriptor
+  contract is machine-readable and explicitly non-executable until STRUM
+  supplies a real decoder, event trainer, held-out evaluator, package, and
+  chart handler.
 - ✅ Worker lifecycle streams for dataset preparation and training. OCTAVE
   owns process creation/cancellation and retains private paths.
 - ✅ Bundle-validated Expert Guitar hybrid profile and Expert Drums direct V14

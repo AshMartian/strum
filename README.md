@@ -603,6 +603,20 @@ labels. It emits distinct `bass.onset` and `bass.fret` components plus a
 `inference_capability` exists yet, so this artifact cannot be selected for
 auto-charting or substituted for Guitar.
 
+Pro Guitar, Pro Bass, and Pro Keys are deliberately **not** aliases for those
+five-lane experiments. They are catalog-ready only. Their discovered
+descriptors carry a `strum-planned-training-contract/v1` with
+`training_status: planned`, a machine-readable ordered set of required STRUM
+stages, and `execution.status: not_available`. Pro Guitar/Bass task views
+select only the exact `PART REAL_GUITAR` / `PART REAL_GUITAR_22` or
+`PART REAL_BASS` / `PART REAL_BASS_22` identities; a future target encoder
+must retain the source-track variant rather than merge it into a five-lane
+label. Pro Keys task views require Expert and select only `PART REAL_KEYS_X`:
+the `E`, `M`, and `H` tracks are not accidental training inputs. No Pro
+descriptor has a train schema, checkpoint profile, inference capability, or
+chart handler until its declared decoder, event model, held-out evaluator,
+profile package, and chart execution stages are implemented and validated.
+
 Keys has the same narrow experiment boundary: `keys.onset-fret/v1` revalidates
 the dedicated `keys_onset_fret` task view, whose label schema selects only
 `PART KEYS` Expert five-lane labels. It emits distinct `keys.onset` and

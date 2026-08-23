@@ -132,22 +132,28 @@ TASK_LABEL_SCHEMAS: dict[str, dict[str, object]] = {
     },
     "pro_guitar": {
         "id": "pro-string-fret-midi/v1",
-        "track_prefixes": ["PART REAL_GUITAR", "PART REAL_GUITAR_22"],
+        # Do not use a prefix match for Pro tracks.  A catalog may describe
+        # additional authoring/preview tracks with a similar name, but only
+        # these two track identities carry the supported Pro Guitar event
+        # language.  ``PART REAL_GUITAR_22`` is deliberately preserved as a
+        # distinct source variant for a future target encoder; it must not be
+        # silently collapsed into the standard track.
+        "track_names": ["PART REAL_GUITAR", "PART REAL_GUITAR_22"],
         "difficulty_encoding": "pro-string-note-offsets/v1",
     },
     "pro_bass": {
         "id": "pro-string-fret-midi/v1",
-        "track_prefixes": ["PART REAL_BASS", "PART REAL_BASS_22"],
+        "track_names": ["PART REAL_BASS", "PART REAL_BASS_22"],
         "difficulty_encoding": "pro-string-note-offsets/v1",
     },
     "pro_keys": {
         "id": "pro-keys-pitch-midi/v1",
-        "track_prefixes": [
-            "PART REAL_KEYS_X",
-            "PART REAL_KEYS_H",
-            "PART REAL_KEYS_M",
-            "PART REAL_KEYS_E",
-        ],
+        # Catalog task views currently require Expert labels.  Pro Keys has a
+        # separate track per difficulty, so accepting the lower-difficulty
+        # tracks here would quietly turn the label source into a mixed-task
+        # dataset.  Lower difficulties belong to the learned STRUM transform
+        # after an Expert Pro Keys path exists.
+        "track_names": ["PART REAL_KEYS_X"],
         "difficulty_encoding": "pro-keys-track-suffix/v1",
     },
     "fret_mapper_guitar": {
@@ -238,13 +244,19 @@ def _asset_matches(raw: object, asset: CatalogAsset, catalog: SongSourceCatalog)
 
 def _label_tracks(task_kind: str, track_names: tuple[str, ...]) -> list[str]:
     """Select the declared safe MIDI tracks for one immutable task view."""
-    prefixes = TASK_LABEL_SCHEMAS[task_kind]["track_prefixes"]
-    assert isinstance(prefixes, list)  # Static module contract.
-    selected = [
-        track_name
-        for track_name in track_names
-        if any(track_name.upper().startswith(prefix) for prefix in prefixes)
-    ]
+    schema = TASK_LABEL_SCHEMAS[task_kind]
+    exact_names = schema.get("track_names")
+    if exact_names is not None:
+        assert isinstance(exact_names, list)  # Static module contract.
+        selected = [track_name for track_name in track_names if track_name.upper() in exact_names]
+    else:
+        prefixes = schema["track_prefixes"]
+        assert isinstance(prefixes, list)  # Static module contract.
+        selected = [
+            track_name
+            for track_name in track_names
+            if any(track_name.upper().startswith(prefix) for prefix in prefixes)
+        ]
     if not selected:
         raise CatalogValidationError("catalog coverage has no track for the declared label schema")
     return selected

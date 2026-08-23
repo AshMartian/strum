@@ -226,9 +226,9 @@ def test_fret_mapper_pipelines_advertise_strict_worker_training(
 @pytest.mark.parametrize(
     ("pipeline_id", "required_gap"),
     [
-        ("strum.instrument-chart/pro-guitar/v1", "pro_string_fret_target_encoder"),
-        ("strum.instrument-chart/pro-bass/v1", "pro_bass_training_architecture"),
-        ("strum.instrument-chart/pro-keys/v1", "pro_keys_pitch_target_encoder"),
+        ("strum.instrument-chart/pro-guitar/v1", "pro_string_fret_target_encoder/v1"),
+        ("strum.instrument-chart/pro-bass/v1", "pro_bass_sequence_trainer/v1"),
+        ("strum.instrument-chart/pro-keys/v1", "pro_keys_pitch_target_encoder/v1"),
         ("strum.section-classifier/guitar/v1", "section_training_worker"),
         ("strum.section-classifier/bass/v1", "section_runtime_integration"),
     ],
