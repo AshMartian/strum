@@ -16,8 +16,10 @@ import importlib.util
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -45,6 +47,8 @@ from src.catalog_task_manifest import (
 )
 from src.model_bundle import BundleValidationError, InferenceProfile, ModelBundle, load_model_bundle
 from src.song_source_catalog import (
+    AUDIO_ROLES,
+    CATALOG_FILENAME,
     TRAINING_ALLOWED,
     CatalogAsset,
     CatalogValidationError,
@@ -130,6 +134,9 @@ CHART_TRANSFORM_PREPARE_SCHEMA = _object_schema(
         "validation_fraction": {"type": "number", "minimum": 0, "maximum": 1, "default": 0.2},
         "dataset_id": {"type": "string"},
         "overwrite": {"type": "boolean", "default": False},
+        "audio_feature_mode": {"type": "string", "enum": ["none", "rms_onset_v1"]},
+        "audio_role": {"type": ["string", "null"]},
+        "fallback_audio_role": {"type": ["string", "null"]},
     },
     required=("instrument", "target_difficulty"),
 )
@@ -156,7 +163,6 @@ CHART_TRANSFORM_TRAIN_SCHEMA = _object_schema(
         "learning_rate": {"type": "number", "exclusiveMinimum": 0, "default": 0.001},
         "epochs": {"type": "integer", "minimum": 1, "default": 20},
         "device": {"type": "string", "default": "auto"},
-        "audio_feature_mode": {"type": "string", "enum": ["none"]},
         "audio_sample_rate": {"type": "integer", "minimum": 1, "default": 16000},
         "audio_window_ms": {"type": "number", "exclusiveMinimum": 0, "default": 50},
         "audio_max_duration_seconds": {"type": "number", "exclusiveMinimum": 0, "default": 900},
@@ -478,8 +484,16 @@ PIPELINES = (
         status="catalog_ready",
         preparation_status="available",
         training_status="available",
-        private_request_fields=("parent_bundle",),
-        catalog_inspection_option_keys=("instrument", "target_difficulty"),
+        # Audio-conditioned transforms resolve catalog assets only in the
+        # worker.  A fine-tune parent is likewise a main-process-only bundle.
+        private_request_fields=("catalog_root", "parent_bundle"),
+        catalog_inspection_option_keys=(
+            "instrument",
+            "target_difficulty",
+            "audio_feature_mode",
+            "audio_role",
+            "fallback_audio_role",
+        ),
     ),
     PipelineDescriptor(
         id="vocals.note-activity/v1",
@@ -1894,6 +1908,9 @@ def _chart_transform_inspection(
     *,
     instrument: str | None,
     target_difficulty: str | None,
+    audio_feature_mode: str = "none",
+    audio_role: str | None = None,
+    fallback_audio_role: str | None = None,
 ) -> dict[str, object]:
     """Inspect chart-pair eligibility without parsing or exposing MIDI inputs.
 
@@ -1915,6 +1932,7 @@ def _chart_transform_inspection(
         "instrument_not_present",
         "source_difficulty_missing",
         "target_difficulty_missing",
+        "audio_unavailable",
     )
     assets: list[CatalogAsset] = []
     eligible_count = 0
@@ -1941,6 +1959,14 @@ def _chart_transform_inspection(
         ):
             exclusions["target_difficulty_missing"] += 1
             continue
+        if audio_feature_mode != "none":
+            preferred = audio_role or (instrument if instrument is not None else "mix")
+            fallback = "mix" if fallback_audio_role is None else fallback_audio_role
+            asset = record.audio.get(preferred) or record.audio.get(fallback)
+            if asset is None:
+                exclusions["audio_unavailable"] += 1
+                continue
+            assets.append(asset)
         eligible_count += 1
         assets.append(record.notes_midi)
 
@@ -1948,7 +1974,17 @@ def _chart_transform_inspection(
     return {
         "eligible_count": eligible_count,
         "exclusion_reason_counts": exclusions,
-        "audio_policy": {"kind": "not_required", "required": False},
+        "audio_policy": (
+            {
+                "kind": "task_view_audio_conditioning",
+                "preferred_role": audio_role or instrument,
+                "fallback_role": "mix" if fallback_audio_role is None else fallback_audio_role,
+                "required": True,
+                "duration_validation": "performed during dataset prepare",
+            }
+            if audio_feature_mode != "none"
+            else {"kind": "not_required", "required": False}
+        ),
         "estimated_storage_bytes": estimated_storage_bytes,
         "storage_estimate_capped": storage_estimate_capped,
         "storage_estimate_semantics": CATALOG_STORAGE_ESTIMATE_SEMANTICS,
@@ -2044,13 +2080,42 @@ def _inspect_pipeline_catalog(
             required_difficulty=options.get("required_difficulty", "expert"),
         )
     if pipeline_id == "chart_transform.five_lane/v1":
-        permitted = {"instrument", "target_difficulty"}
+        permitted = {
+            "instrument",
+            "target_difficulty",
+            "audio_feature_mode",
+            "audio_role",
+            "fallback_audio_role",
+        }
         if set(options) - permitted:
             raise WorkerRequestError("unsupported chart-transform catalog inspection option")
         instrument = options.get("instrument")
         target_difficulty = options.get("target_difficulty")
+        audio_feature_mode = options.get("audio_feature_mode", "none")
+        audio_role = options.get("audio_role")
+        fallback_audio_role = options.get("fallback_audio_role")
+        if audio_feature_mode not in {"none", "rms_onset_v1"}:
+            raise WorkerRequestError("chart-transform audio_feature_mode is unsupported")
+        if audio_feature_mode == "none" and (
+            audio_role is not None or fallback_audio_role is not None
+        ):
+            raise WorkerRequestError("chart-transform audio roles require audio_feature_mode")
+        if audio_feature_mode != "none" and (
+            audio_role is not None
+            and audio_role not in AUDIO_ROLES
+            or fallback_audio_role is not None
+            and fallback_audio_role not in AUDIO_ROLES
+        ):
+            raise WorkerRequestError("chart-transform audio role is unsupported")
         if instrument is None and target_difficulty is None:
-            return _chart_transform_inspection(catalog, instrument=None, target_difficulty=None)
+            return _chart_transform_inspection(
+                catalog,
+                instrument=None,
+                target_difficulty=None,
+                audio_feature_mode=audio_feature_mode,
+                audio_role=audio_role,
+                fallback_audio_role=fallback_audio_role,
+            )
         if instrument not in {"guitar", "bass", "keys", "drums"} or target_difficulty not in {
             "Hard",
             "Medium",
@@ -2060,7 +2125,12 @@ def _inspect_pipeline_catalog(
                 "chart-transform catalog inspection requires a supported instrument and target_difficulty"
             )
         return _chart_transform_inspection(
-            catalog, instrument=instrument, target_difficulty=target_difficulty
+            catalog,
+            instrument=instrument,
+            target_difficulty=target_difficulty,
+            audio_feature_mode=audio_feature_mode,
+            audio_role=audio_role,
+            fallback_audio_role=fallback_audio_role,
         )
 
     task_kind = next(
@@ -2217,6 +2287,9 @@ def prepare_dataset_request(request_path: Path) -> dict[str, object]:
             "validation_fraction",
             "dataset_id",
             "overwrite",
+            "audio_feature_mode",
+            "audio_role",
+            "fallback_audio_role",
         }
         if set(options) - permitted:
             raise WorkerRequestError("unsupported chart-transform preparation option")
@@ -2297,8 +2370,18 @@ def _read_train_request(request_path: Path) -> dict[str, Any]:
         if not isinstance(raw["catalog_root"], str) or not raw["catalog_root"]:
             raise WorkerRequestError("catalog-backed training requires worker-local catalog_root")
     elif raw["pipeline_id"] == "chart_transform.five_lane/v1":
-        if set(raw) != base_fields and set(raw) != base_fields | {"parent_bundle"}:
+        allowed = (
+            base_fields,
+            base_fields | {"catalog_root"},
+            base_fields | {"parent_bundle"},
+            base_fields | {"catalog_root", "parent_bundle"},
+        )
+        if set(raw) not in allowed:
             raise WorkerRequestError("chart-transform training request has unsupported fields")
+        if "catalog_root" in raw and (
+            not isinstance(raw["catalog_root"], str) or not raw["catalog_root"]
+        ):
+            raise WorkerRequestError("chart-transform catalog_root must be a non-empty string")
     elif set(raw) != base_fields:
         raise WorkerRequestError("training request has unsupported fields")
     if "parent_bundle" in raw and (
@@ -2323,6 +2406,198 @@ def _chart_transform_component_id(*, instrument: str, source: str, target: str) 
             f"{_slug_component_part(source)}_to_{_slug_component_part(target)}",
         )
     )
+
+
+def _chart_transform_catalog_audio_manifest(
+    *,
+    dataset: dict[str, Any],
+    catalog_root: str,
+    output_dir: Path,
+) -> tuple[tempfile.TemporaryDirectory[str], Path, dict[str, object]]:
+    """Materialize worker-private audio inputs for an approved chart task.
+
+    A chart-pair view is path-free by design.  Audio conditioning therefore
+    reopens only the selected OCTAVE catalog in the worker, verifies its
+    identity and every selected source asset, and creates a short-lived local
+    manifest.  Neither the manifest nor copied/hard-linked audio survives the
+    job; durable artifacts retain only source IDs, hashes, roles, and lineage.
+    """
+    task_view = dataset.get("task_view")
+    if not isinstance(task_view, dict):
+        raise WorkerRequestError("audio-conditioned chart training requires a catalog task view")
+    lineage = task_view.get("catalog")
+    source_inputs = task_view.get("source_inputs")
+    audio_conditioning = task_view.get("audio_conditioning")
+    instrument = dataset.get("instrument")
+    target_difficulty = dataset.get("target_difficulty")
+    if (
+        not isinstance(lineage, dict)
+        or not isinstance(source_inputs, list)
+        or not isinstance(audio_conditioning, dict)
+        or not isinstance(instrument, str)
+        or not isinstance(target_difficulty, str)
+    ):
+        raise WorkerRequestError("chart-transform catalog task view is invalid")
+    if (
+        set(audio_conditioning) != {"mode", "preferred_role", "fallback_role"}
+        or audio_conditioning.get("mode") != "rms_onset_v1"
+        or not isinstance(audio_conditioning.get("preferred_role"), str)
+        or audio_conditioning["preferred_role"] not in AUDIO_ROLES
+        or (
+            audio_conditioning.get("fallback_role") is not None
+            and audio_conditioning["fallback_role"] not in AUDIO_ROLES
+        )
+    ):
+        raise WorkerRequestError("chart-transform task view has invalid audio conditioning")
+    preferred_role = audio_conditioning["preferred_role"]
+    fallback_role = audio_conditioning["fallback_role"]
+
+    catalog = load_catalog(catalog_root)
+    records_path_value: object
+    try:
+        raw_catalog = json.loads((catalog.root / CATALOG_FILENAME).read_text(encoding="utf-8"))
+        records_path_value = raw_catalog["records"]
+    except (OSError, KeyError, TypeError, json.JSONDecodeError) as error:
+        raise WorkerRequestError("chart-transform catalog lineage is unreadable") from error
+    if (
+        not isinstance(records_path_value, str)
+        or Path(records_path_value).is_absolute()
+        or catalog.catalog_id != lineage.get("catalog_id")
+        or _sha256(catalog.root / CATALOG_FILENAME) != lineage.get("manifest_sha256")
+        or _sha256((catalog.root / records_path_value).resolve()) != lineage.get("records_sha256")
+    ):
+        raise WorkerRequestError("chart-transform catalog lineage does not match its task view")
+
+    records = {record.source_id: record for record in catalog.records}
+    selected: list[tuple[str, CatalogAsset, str]] = []
+    seen_source_ids: set[str] = set()
+    expected_difficulties = {"expert", target_difficulty.lower()}
+    for source in source_inputs:
+        if (
+            not isinstance(source, dict)
+            or set(source)
+            != {
+                "source_id",
+                "notes_midi_sha256",
+                "audio_role",
+                "audio_sha256",
+                "audio_byte_length",
+            }
+            or not isinstance(source.get("source_id"), str)
+            or not isinstance(source.get("notes_midi_sha256"), str)
+            or not isinstance(source.get("audio_role"), str)
+            or not isinstance(source.get("audio_sha256"), str)
+            or not isinstance(source.get("audio_byte_length"), int)
+            or source["audio_byte_length"] < 0
+            or source["source_id"] in seen_source_ids
+        ):
+            raise WorkerRequestError("chart-transform task view has invalid source inputs")
+        source_id = source["source_id"]
+        record = records.get(source_id)
+        coverage = record.instruments.get(instrument) if record else None
+        if (
+            record is None
+            or record.training_use != TRAINING_ALLOWED
+            or record.notes_midi.sha256 != source["notes_midi_sha256"]
+            or coverage is None
+            or coverage.status != "present"
+            or not expected_difficulties <= coverage.difficulties
+        ):
+            raise WorkerRequestError("chart-transform task source no longer matches the catalog")
+        role = source["audio_role"]
+        asset = record.audio.get(role)
+        if (
+            asset is None
+            or asset.sha256 != source["audio_sha256"]
+            or asset.byte_length != source["audio_byte_length"]
+        ):
+            raise WorkerRequestError(
+                "chart-transform conditioning audio no longer matches task view"
+            )
+        selected.append((source_id, asset, role))
+        seen_source_ids.add(source_id)
+    if not selected:
+        raise WorkerRequestError("chart-transform task view has no conditioning audio sources")
+
+    output_parent = output_dir.expanduser().resolve().parent
+    output_parent.mkdir(parents=True, exist_ok=True)
+    private_dir = tempfile.TemporaryDirectory(prefix=".strum-chart-audio-", dir=output_parent)
+    private_root = Path(private_dir.name)
+    try:
+        assets: list[dict[str, str]] = []
+        provenance_assets: list[dict[str, object]] = []
+        for index, (source_id, asset, role) in enumerate(selected):
+            suffix = (
+                asset.path.suffix
+                if asset.path.suffix and len(asset.path.suffix) <= 16
+                else ".audio"
+            )
+            local_name = f"audio-{index:04d}{suffix}"
+            local_path = private_root / local_name
+            try:
+                os.link(asset.path, local_path)
+            except OSError:
+                shutil.copyfile(asset.path, local_path)
+            assets.append({"song_id": source_id, "audio": local_name})
+            provenance_assets.append(
+                {
+                    "source_id": source_id,
+                    "audio_sha256": asset.sha256,
+                    "audio_byte_length": asset.byte_length,
+                    "audio_role": role,
+                }
+            )
+        manifest_path = private_root / "audio-manifest.json"
+        manifest_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "format": "strum-local-audio-assets/v1",
+                    "assets": assets,
+                },
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+    except Exception:
+        private_dir.cleanup()
+        raise
+    return (
+        private_dir,
+        manifest_path,
+        {
+            "format": "strum-catalog-audio-conditioning/v1",
+            "catalog_id": catalog.catalog_id,
+            "catalog_manifest_sha256": lineage["manifest_sha256"],
+            "catalog_records_sha256": lineage["records_sha256"],
+            "preferred_role": preferred_role,
+            "fallback_role": fallback_role,
+            "assets": provenance_assets,
+        },
+    )
+
+
+def _write_chart_transform_catalog_audio_provenance(
+    output_dir: Path, provenance: dict[str, object]
+) -> None:
+    """Attach safe catalog-audio lineage after the private manifest is gone."""
+    for name in ("training-metadata.json", "experiment.json"):
+        path = output_dir / name
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise WorkerRequestError("chart-transform output metadata is unreadable") from error
+        if not isinstance(value, dict):
+            raise WorkerRequestError("chart-transform output metadata is invalid")
+        if name == "training-metadata.json":
+            conditioning = value.get("audio_conditioning")
+            if not isinstance(conditioning, dict):
+                raise WorkerRequestError("chart-transform audio metadata is invalid")
+            conditioning["catalog"] = provenance
+        else:
+            value["catalog_audio_conditioning"] = provenance
+        path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 def _validated_chart_transform_parent(
@@ -2684,8 +2959,6 @@ def run_training_request(request_path: Path) -> dict[str, object]:
             raise WorkerRequestError("Drums onset training request failed validation") from error
     if pipeline_id != "chart_transform.five_lane/v1":
         raise WorkerRequestError("pipeline has no worker training handler")
-    if "catalog_root" in request:
-        raise WorkerRequestError("chart-transform training does not accept catalog_root")
 
     # Importing PyTorch belongs to an actual job, not `strum-worker probe`.
     from scripts.train_chart_transform import (  # noqa: PLC0415
@@ -2707,7 +2980,6 @@ def run_training_request(request_path: Path) -> dict[str, object]:
         "learning_rate",
         "epochs",
         "device",
-        "audio_feature_mode",
         "audio_sample_rate",
         "audio_window_ms",
         "audio_max_duration_seconds",
@@ -2736,6 +3008,13 @@ def run_training_request(request_path: Path) -> dict[str, object]:
         )
     try:
         dataset = json.loads(Path(request["task_view"]).read_text(encoding="utf-8"))
+        task_view = dataset.get("task_view") if isinstance(dataset, dict) else None
+        task_audio = task_view.get("audio_conditioning") if isinstance(task_view, dict) else None
+        audio_feature_mode = (
+            task_audio.get("mode", "none") if isinstance(task_audio, dict) else "none"
+        )
+        if audio_feature_mode not in {"none", "rms_onset_v1"}:
+            raise WorkerRequestError("chart-transform task view has unsupported audio conditioning")
         config_values: dict[str, Any] = {
             "dataset_manifest": request["task_view"],
             "output_dir": request["output"],
@@ -2743,21 +3022,30 @@ def run_training_request(request_path: Path) -> dict[str, object]:
             "source_difficulty": dataset["source_difficulty"],
             "target_difficulty": dataset["target_difficulty"],
             "checkpoint_mode": checkpoint_mode,
+            "audio_feature_mode": audio_feature_mode,
             **{
                 key: value
                 for key, value in options.items()
-                if key not in {"model_id", "checkpoint_mode", "parent_artifact_id"}
+                if key
+                not in {
+                    "model_id",
+                    "checkpoint_mode",
+                    "parent_artifact_id",
+                }
             },
         }
         # Build a typed compatibility target before a parent checkpoint has
         # been resolved.  ``fine_tune`` becomes valid only once the verified
         # parent supplies its declared checkpoint below.
-        config = TrainingConfig.from_mapping(
-            {
-                **config_values,
-                "checkpoint_mode": "fresh" if checkpoint_mode == "fine_tune" else checkpoint_mode,
-            }
-        )
+        compatibility_config_values = {
+            **config_values,
+            "checkpoint_mode": "fresh" if checkpoint_mode == "fine_tune" else checkpoint_mode,
+        }
+        if audio_feature_mode != "none":
+            # This object is used only to check a prospective fine-tune
+            # parent. The real, worker-private manifest is created below.
+            compatibility_config_values["audio_manifest"] = "worker-private-audio-manifest"
+        config = TrainingConfig.from_mapping(compatibility_config_values)
         if parent_bundle is not None:
             instrument = dataset.get("instrument", "guitar")
             if not isinstance(instrument, str):
@@ -2772,7 +3060,45 @@ def run_training_request(request_path: Path) -> dict[str, object]:
                     "parent_provenance": parent_provenance,
                 }
             )
-        result = train(config)
+        private_audio_dir: tempfile.TemporaryDirectory[str] | None = None
+        audio_provenance: dict[str, object] | None = None
+        try:
+            if audio_feature_mode != "none":
+                catalog_root = request.get("catalog_root")
+                if not isinstance(catalog_root, str) or not catalog_root:
+                    raise WorkerRequestError(
+                        "audio-conditioned chart training requires worker-local catalog_root"
+                    )
+                instrument = dataset.get("instrument")
+                if not isinstance(instrument, str):
+                    raise WorkerRequestError("chart-transform task view has an invalid instrument")
+                private_audio_dir, audio_manifest, audio_provenance = (
+                    _chart_transform_catalog_audio_manifest(
+                        dataset=dataset,
+                        catalog_root=catalog_root,
+                        output_dir=Path(request["output"]),
+                    )
+                )
+                config = TrainingConfig.from_mapping(
+                    {
+                        **config_values,
+                        "audio_manifest": str(audio_manifest),
+                        "init_checkpoint": str(init_checkpoint)
+                        if parent_bundle is not None
+                        else None,
+                        "parent_provenance": parent_provenance
+                        if parent_bundle is not None
+                        else None,
+                    }
+                )
+            result = train(config)
+        finally:
+            if private_audio_dir is not None:
+                private_audio_dir.cleanup()
+        if audio_provenance is not None:
+            _write_chart_transform_catalog_audio_provenance(
+                Path(result["bundle_dir"]), audio_provenance
+            )
         preflight = preflight_bundle(result["bundle_dir"])
     except WorkerRequestError:
         raise

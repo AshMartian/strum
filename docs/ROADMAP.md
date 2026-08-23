@@ -53,7 +53,10 @@ presented as a successful OCTAVE auto-chart result.
   or `unavailable`; the selected difficulty policy is always explicit.
 - ✅ Catalog-backed, worker-trainable learned five-lane chart transforms for
   Guitar, Bass, Keys, and Drums, including explicit Expert → lower-difficulty
-  provenance.
+  provenance. The optional `rms_onset_v1` song-conditioning baseline is
+  selected during task preparation, has catalog audio hashes/roles and
+  duration alignment verified before training, and uses only temporary
+  worker-local audio copies.
 - ✅ Catalog-backed, worker-trainable Guitar/Bass/Keys onset/fret and Drums
   onset classifier experiments. Guitar, Bass, and Keys reuse the same
   five-lane feature extractor only through their instrument-specific,

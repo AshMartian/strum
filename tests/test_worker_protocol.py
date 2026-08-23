@@ -101,7 +101,13 @@ def test_chart_transform_schema_exposes_opaque_parent_artifact_selection() -> No
         "format": "strum-model-bundle-artifact-id",
     }
     assert "parent_bundle" not in properties
-    assert descriptor.private_request_fields == ("parent_bundle",)
+    assert descriptor.private_request_fields == ("catalog_root", "parent_bundle")
+    assert descriptor.prepare_schema["properties"]["audio_feature_mode"]["enum"] == [
+        "none",
+        "rms_onset_v1",
+    ]
+    assert "audio_feature_mode" not in properties
+    assert "audio_manifest" not in properties
 
 
 def test_pipeline_descriptors_advertise_safe_host_orchestration_requirements() -> None:
@@ -442,6 +448,7 @@ def test_catalog_inspect_is_pipeline_specific_and_path_free(tmp_path: Path) -> N
         "instrument_not_present": 1,
         "source_difficulty_missing": 0,
         "target_difficulty_missing": 1,
+        "audio_unavailable": 0,
     }
     assert transform["audio_policy"] == {"kind": "not_required", "required": False}
     assert transform["eligibility_selection"] == {

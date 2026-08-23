@@ -399,6 +399,13 @@ disabled version of a five-lane model. Section descriptors now expose their
 real catalog worker while retaining evaluation, profile-packaging, and runtime
 integration requirements.
 
+The learned five-lane difficulty transform can be prepared as chart-only or
+with the bounded `rms_onset_v1` catalog-audio baseline. Audio conditioning is
+a task-view choice: STRUM retains only approved audio roles and hashes,
+excludes tracks whose audio ends before the Expert chart, and builds an
+ephemeral worker-local audio manifest at training time. No local audio path or
+copy belongs in a task view, experiment, bundle, or OCTAVE renderer payload.
+
 Discovery is dynamic rather than hard-coded in OCTAVE:
 
 ```bash

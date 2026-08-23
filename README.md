@@ -423,8 +423,8 @@ matched to its nearest Expert event within `alignment_tolerance_ms`; unmatched
 Expert events learn the all-off target. This deliberately modest baseline does
 not yet model target-only inserted notes or ergonomic sequence decisions.
 
-To condition training on songs, keep the private audio mapping separate from
-the portable chart-pair dataset. Set `audio_feature_mode: rms_onset_v1` and
+For standalone scripts, keep the private audio mapping separate from the
+portable chart-pair dataset. Set `audio_feature_mode: rms_onset_v1` and
 `audio_manifest` in the training config (or pass both
 `--audio-feature-mode rms_onset_v1 --audio-manifest ...`). Paths are relative
 to the audio manifest, so it can live next to a private local song library
@@ -439,6 +439,12 @@ without copying audio to the dataset or bundle:
   ]
 }
 ```
+
+For the worker/OCTAVE path, select `rms_onset_v1` during **Prepare** instead.
+STRUM records only selected catalog audio roles and hashes in the immutable
+task view, excludes chart/audio duration mismatches, and creates a short-lived
+worker-private manifest during Train. Paths and temporary audio copies never
+enter task views, experiment metadata, model bundles, or worker results.
 
 `ffmpeg` decodes local audio to bounded mono PCM for this prototype. The
 checkpoint records the feature schema and requires the same `--song` during

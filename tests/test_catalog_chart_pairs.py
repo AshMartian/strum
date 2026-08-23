@@ -1,6 +1,8 @@
 import hashlib
 import io
 import json
+import struct
+import wave
 from pathlib import Path
 
 import pytest
@@ -14,6 +16,7 @@ from src.catalog_chart_pairs import (
     pipeline_descriptor,
     prepare_catalog_chart_pairs,
 )
+from src.worker import run_training_request
 
 
 def _midi_bytes(track_name: str, variation: int) -> bytes:
@@ -42,8 +45,18 @@ def _asset(root: Path, content: bytes, filename: str) -> dict[str, object]:
         "sha256": sha256,
         "relative_path": path.relative_to(root).as_posix(),
         "byte_length": len(content),
-        "media_type": "audio/midi",
+        "media_type": "audio/midi" if filename.endswith(".mid") else "audio/wav",
     }
+
+
+def _wav_bytes() -> bytes:
+    output = io.BytesIO()
+    with wave.open(output, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(16_000)
+        wav.writeframes(struct.pack("<" + "h" * 32_000, *([0] * 32_000)))
+    return output.getvalue()
 
 
 def _record(
@@ -187,6 +200,67 @@ def test_rejects_pair_that_no_longer_matches_catalog_task_view(tmp_path: Path) -
                 device="cpu",
             )
         )
+
+
+def test_worker_trains_audio_conditioned_transform_from_private_catalog_assets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    records = [
+        _record(tmp_path, "octave-src-11111111", "PART GUITAR", 0),
+        _record(tmp_path, "octave-src-22222222", "PART GUITAR", 1),
+    ]
+    for record in records:
+        record["audio"] = {"guitar": _asset(tmp_path, _wav_bytes(), "guitar.wav")}
+    _catalog(tmp_path, records)
+    prepared = prepare_catalog_chart_pairs(
+        tmp_path,
+        tmp_path / "task-view",
+        CatalogChartPairOptions(
+            instrument="guitar",
+            target_difficulty="Hard",
+            audio_feature_mode="rms_onset_v1",
+        ),
+    )
+    manifest_path = prepared["manifest_path"]
+    assert isinstance(manifest_path, Path)
+    monkeypatch.setattr(
+        "scripts.train_chart_transform.event_audio_features",
+        lambda _path, events, **_kwargs: [[0.0, 0.0] for _ in events],
+    )
+    request = tmp_path / "audio-conditioned-request.json"
+    request.write_text(
+        json.dumps(
+            {
+                "pipeline_id": "chart_transform.five_lane/v1",
+                "task_view": str(manifest_path),
+                "output": str(tmp_path / "audio-conditioned-experiment"),
+                "catalog_root": str(tmp_path),
+                "options": {
+                    "model_id": "audio-conditioned-catalog-transform",
+                    "epochs": 1,
+                    "hidden_dim": 4,
+                    "validation_fraction": 0.5,
+                    "device": "cpu",
+                },
+            }
+        )
+    )
+
+    result = run_training_request(request)
+
+    output = tmp_path / "audio-conditioned-experiment"
+    metadata = json.loads((output / "training-metadata.json").read_text())
+    experiment = json.loads((output / "experiment.json").read_text())
+    model_config = json.loads((output / "configs" / "training-config.json").read_text())
+    assert result["status"] == "completed"
+    assert metadata["audio_conditioning"]["mode"] == "rms_onset_v1"
+    catalog_audio = metadata["audio_conditioning"]["catalog"]
+    assert catalog_audio["format"] == "strum-catalog-audio-conditioning/v1"
+    assert [asset["audio_role"] for asset in catalog_audio["assets"]] == ["guitar", "guitar"]
+    assert experiment["catalog_audio_conditioning"] == catalog_audio
+    assert model_config["audio_manifest"] is None
+    assert str(tmp_path) not in json.dumps({"metadata": metadata, "experiment": experiment})
+    assert not list(tmp_path.glob(".strum-chart-audio-*"))
 
 
 def test_pipeline_descriptor_declares_catalog_and_preprocessing_contract() -> None:

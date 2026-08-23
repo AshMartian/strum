@@ -15,13 +15,22 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import soundfile as sf
+
 from scripts.prepare_guitar_chart_pairs import (
     DIFFICULTY_BASE_NOTES,
     FIVE_LANE_INSTRUMENT_TRACKS,
     PreparationError,
     parse_instrument_difficulties,
 )
-from src.song_source_catalog import CATALOG_FILENAME, CatalogRecord, SongSourceCatalog, load_catalog
+from src.song_source_catalog import (
+    AUDIO_ROLES,
+    CATALOG_FILENAME,
+    CatalogAsset,
+    CatalogRecord,
+    SongSourceCatalog,
+    load_catalog,
+)
 
 PAIR_DATASET_FORMAT = "strum-chart-pairs/v1"
 PIPELINE_ID = "chart_transform.five_lane"
@@ -40,6 +49,9 @@ class CatalogChartPairOptions:
     split_seed: int = 20260814
     validation_fraction: float = 0.2
     dataset_id: str | None = None
+    audio_feature_mode: str = "none"
+    audio_role: str | None = None
+    fallback_audio_role: str | None = None
 
     def __post_init__(self) -> None:
         if self.instrument not in FIVE_LANE_INSTRUMENT_TRACKS:
@@ -54,6 +66,19 @@ class CatalogChartPairOptions:
             raise PreparationError("validation_fraction must be between 0 and 1")
         if self.dataset_id is not None and not self.dataset_id.strip():
             raise PreparationError("dataset_id must be non-empty when provided")
+        if self.audio_feature_mode not in {"none", "rms_onset_v1"}:
+            raise PreparationError("audio_feature_mode must be none or rms_onset_v1")
+        if self.audio_feature_mode == "none" and (
+            self.audio_role is not None or self.fallback_audio_role is not None
+        ):
+            raise PreparationError("audio roles require audio_feature_mode")
+        if self.audio_feature_mode != "none" and (
+            self.audio_role is not None
+            and self.audio_role not in AUDIO_ROLES
+            or self.fallback_audio_role is not None
+            and self.fallback_audio_role not in AUDIO_ROLES
+        ):
+            raise PreparationError("audio role is unsupported")
 
 
 def pipeline_descriptor() -> dict[str, object]:
@@ -73,6 +98,10 @@ def pipeline_descriptor() -> dict[str, object]:
             "lanes": 5,
             "source_difficulty": "Expert",
             "target_difficulties": ["Hard", "Medium", "Easy"],
+        },
+        "audio_conditioning": {
+            "modes": ["none", "rms_onset_v1"],
+            "selection": "task-view-declared catalog audio only",
         },
         "split": {"algorithm": SPLIT_ALGORITHM, "unit": "catalog source_id"},
     }
@@ -99,6 +128,11 @@ def prepare_catalog_chart_pairs(
         if _record_supports(record, options.instrument, required_difficulties)
     )
     parsed_records, skipped = _parse_selected_records(selected, options)
+    if options.audio_feature_mode != "none":
+        parsed_records, audio_skipped = _select_audio_conditioning_assets(
+            parsed_records, catalog, options
+        )
+        skipped.extend(audio_skipped)
     if len(parsed_records) < 2:
         details = "; ".join(skipped) if skipped else "fewer than two eligible catalog records"
         raise PreparationError(
@@ -179,6 +213,49 @@ def _parse_selected_records(
     return records, skipped
 
 
+def _select_audio_conditioning_assets(
+    parsed_records: list[dict[str, Any]],
+    catalog: SongSourceCatalog,
+    options: CatalogChartPairOptions,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Keep only chart pairs with a complete, approved aligned audio asset."""
+    records = {record.source_id: record for record in catalog.records}
+    selected: list[dict[str, Any]] = []
+    skipped: list[str] = []
+    preferred_role = options.audio_role or options.instrument
+    fallback_role = "mix" if options.fallback_audio_role is None else options.fallback_audio_role
+    for pair in parsed_records:
+        source_id = pair["source_id"]
+        record = records[source_id]
+        role, asset = _select_audio_asset(record, preferred_role, fallback_role)
+        if asset is None or role is None:
+            skipped.append(f"{source_id}: no approved conditioning audio")
+            continue
+        try:
+            duration_ms = sf.info(asset.path).duration * 1000.0
+        except (OSError, RuntimeError):
+            skipped.append(f"{source_id}: conditioning audio is unreadable")
+            continue
+        chart_end_ms = max(event["time_ms"] for event in pair["source_events"])
+        if chart_end_ms >= duration_ms:
+            skipped.append(f"{source_id}: conditioning audio ends before Expert chart")
+            continue
+        pair["audio_role"] = role
+        pair["audio_sha256"] = asset.sha256
+        pair["audio_byte_length"] = asset.byte_length
+        selected.append(pair)
+    return selected, skipped
+
+
+def _select_audio_asset(
+    record: CatalogRecord, preferred_role: str, fallback_role: str | None
+) -> tuple[str | None, CatalogAsset | None]:
+    for role in (preferred_role, fallback_role):
+        if role is not None and role in record.audio:
+            return role, record.audio[role]
+    return None, None
+
+
 def _split_assignments(
     source_ids: list[str], seed: int, validation_fraction: float
 ) -> dict[str, str]:
@@ -205,7 +282,19 @@ def _dataset_manifest(
     catalog_manifest_path = catalog.root / CATALOG_FILENAME
     records_path = _catalog_records_path(catalog_manifest_path)
     source_inputs = [
-        {"source_id": record["source_id"], "notes_midi_sha256": record["notes_midi_sha256"]}
+        {
+            "source_id": record["source_id"],
+            "notes_midi_sha256": record["notes_midi_sha256"],
+            **(
+                {
+                    "audio_role": record["audio_role"],
+                    "audio_sha256": record["audio_sha256"],
+                    "audio_byte_length": record["audio_byte_length"],
+                }
+                if options.audio_feature_mode != "none"
+                else {}
+            ),
+        }
         for record in records
     ]
     preprocessing = {
@@ -237,6 +326,14 @@ def _dataset_manifest(
             "config_sha256": _canonical_sha256(preprocessing),
         },
     }
+    if options.audio_feature_mode != "none":
+        task_view["audio_conditioning"] = {
+            "mode": options.audio_feature_mode,
+            "preferred_role": options.audio_role or options.instrument,
+            "fallback_role": "mix"
+            if options.fallback_audio_role is None
+            else options.fallback_audio_role,
+        }
     task_view["task_view_id"] = _canonical_sha256(task_view)
     return {
         "schema_version": 1,

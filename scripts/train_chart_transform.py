@@ -97,7 +97,9 @@ class TrainingConfig:
             isinstance(value, str) and value.strip()
             for value in (config.source_difficulty, config.target_difficulty)
         ):
-            raise DatasetValidationError("source_difficulty and target_difficulty must be non-empty strings")
+            raise DatasetValidationError(
+                "source_difficulty and target_difficulty must be non-empty strings"
+            )
         if not 0 < config.validation_fraction < 1:
             raise DatasetValidationError("validation_fraction must be between 0 and 1")
         if config.lane_count < 1 or config.hidden_dim < 1 or config.epochs < 1:
@@ -152,17 +154,15 @@ class TrainingConfig:
                 "component",
                 "checkpoint_sha256",
             }
-            if (
-                set(config.parent_provenance) != expected_parent_fields
-                or not all(
-                    isinstance(value, str) and value
-                    for value in config.parent_provenance.values()
-                )
+            if set(config.parent_provenance) != expected_parent_fields or not all(
+                isinstance(value, str) and value for value in config.parent_provenance.values()
             ):
                 raise DatasetValidationError("parent_provenance is invalid")
             for checksum in ("manifest_sha256", "checkpoint_sha256"):
                 value = config.parent_provenance[checksum]
-                if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+                if len(value) != 64 or any(
+                    character not in "0123456789abcdef" for character in value
+                ):
                     raise DatasetValidationError("parent_provenance has an invalid SHA-256")
         return replace(config, checkpoint_mode=checkpoint_mode)
 
@@ -260,7 +260,7 @@ def _validate_catalog_task_view(manifest: dict[str, Any]) -> dict[str, Any] | No
     if not isinstance(task_view, dict):
         raise DatasetValidationError("task_view must be an object")
     required = {"task_view_id", "pipeline", "catalog", "source_inputs", "split", "preprocessing"}
-    if set(task_view) != required:
+    if set(task_view) - (required | {"audio_conditioning"}) or not required <= set(task_view):
         raise DatasetValidationError("task_view has unsupported or missing fields")
     pipeline = task_view["pipeline"]
     if (
@@ -284,15 +284,39 @@ def _validate_catalog_task_view(manifest: dict[str, Any]) -> dict[str, Any] | No
     source_inputs = task_view["source_inputs"]
     if not isinstance(source_inputs, list) or not source_inputs:
         raise DatasetValidationError("task_view source_inputs must be a non-empty list")
+    audio_conditioning = task_view.get("audio_conditioning")
+    if audio_conditioning is not None and (
+        not isinstance(audio_conditioning, dict)
+        or set(audio_conditioning) != {"mode", "preferred_role", "fallback_role"}
+        or audio_conditioning.get("mode") != AUDIO_FEATURE_MODE
+        or not isinstance(audio_conditioning.get("preferred_role"), str)
+        or (
+            audio_conditioning.get("fallback_role") is not None
+            and not isinstance(audio_conditioning.get("fallback_role"), str)
+        )
+    ):
+        raise DatasetValidationError("task_view audio conditioning is invalid")
     source_ids: set[str] = set()
     for source in source_inputs:
+        expected_fields = {"source_id", "notes_midi_sha256"}
+        if audio_conditioning is not None:
+            expected_fields |= {"audio_role", "audio_sha256", "audio_byte_length"}
         if (
             not isinstance(source, dict)
-            or set(source) != {"source_id", "notes_midi_sha256"}
+            or set(source) != expected_fields
             or not isinstance(source["source_id"], str)
             or not source["source_id"]
             or source["source_id"] in source_ids
             or not _is_sha256(source["notes_midi_sha256"])
+            or (
+                audio_conditioning is not None
+                and (
+                    not isinstance(source["audio_role"], str)
+                    or not _is_sha256(source["audio_sha256"])
+                    or not isinstance(source["audio_byte_length"], int)
+                    or source["audio_byte_length"] < 0
+                )
+            )
         ):
             raise DatasetValidationError("task_view source input is invalid")
         source_ids.add(source["source_id"])
@@ -646,6 +670,14 @@ def train(config: TrainingConfig) -> dict[str, Any]:
     _seed_everything(config.seed)
     device = _resolve_device(config.device)
     pairs, dataset_manifest = load_dataset(config)
+    task_view = dataset_manifest.get("task_view")
+    if isinstance(task_view, dict):
+        task_audio = task_view.get("audio_conditioning")
+        task_audio_mode = task_audio["mode"] if isinstance(task_audio, dict) else "none"
+        if config.audio_feature_mode != task_audio_mode:
+            raise DatasetValidationError(
+                "audio_feature_mode must match the immutable catalog task view"
+            )
     audio_assets, audio_manifest_sha256 = _load_audio_assets(config, pairs)
     pairs = [replace(pair, audio_path=audio_assets.get(pair.song_id)) for pair in pairs]
     train_pairs, validation_pairs = split_by_song(pairs, config.seed, config.validation_fraction)
@@ -672,7 +704,9 @@ def train(config: TrainingConfig) -> dict[str, Any]:
         try:
             initial = torch.load(initial_path, map_location="cpu", weights_only=True)
         except Exception as error:  # Torch reports different safe-load errors by version.
-            raise DatasetValidationError("init_checkpoint is not a safe tensor-only checkpoint") from error
+            raise DatasetValidationError(
+                "init_checkpoint is not a safe tensor-only checkpoint"
+            ) from error
         if not isinstance(initial, dict) or initial.get("model_type") != "EventTransformMLP":
             raise DatasetValidationError("init_checkpoint is not an EventTransformMLP checkpoint")
         if (
@@ -692,7 +726,9 @@ def train(config: TrainingConfig) -> dict[str, Any]:
         try:
             model.load_state_dict(state_dict, strict=True)
         except RuntimeError as error:
-            raise DatasetValidationError("init_checkpoint state does not match EventTransformMLP") from error
+            raise DatasetValidationError(
+                "init_checkpoint state does not match EventTransformMLP"
+            ) from error
         initialization = {"checkpoint_sha256": _sha256(initial_path)}
         if config.parent_provenance is not None:
             initialization["parent"] = config.parent_provenance
