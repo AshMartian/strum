@@ -410,11 +410,15 @@ Each discovered pipeline reports independent `preparation_status`,
 task view useful without overstating worker training or deployment support.
 The Pro descriptors also expose a `strum-planned-training-contract/v1`: exact
 REAL_* source-track identities, required Expert label semantics, ordered
-missing stages, and an explicit `execution.status: not_available`. Their one
-available worker experiments are `strum-pro-known-reference-event-window/v1`
-and `strum-pro-arbitrary-audio-window/v1`. The latter scores bounded offline
-audio windows with deterministic catalog-derived negatives and needs no MIDI
-at inference, but still cannot decode/write a chart. Pro Keys
+missing stages, and an explicit `execution.status: not_available`. Their two
+available worker experiments are the known-reference-event candidate
+(`strum-pro-known-reference-event-window/v1`) and the experimental,
+free-running audio proposal candidate (`strum-pro-arbitrary-audio-window/v1`).
+The proposal candidate scores bounded offline audio windows without MIDI at
+inference. Its deterministic negative policy excludes every center whose
+asymmetric feature window would contain a REAL event onset; it produces only
+event-proposal scores, not attributes, a sequence decoder, MIDI, a profile,
+or a chart. Pro Keys
 accepts only `PART REAL_KEYS_X` for the Expert path; Pro Guitar/Bass retain
 the standard versus `_22` source variant in a worker-produced,
 `strum-pro-target-task-manifest/v1` target view. STRUM decodes those immutable

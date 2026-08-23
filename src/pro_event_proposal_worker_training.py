@@ -20,6 +20,7 @@ from typing import Any
 from src import PROJECT_ROOT, __version__
 from src.model_bundle import MANIFEST_FILENAME
 from src.pro_event_proposal_preprocessing import (
+    PRO_EVENT_PROPOSAL_NEGATIVE_POLICY_ID,
     PRO_EVENT_PROPOSAL_PREPROCESSING_ID,
     ProEventProposalPreprocessError,
     prepare_pro_event_proposal_windows,
@@ -247,6 +248,15 @@ def run_catalog_pro_event_proposal_training(
         )
     except (CatalogValidationError, ProEventProposalPreprocessError) as error:
         raise ProEventProposalTrainingError("Pro proposal preprocessing failed") from error
+    cache_preprocessing = cache_summary.get("preprocessing")
+    if not isinstance(cache_preprocessing, dict):
+        raise ProEventProposalTrainingError("Pro proposal preprocessing summary is invalid")
+    negative_policy = cache_preprocessing.get("negative_policy")
+    if (
+        not isinstance(negative_policy, dict)
+        or negative_policy.get("id") != PRO_EVENT_PROPOSAL_NEGATIVE_POLICY_ID
+    ):
+        raise ProEventProposalTrainingError("Pro proposal negative policy is invalid")
     device = _resolve_device(options.device)
     checkpoints = output_dir / "training-checkpoints" / "pro_event_proposal"
     _run_script(
@@ -291,7 +301,13 @@ def run_catalog_pro_event_proposal_training(
         "task_kind": task_kind,
         "pipeline_id": pipeline_id,
         "model_implementation": MODEL_IMPLEMENTATION,
-        "preprocessing": PRO_EVENT_PROPOSAL_PREPROCESSING_ID,
+        "preprocessing": {
+            "id": PRO_EVENT_PROPOSAL_PREPROCESSING_ID,
+            # This is copied from the private cache summary, which includes
+            # the task view's effective window geometry.  It contains only
+            # identifiers, bounded options, and hashes/frames -- never paths.
+            "negative_policy": negative_policy,
+        },
         "input_contract": {
             "format": "strum-pro-arbitrary-audio-window/v1",
             "requires_midi_at_inference": False,
@@ -360,6 +376,7 @@ def run_catalog_pro_event_proposal_training(
         "preprocessing": {
             "id": PRO_EVENT_PROPOSAL_PREPROCESSING_ID,
             "configuration_sha256": _canonical_sha256(cache_summary.get("preprocessing")),
+            "negative_policy_id": PRO_EVENT_PROPOSAL_NEGATIVE_POLICY_ID,
             "cache_counts": cache_summary.get("splits"),
         },
         "configuration": {

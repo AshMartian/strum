@@ -16,7 +16,11 @@ import torch
 from src.catalog_task_manifest import build_catalog_task_manifest
 from src.model_bundle import MANIFEST_FILENAME
 from src.pro_audio_preprocessing import _tempo_segments, _tick_seconds, prepare_pro_audio_windows
-from src.pro_event_proposal_preprocessing import prepare_pro_event_proposal_windows
+from src.pro_event_proposal_preprocessing import (
+    PRO_EVENT_PROPOSAL_NEGATIVE_POLICY_ID,
+    _negative_centers,
+    prepare_pro_event_proposal_windows,
+)
 from src.pro_event_worker_training import _source_inputs
 from src.pro_target_manifest import (
     PRO_AUDIO_PREPROCESSING_ID,
@@ -449,7 +453,10 @@ def test_worker_runs_proposal_candidate_without_midi_or_profile(
         assert kwargs["splits"] == ("train", "val")
         assert kwargs["negative_ratio"] == 2
         return {
-            "preprocessing": {"id": "pro-logmel-event-proposal-windows/v1"},
+            "preprocessing": {
+                "id": "pro-logmel-event-proposal-windows/v1",
+                "negative_policy": {"id": "pro-event-proposal-asymmetric-window-exclusion/v1"},
+            },
             "splits": {
                 "train": {"positive_window_count": 3, "negative_window_count": 6},
                 "val": {"positive_window_count": 2, "negative_window_count": 4},
@@ -487,6 +494,11 @@ def test_worker_runs_proposal_candidate_without_midi_or_profile(
     inspection = inspect_model_bundle(output_dir / "bundle")
     manifest = json.loads((output_dir / "bundle" / MANIFEST_FILENAME).read_text(encoding="utf-8"))
     experiment = json.loads((output_dir / "experiment.json").read_text(encoding="utf-8"))
+    config = json.loads(
+        (output_dir / "bundle" / "configs" / "pro_guitar-event-proposal.json").read_text(
+            encoding="utf-8"
+        )
+    )
 
     assert result["status"] == "completed"
     assert result["deployment_status"] == (
@@ -498,6 +510,13 @@ def test_worker_runs_proposal_candidate_without_midi_or_profile(
     assert "profiles" not in manifest
     assert experiment["candidate_scope"] == "free_running_audio_event_proposal_only"
     assert experiment["release_requirements"]["status"] == "blocked"
+    assert config["preprocessing"] == {
+        "id": "pro-logmel-event-proposal-windows/v1",
+        "negative_policy": {"id": "pro-event-proposal-asymmetric-window-exclusion/v1"},
+    }
+    assert experiment["preprocessing"]["negative_policy_id"] == (
+        "pro-event-proposal-asymmetric-window-exclusion/v1"
+    )
     assert str(tmp_path) not in json.dumps(result)
     assert str(tmp_path) not in json.dumps(inspection)
     assert str(tmp_path) not in json.dumps(manifest)
@@ -588,6 +607,24 @@ def test_pro_proposal_preprocessing_generates_deterministic_negative_audio_windo
     )
 
     assert first == second
+    policy = first["preprocessing"]["negative_policy"]
+    assert policy["id"] == PRO_EVENT_PROPOSAL_NEGATIVE_POLICY_ID
+    assert policy["feature_window"] == {
+        "center": "candidate_center_frame",
+        "window_before_ms": 100,
+        "window_after_ms": 400,
+        "window_before_frames": 4,
+        "window_after_frames": 17,
+    }
+    assert policy["real_event_exclusion"] == {
+        "rule": "negative-feature-window-must-not-contain-real-event-onset/v1",
+        "local_onset_exclusion_frames": 4,
+        "invalid_negative_center_offset_frames": {
+            "minimum": -17,
+            "maximum": 4,
+            "inclusive": True,
+        },
+    }
     for split in ("train", "val"):
         cache = tmp_path / "proposal-cache-first"
         labels = [
@@ -600,11 +637,50 @@ def test_pro_proposal_preprocessing_generates_deterministic_negative_audio_windo
         assert any(not row["is_event"] for row in labels)
         assert all(row["split"] == split for row in labels)
         assert all(str(tmp_path) not in json.dumps(row) for row in labels)
+        real_event_centers_by_source: dict[str, list[int]] = {}
+        for row in labels:
+            if row["is_event"]:
+                real_event_centers_by_source.setdefault(row["source_id"], []).append(
+                    row["center_frame"]
+                )
+        # Regression: a negative feature spans [center - 100ms, center +
+        # 400ms].  It must never contain a REAL onset from its source, even
+        # though the center itself can be farther than the local 80ms
+        # tolerance from that onset.
+        for row in labels:
+            if row["is_event"]:
+                continue
+            negative_start = row["center_frame"] - policy["feature_window"]["window_before_frames"]
+            negative_end = row["center_frame"] + policy["feature_window"]["window_after_frames"]
+            assert all(
+                not negative_start <= event_center <= negative_end
+                for event_center in real_event_centers_by_source[row["source_id"]]
+            )
     assert first["format"] == "strum-pro-event-proposal-feature-cache/v1"
     assert (
         str(tmp_path)
         not in (tmp_path / "proposal-cache-first" / "preprocess_summary.json").read_text()
     )
+
+
+def test_pro_proposal_negative_centers_exclude_asymmetric_feature_window_overlap() -> None:
+    """A center far outside local tolerance can still reveal a REAL onset."""
+    centers = _negative_centers(
+        source_id="geometry-fixture",
+        frame_count=80,
+        positives=[40],
+        count=80,
+        before=4,
+        after=17,
+        local_exclusion=4,
+        seed=31,
+    )
+
+    # The 80ms local tolerance alone would allow frame 30, yet its
+    # [26, 47] feature window contains the REAL onset at frame 40.  All
+    # returned negatives obey the complete feature-window boundary instead.
+    assert 30 not in centers
+    assert all(center < 23 or center > 44 for center in centers)
 
 
 def test_proposal_trainer_learns_only_binary_audio_window_scores(tmp_path: Path) -> None:

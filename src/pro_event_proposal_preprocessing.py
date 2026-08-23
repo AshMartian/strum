@@ -31,6 +31,7 @@ from src.song_source_catalog import CatalogValidationError
 
 PRO_EVENT_PROPOSAL_CACHE_FORMAT = "strum-pro-event-proposal-feature-cache/v1"
 PRO_EVENT_PROPOSAL_PREPROCESSING_ID = "pro-logmel-event-proposal-windows/v1"
+PRO_EVENT_PROPOSAL_NEGATIVE_POLICY_ID = "pro-event-proposal-asymmetric-window-exclusion/v1"
 _MAX_NEGATIVE_RATIO = 32
 _MAX_NEGATIVE_EXCLUSION_MS = 5000
 
@@ -80,20 +81,76 @@ def _negative_centers(
     frame_count: int,
     positives: Sequence[int],
     count: int,
-    exclusion: int,
+    before: int,
+    after: int,
+    local_exclusion: int,
     seed: int,
 ) -> list[int]:
-    """Return deterministic non-event centers, excluding the local onset tolerance."""
+    """Return deterministic centers whose complete feature windows are negative.
+
+    A proposal feature is asymmetric: ``[center - before, center + after]``.
+    Therefore a candidate center that appears *before* a REAL onset can still
+    expose that onset in its right-hand context.  Exclusion is deliberately
+    asymmetric too: for every REAL onset, reject centers in the inclusive
+    interval ``[-max(after, local), +max(before, local)]``.  This enforces
+    both the configured local tolerance and the stronger invariant that no
+    negative feature window contains a REAL event onset.
+    """
+    if before < 0 or after < 0 or local_exclusion < 0:
+        raise ProEventProposalPreprocessError("Pro proposal negative geometry is invalid")
+    excluded_before_event = max(after, local_exclusion)
+    excluded_after_event = max(before, local_exclusion)
     allowed = [
         frame
         for frame in range(frame_count)
-        if all(abs(frame - positive) > exclusion for positive in positives)
+        if all(
+            frame < positive - excluded_before_event or frame > positive + excluded_after_event
+            for positive in positives
+        )
     ]
     ranked = sorted(
         allowed,
         key=lambda frame: hashlib.sha256(f"{seed}:{source_id}:{frame}".encode()).digest(),
     )
     return ranked[:count]
+
+
+def _effective_negative_policy(
+    *,
+    options: Mapping[str, int],
+    settings: Mapping[str, object],
+    before: int,
+    after: int,
+    local_exclusion: int,
+) -> dict[str, object]:
+    """Persist the exact feature geometry and rejection interval used by a cache."""
+    if before < 0 or after < 0 or local_exclusion < 0:
+        raise ProEventProposalPreprocessError("Pro proposal negative policy is invalid")
+    return {
+        "id": PRO_EVENT_PROPOSAL_NEGATIVE_POLICY_ID,
+        "selection": "deterministic-sha256-ranked-audio-frames/v1",
+        "requested_options": dict(options),
+        "feature_window": {
+            "center": "candidate_center_frame",
+            "window_before_ms": settings["window_before_ms"],
+            "window_after_ms": settings["window_after_ms"],
+            "window_before_frames": before,
+            "window_after_frames": after,
+        },
+        "real_event_exclusion": {
+            "rule": "negative-feature-window-must-not-contain-real-event-onset/v1",
+            "local_onset_exclusion_frames": local_exclusion,
+            # For a REAL event at frame E, a negative center N is rejected
+            # whenever E + minimum <= N <= E + maximum.  The larger right
+            # feature context is intentionally reflected by the longer
+            # negative offset on the earlier side of an event.
+            "invalid_negative_center_offset_frames": {
+                "minimum": -max(after, local_exclusion),
+                "maximum": max(before, local_exclusion),
+                "inclusive": True,
+            },
+        },
+    }
 
 
 def _positive_events(
@@ -184,10 +241,17 @@ def prepare_pro_event_proposal_windows(
         * int(settings["sample_rate"])
         / (1000 * int(settings["hop_length"]))
     )
-    exclusion = math.ceil(
+    local_exclusion = math.ceil(
         options["negative_exclusion_ms"]
         * int(settings["sample_rate"])
         / (1000 * int(settings["hop_length"]))
+    )
+    negative_policy = _effective_negative_policy(
+        options=options,
+        settings=settings,
+        before=before,
+        after=after,
+        local_exclusion=local_exclusion,
     )
     cache_dir.mkdir(parents=True, exist_ok=True)
     summary: dict[str, object] = {
@@ -196,7 +260,7 @@ def prepare_pro_event_proposal_windows(
         "preprocessing": {
             "id": PRO_EVENT_PROPOSAL_PREPROCESSING_ID,
             "audio_features": settings,
-            "negative_sampling": options,
+            "negative_policy": negative_policy,
         },
         "task_kind": manifest["task_view"]["task"]["kind"],
         "splits": {},
@@ -237,7 +301,9 @@ def prepare_pro_event_proposal_windows(
                 frame_count=mel.shape[1],
                 positives=list(positives),
                 count=negative_count,
-                exclusion=exclusion,
+                before=before,
+                after=after,
+                local_exclusion=local_exclusion,
                 seed=options["negative_seed"],
             )
             if not negatives:

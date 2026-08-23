@@ -52,6 +52,10 @@ from src.model_bundle import (
     ModelBundle,
     load_model_bundle,
 )
+from src.pro_event_proposal_preprocessing import (
+    PRO_EVENT_PROPOSAL_NEGATIVE_POLICY_ID,
+    PRO_EVENT_PROPOSAL_PREPROCESSING_ID,
+)
 from src.pro_target_manifest import (
     build_catalog_pro_target_manifest,
     write_catalog_pro_target_manifest,
@@ -771,6 +775,25 @@ PRO_TRAINING_CONTRACTS: dict[str, dict[str, object]] = {
             "target_binding": "exact-real-track-event-windows/v1",
             "deployment_status": "raw_experiment_candidates_only",
         },
+        "proposal_preprocessing": {
+            "id": PRO_EVENT_PROPOSAL_PREPROCESSING_ID,
+            "audio_features": {
+                "source": "task_view.audio_preprocessing",
+                "base_id": "pro-logmel-event-windows/v1",
+                "default_window_before_ms": 100,
+                "default_window_after_ms": 400,
+            },
+            "negative_policy": {
+                "id": PRO_EVENT_PROPOSAL_NEGATIVE_POLICY_ID,
+                "rule": "negative-feature-window-must-not-contain-real-event-onset/v1",
+                "options": {
+                    "negative_ratio": {"minimum": 1, "maximum": 32, "default": 4},
+                    "negative_exclusion_ms": {"minimum": 0, "maximum": 5000, "default": 80},
+                    "negative_seed": {"source": "training_options.seed", "default": 20260822},
+                },
+            },
+            "deployment_status": "raw_experiment_candidates_only",
+        },
         "available_experiment_stages": [
             {
                 "id": "pro_guitar_known_event_attribute_candidate/v1",
@@ -812,6 +835,25 @@ PRO_TRAINING_CONTRACTS: dict[str, dict[str, object]] = {
         "available_preprocessing": {
             "id": "pro-logmel-event-windows/v1",
             "target_binding": "exact-real-track-event-windows/v1",
+            "deployment_status": "raw_experiment_candidates_only",
+        },
+        "proposal_preprocessing": {
+            "id": PRO_EVENT_PROPOSAL_PREPROCESSING_ID,
+            "audio_features": {
+                "source": "task_view.audio_preprocessing",
+                "base_id": "pro-logmel-event-windows/v1",
+                "default_window_before_ms": 100,
+                "default_window_after_ms": 400,
+            },
+            "negative_policy": {
+                "id": PRO_EVENT_PROPOSAL_NEGATIVE_POLICY_ID,
+                "rule": "negative-feature-window-must-not-contain-real-event-onset/v1",
+                "options": {
+                    "negative_ratio": {"minimum": 1, "maximum": 32, "default": 4},
+                    "negative_exclusion_ms": {"minimum": 0, "maximum": 5000, "default": 80},
+                    "negative_seed": {"source": "training_options.seed", "default": 20260822},
+                },
+            },
             "deployment_status": "raw_experiment_candidates_only",
         },
         "available_experiment_stages": [
@@ -856,6 +898,25 @@ PRO_TRAINING_CONTRACTS: dict[str, dict[str, object]] = {
         "available_preprocessing": {
             "id": "pro-logmel-event-windows/v1",
             "target_binding": "exact-real-track-event-windows/v1",
+            "deployment_status": "raw_experiment_candidates_only",
+        },
+        "proposal_preprocessing": {
+            "id": PRO_EVENT_PROPOSAL_PREPROCESSING_ID,
+            "audio_features": {
+                "source": "task_view.audio_preprocessing",
+                "base_id": "pro-logmel-event-windows/v1",
+                "default_window_before_ms": 100,
+                "default_window_after_ms": 400,
+            },
+            "negative_policy": {
+                "id": PRO_EVENT_PROPOSAL_NEGATIVE_POLICY_ID,
+                "rule": "negative-feature-window-must-not-contain-real-event-onset/v1",
+                "options": {
+                    "negative_ratio": {"minimum": 1, "maximum": 32, "default": 4},
+                    "negative_exclusion_ms": {"minimum": 0, "maximum": 5000, "default": 80},
+                    "negative_seed": {"source": "training_options.seed", "default": 20260822},
+                },
+            },
             "deployment_status": "raw_experiment_candidates_only",
         },
         "available_experiment_stages": [

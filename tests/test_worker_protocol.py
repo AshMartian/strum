@@ -464,6 +464,26 @@ def test_pro_descriptors_publish_non_executable_real_midi_training_contracts(
     assert proposal["requires_midi_at_inference"] is False
     assert proposal["sequence_decoding"] is False
     assert proposal["chart_execution"] is False
+    assert proposal["input_contract"] == "strum-pro-arbitrary-audio-window/v1"
+    assert contract["proposal_preprocessing"] == {
+        "id": "pro-logmel-event-proposal-windows/v1",
+        "audio_features": {
+            "source": "task_view.audio_preprocessing",
+            "base_id": "pro-logmel-event-windows/v1",
+            "default_window_before_ms": 100,
+            "default_window_after_ms": 400,
+        },
+        "negative_policy": {
+            "id": "pro-event-proposal-asymmetric-window-exclusion/v1",
+            "rule": "negative-feature-window-must-not-contain-real-event-onset/v1",
+            "options": {
+                "negative_ratio": {"minimum": 1, "maximum": 32, "default": 4},
+                "negative_exclusion_ms": {"minimum": 0, "maximum": 5000, "default": 80},
+                "negative_seed": {"source": "training_options.seed", "default": 20260822},
+            },
+        },
+        "deployment_status": "raw_experiment_candidates_only",
+    }
     assert contract["available_preprocessing"] == {
         "id": "pro-logmel-event-windows/v1",
         "target_binding": "exact-real-track-event-windows/v1",
