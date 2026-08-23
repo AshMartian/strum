@@ -208,6 +208,59 @@ def test_quality_policy_identity_and_package_evidence_ignore_mutated_module_alia
         require_vocal_profile_package_evidence(mutated_report)
 
 
+def test_harmony_and_report_validation_ignore_mutable_protocol_aliases(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Legacy public aliases cannot turn shared audio or forged reports valid."""
+    canonical = vocal_profile_contract.vocal_profile_protocol_definition()
+    canonical_identity = vocal_profile_contract.vocal_profile_protocol_identity()
+    monkeypatch.setattr(
+        vocal_profile_contract,
+        "HARMONY_TRACK_ROLES",
+        {"HARM1": "mix", "HARM2": "mix", "HARM3": "mix"},
+        raising=False,
+    )
+    monkeypatch.setattr(
+        vocal_profile_contract,
+        "HARMONY_SOURCE_TASK_FORMAT",
+        "forged-harmony-source-task/v999",
+        raising=False,
+    )
+    monkeypatch.setattr(
+        vocal_profile_contract,
+        "HARMONY_SOURCE_POLICY_FORMAT",
+        "forged-harmony-source-policy/v999",
+        raising=False,
+    )
+    monkeypatch.setattr(
+        vocal_profile_contract,
+        "VOCAL_HELD_OUT_REPORT_FORMAT",
+        "forged-vocal-held-out-report/v999",
+    )
+
+    shared_mix = _passing_report(["HARM1"])
+    shared_mix["harmony"]["bindings"][0]["audio_role"] = "mix"
+    with pytest.raises(VocalProfileContractError, match="audio role does not match"):
+        require_vocal_profile_package_evidence(shared_mix)
+
+    forged_source_format = _passing_report(["HARM1"])
+    forged_source_format["harmony"]["bindings"][0]["source_task"]["format"] = (
+        "forged-harmony-source-task/v999"
+    )
+    with pytest.raises(VocalProfileContractError, match="approved STRUM source task"):
+        require_vocal_profile_package_evidence(forged_source_format)
+
+    forged_report = _passing_report(["HARM1"])
+    forged_report["format"] = "forged-vocal-held-out-report/v999"
+    with pytest.raises(VocalProfileContractError, match="report format is invalid"):
+        require_vocal_profile_package_evidence(forged_report)
+
+    # The OCTAVE-facing canonical source remains complete and unchanged after
+    # all module aliases above were rebound.
+    assert vocal_profile_contract.vocal_profile_protocol_definition() == canonical
+    assert vocal_profile_contract.vocal_profile_protocol_identity() == canonical_identity
+
+
 def test_quality_gate_rejects_missing_or_non_strum_policy_and_failed_evidence() -> None:
     missing_policy = _passing_report()
     del missing_policy["quality_policy"]

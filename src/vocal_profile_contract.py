@@ -20,15 +20,7 @@ import math
 import re
 from collections.abc import Mapping, Sequence
 
-from src.vocal_harmony_catalog import (
-    HARMONY_SOURCE_POLICY_FORMAT,
-    HARMONY_SOURCE_TASK_FORMAT,
-    HARMONY_TRACK_ROLES,
-)
-
-VOCAL_HELD_OUT_REPORT_FORMAT = "strum-vocal-held-out-chart-evaluation-report/v1"
 _SHA256 = re.compile(r"^[a-f0-9]{64}$")
-_HARMONY_TRACKS = tuple(HARMONY_TRACK_ROLES)
 _REQUIRED_COMPONENTS = frozenset(
     {
         "vocals.frame_activity_pitch",
@@ -55,6 +47,109 @@ class VocalProfileContractError(ValueError):
 
 def _canonical(value: object) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+
+def _vocal_profile_protocol_canonical_bytes() -> bytes:
+    """Return the byte-defined identities for Vocal report/track evidence.
+
+    These values deliberately do not come from import-time aliases in the
+    Harmony task module.  A host may inspect public module constants, but
+    rebinding or mutating those constants in-process must never change which
+    source-task formats or audio roles STRUM accepts as package evidence.
+    """
+    return (
+        b'{"format":"strum-vocal-profile-contract/v1",'
+        b'"harmony_source_policy_format":"octave-vocal-harmony-source-policy/v1",'
+        b'"harmony_source_task_format":"strum-vocal-harmony-source-task/v1",'
+        b'"harmony_track_roles":{"HARM1":"harm1","HARM2":"harm2","HARM3":"harm3"},'
+        b'"held_out_report_format":"strum-vocal-held-out-chart-evaluation-report/v1",'
+        b'"schema_version":1}'
+    )
+
+
+def _decoded_vocal_profile_protocol() -> tuple[dict[str, object], bytes]:
+    """Decode and sanity-check the canonical static Vocal protocol bytes."""
+    canonical_bytes = _vocal_profile_protocol_canonical_bytes()
+    value = json.loads(canonical_bytes.decode("utf-8"))
+    if not isinstance(value, dict):  # pragma: no cover - static payload guard
+        raise RuntimeError("STRUM Vocal profile protocol must decode to an object")
+    recomputed = _canonical(value).encode("utf-8")
+    if recomputed != canonical_bytes:  # pragma: no cover - static payload guard
+        raise RuntimeError("STRUM Vocal profile protocol bytes are not canonical")
+    required = {
+        "format",
+        "schema_version",
+        "held_out_report_format",
+        "harmony_source_policy_format",
+        "harmony_source_task_format",
+        "harmony_track_roles",
+    }
+    roles = value.get("harmony_track_roles")
+    if (
+        set(value) != required
+        or value.get("format") != "strum-vocal-profile-contract/v1"
+        or value.get("schema_version") != 1
+        or not isinstance(value.get("held_out_report_format"), str)
+        or not isinstance(value.get("harmony_source_policy_format"), str)
+        or not isinstance(value.get("harmony_source_task_format"), str)
+        or not isinstance(roles, dict)
+        or roles != {"HARM1": "harm1", "HARM2": "harm2", "HARM3": "harm3"}
+    ):  # pragma: no cover - static payload guard
+        raise RuntimeError("STRUM Vocal profile protocol identity is invalid")
+    return value, recomputed
+
+
+def vocal_profile_protocol_definition() -> dict[str, object]:
+    """Return a fresh canonical map for all non-quality Vocal identities.
+
+    It is the single source for held-out report, Harmony source-task/policy,
+    and exact HARM-to-audio-role identities.  The returned map is a fresh JSON
+    decode, so callers cannot mutate later validation or descriptor output.
+    """
+    protocol, _ = _decoded_vocal_profile_protocol()
+    return protocol
+
+
+def vocal_profile_protocol_identity() -> dict[str, str | int]:
+    """Return the hash-pinned identity of the byte-defined Vocal protocol."""
+    protocol, canonical_bytes = _decoded_vocal_profile_protocol()
+    protocol_format = protocol["format"]
+    schema_version = protocol["schema_version"]
+    if not isinstance(protocol_format, str) or not isinstance(
+        schema_version, int
+    ):  # pragma: no cover
+        raise RuntimeError("STRUM Vocal profile protocol identity is invalid")
+    return {
+        "format": protocol_format,
+        "schema_version": schema_version,
+        "sha256": hashlib.sha256(canonical_bytes).hexdigest(),
+    }
+
+
+def _vocal_profile_protocol_fields() -> tuple[str, str, str, dict[str, str]]:
+    """Return immutable validation inputs reconstructed from canonical bytes."""
+    protocol = vocal_profile_protocol_definition()
+    report_format = protocol["held_out_report_format"]
+    policy_format = protocol["harmony_source_policy_format"]
+    task_format = protocol["harmony_source_task_format"]
+    roles = protocol["harmony_track_roles"]
+    if (
+        not isinstance(report_format, str)
+        or not isinstance(policy_format, str)
+        or not isinstance(task_format, str)
+        or not isinstance(roles, dict)
+        or not all(
+            isinstance(track, str) and isinstance(role, str) for track, role in roles.items()
+        )
+    ):  # pragma: no cover - static payload guard
+        raise RuntimeError("STRUM Vocal profile protocol fields are invalid")
+    return report_format, policy_format, task_format, dict(roles)
+
+
+# Compatibility export only.  Validators and descriptors intentionally call
+# ``_vocal_profile_protocol_fields`` instead, so rebinding this public alias
+# cannot make a forged report format acceptable.
+VOCAL_HELD_OUT_REPORT_FORMAT = _vocal_profile_protocol_fields()[0]
 
 
 def _vocal_profile_quality_policy_canonical_bytes() -> bytes:
@@ -176,13 +271,17 @@ def validate_vocal_harmony_bindings(
     common stem, or bind a HARM track to a task view/policy different from the
     selected approved Harmony task.
     """
+    _, source_policy_format, source_task_format, harmony_track_roles = (
+        _vocal_profile_protocol_fields()
+    )
+    harmony_tracks = tuple(harmony_track_roles)
     if isinstance(selected_tracks, (str, bytes)) or not isinstance(selected_tracks, Sequence):
         raise VocalProfileContractError("selected harmony tracks must be an array")
     tracks = tuple(selected_tracks)
     if (
         not tracks
         or len(set(tracks)) != len(tracks)
-        or any(track not in _HARMONY_TRACKS for track in tracks)
+        or any(track not in harmony_tracks for track in tracks)
     ):
         raise VocalProfileContractError(
             "selected harmony tracks must be a unique non-empty HARM subset"
@@ -209,7 +308,7 @@ def validate_vocal_harmony_bindings(
             raise VocalProfileContractError(
                 "harmony bindings must map each selected HARM track once"
             )
-        if role != HARMONY_TRACK_ROLES[track]:
+        if role != harmony_track_roles[track]:
             raise VocalProfileContractError(
                 "harmony binding audio role does not match its HARM track"
             )
@@ -225,11 +324,11 @@ def validate_vocal_harmony_bindings(
             },
             "harmony source task identity",
         )
-        if source_task["format"] != HARMONY_SOURCE_TASK_FORMAT:
+        if source_task["format"] != source_task_format:
             raise VocalProfileContractError(
                 "harmony binding requires the approved STRUM source task"
             )
-        if source_task["source_policy_format"] != HARMONY_SOURCE_POLICY_FORMAT:
+        if source_task["source_policy_format"] != source_policy_format:
             raise VocalProfileContractError(
                 "harmony binding requires the approved OCTAVE source policy"
             )
@@ -267,7 +366,7 @@ def validate_vocal_harmony_bindings(
                 "source_task": {
                     "format": task_identity[3],
                     "task_view_sha256": task_identity[0],
-                    "source_policy_format": HARMONY_SOURCE_POLICY_FORMAT,
+                    "source_policy_format": source_policy_format,
                     "source_policy_sha256": task_identity[1],
                     "catalog_control_sha256": task_identity[2],
                     "harmony_tracks": list(task_identity[4]),
@@ -390,7 +489,8 @@ def evaluate_vocal_profile_quality_report(report: Mapping[str, object]) -> dict[
         raise VocalProfileContractError(
             "Vocal held-out report contains unsupported or missing fields"
         )
-    if report["format"] != VOCAL_HELD_OUT_REPORT_FORMAT:
+    report_format, _, _, _ = _vocal_profile_protocol_fields()
+    if report["format"] != report_format:
         raise VocalProfileContractError("Vocal held-out report format is invalid")
     _require_quality_policy_identity(report["quality_policy"])
     report_evidence = _require_report_evidence(report["evidence"])

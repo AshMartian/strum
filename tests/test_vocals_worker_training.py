@@ -241,6 +241,7 @@ def test_vocals_pipeline_exposes_strict_private_catalog_training_contract() -> N
     assert contract["available_source_policies"]["harmony"] == {
         "pipeline_id": "vocals.harmony-source-policy/v1",
         "task_format": "strum-vocal-harmony-source-task/v1",
+        "source_policy_format": "octave-vocal-harmony-source-policy/v1",
         "status": "prepare_only",
         "shared_vocal_or_mix_fallback": False,
     }
@@ -250,10 +251,18 @@ def test_vocals_pipeline_exposes_strict_private_catalog_training_contract() -> N
         "cross_component_split_assignment": "identical-by-source-id/v1",
         "test_source_ids_forbidden_in_training_or_calibration": True,
     }
+    protocol = vocal_profile_contract.vocal_profile_protocol_definition()
+    protocol_identity = vocal_profile_contract.vocal_profile_protocol_identity()
+    assert contract["vocal_profile_protocol"] == {
+        **protocol,
+        "identity": protocol_identity,
+    }
     assert contract["catalog_admission"]["harmony"] == {
         "tracks": ["HARM1", "HARM2", "HARM3"],
         "selection": "exact-approved-harmony-subset/v1",
         "source_task_format": "strum-vocal-harmony-source-task/v1",
+        "source_policy_format": "octave-vocal-harmony-source-policy/v1",
+        "track_audio_roles": {"HARM1": "harm1", "HARM2": "harm2", "HARM3": "harm3"},
         "required_audio_policy": "isolated-harmony-stem-only/v1",
         "forbidden_audio_roles": ["vocals", "mix"],
         "required_provenance": [
@@ -267,7 +276,7 @@ def test_vocals_pipeline_exposes_strict_private_catalog_training_contract() -> N
         },
         "required_per_track_binding": {
             "track_name": "HARM1|HARM2|HARM3",
-            "audio_role": "matching-harm1-harm2-harm3-role/v1",
+            "audio_role": "exact-canonical-HARM-to-harm-role/v1",
             "source_task": {
                 "format": "strum-vocal-harmony-source-task/v1",
                 "task_view_sha256": "sha256",
@@ -316,6 +325,15 @@ def test_vocals_pipeline_exposes_strict_private_catalog_training_contract() -> N
     assert evaluation["status"] == "not_available"
     assert evaluation["split"] == "test"
     assert evaluation["source_partition"] == "source-id-disjoint-from-train-and-val/v1"
+    assert evaluation["held_out_report_format"] == (
+        "strum-vocal-held-out-chart-evaluation-report/v1"
+    )
+    assert evaluation["harmony_protocol"] == {
+        "source_task_format": "strum-vocal-harmony-source-task/v1",
+        "source_policy_format": "octave-vocal-harmony-source-policy/v1",
+        "track_audio_roles": {"HARM1": "harm1", "HARM2": "harm2", "HARM3": "harm3"},
+        "identity": protocol_identity,
+    }
     assert evaluation["evidence"]["recomputed_by"] == "strum"
     quality_policy = evaluation["evidence"]["quality_policy"]
     assert quality_policy["format"] == "strum-vocal-profile-quality-policy/v1"
@@ -382,6 +400,43 @@ def test_vocal_descriptor_rederives_package_policy_identity_at_output_time(
         **expected,
         "outcomes": "strum-vocal-profile-quality-outcomes/v1",
         "aggregation": "all-required-metrics-pass/v1",
+    }
+
+
+def test_vocal_descriptor_rederives_report_and_harmony_protocol_at_output_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    descriptor = next(item for item in PIPELINES if item.id == "strum.instrument-chart/vocals/v1")
+    expected = vocal_profile_contract.vocal_profile_protocol_definition()
+    expected_identity = vocal_profile_contract.vocal_profile_protocol_identity()
+    monkeypatch.setattr(
+        vocal_profile_contract,
+        "VOCAL_HELD_OUT_REPORT_FORMAT",
+        "forged-vocal-held-out-report/v999",
+    )
+    monkeypatch.setattr(
+        vocal_profile_contract,
+        "HARMONY_TRACK_ROLES",
+        {"HARM1": "mix", "HARM2": "mix", "HARM3": "mix"},
+        raising=False,
+    )
+
+    contract = descriptor.as_json()["training_contract"]
+    assert contract["vocal_profile_protocol"] == {**expected, "identity": expected_identity}
+    assert contract["held_out_evaluation_contract"]["held_out_report_format"] == (
+        "strum-vocal-held-out-chart-evaluation-report/v1"
+    )
+    assert contract["catalog_admission"]["harmony"]["track_audio_roles"] == {
+        "HARM1": "harm1",
+        "HARM2": "harm2",
+        "HARM3": "harm3",
+    }
+    assert contract["available_source_policies"]["harmony"] == {
+        "pipeline_id": "vocals.harmony-source-policy/v1",
+        "task_format": "strum-vocal-harmony-source-task/v1",
+        "source_policy_format": "octave-vocal-harmony-source-policy/v1",
+        "status": "prepare_only",
+        "shared_vocal_or_mix_fallback": False,
     }
 
 

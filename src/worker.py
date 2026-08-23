@@ -72,6 +72,8 @@ from src.vocal_harmony_catalog import (
     write_vocal_harmony_source_task,
 )
 from src.vocal_profile_contract import (
+    vocal_profile_protocol_definition,
+    vocal_profile_protocol_identity,
     vocal_profile_quality_policy_definition,
     vocal_profile_quality_policy_identity,
 )
@@ -628,7 +630,7 @@ VOCALS_TRAINING_CONTRACT: dict[str, object] = {
 
 
 def _vocal_training_contract_for_output(template: object) -> dict[str, object]:
-    """Return the planned Vocal descriptor with canonical policy identity.
+    """Return the planned Vocal descriptor with canonical STRUM identities.
 
     Pipeline descriptors are long-lived module objects, while OCTAVE-visible
     output is serialized later.  Rebuild every policy-bearing output field at
@@ -642,27 +644,97 @@ def _vocal_training_contract_for_output(template: object) -> dict[str, object]:
     # JSON-shaped template here too so callers of this helper cannot mutate a
     # descriptor's static data through a returned object.
     contract = json.loads(json.dumps(template))
-    identity = vocal_profile_quality_policy_identity()
+    quality_identity = vocal_profile_quality_policy_identity()
+    protocol = vocal_profile_protocol_definition()
+    protocol_identity = vocal_profile_protocol_identity()
+    report_format = protocol["held_out_report_format"]
+    source_policy_format = protocol["harmony_source_policy_format"]
+    source_task_format = protocol["harmony_source_task_format"]
+    harmony_track_roles = protocol["harmony_track_roles"]
+    if (
+        not isinstance(report_format, str)
+        or not isinstance(source_policy_format, str)
+        or not isinstance(source_task_format, str)
+        or not isinstance(harmony_track_roles, dict)
+        or not all(
+            isinstance(track, str) and isinstance(role, str)
+            for track, role in harmony_track_roles.items()
+        )
+    ):  # pragma: no cover - static contract guard
+        raise RuntimeError("Vocal protocol definition is invalid")
 
+    admission = contract["catalog_admission"]
+    composition = contract["composition_contract"]
     evaluation = contract["held_out_evaluation_contract"]
     packaging = contract["packaging_contract"]
-    if not isinstance(evaluation, dict) or not isinstance(packaging, dict):  # pragma: no cover
+    if (
+        not isinstance(admission, dict)
+        or not isinstance(composition, dict)
+        or not isinstance(evaluation, dict)
+        or not isinstance(packaging, dict)
+    ):  # pragma: no cover
         raise RuntimeError("Vocal training contract template is invalid")
+    admission_harmony = admission["harmony"]
+    composition_outputs = composition["chart_outputs"]
+    if (
+        not isinstance(admission_harmony, dict)
+        or not isinstance(composition_outputs, dict)
+        or not isinstance(composition_outputs.get("harmony"), dict)
+    ):  # pragma: no cover
+        raise RuntimeError("Vocal Harmony contract template is invalid")
     evaluation_evidence = evaluation["evidence"]
     if not isinstance(evaluation_evidence, dict):  # pragma: no cover
         raise RuntimeError("Vocal evaluation contract template is invalid")
+
+    # Reconstruct every exact HARM/source/report identity at serialization
+    # time.  The static descriptor is documentation-oriented; the emitted
+    # OCTAVE contract must remain immutable even if a caller mutates legacy
+    # module aliases such as ``HARMONY_TRACK_ROLES`` or the report format.
+    contract["vocal_profile_protocol"] = {
+        **protocol,
+        "identity": protocol_identity,
+    }
+    available_source_policies = contract["available_source_policies"]
+    if not isinstance(available_source_policies, dict) or not isinstance(
+        available_source_policies.get("harmony"), dict
+    ):  # pragma: no cover
+        raise RuntimeError("Vocal Harmony source policy template is invalid")
+    available_source_policies["harmony"]["task_format"] = source_task_format
+    available_source_policies["harmony"]["source_policy_format"] = source_policy_format
+    admission_harmony["tracks"] = list(harmony_track_roles)
+    admission_harmony["source_task_format"] = source_task_format
+    admission_harmony["source_policy_format"] = source_policy_format
+    admission_harmony["track_audio_roles"] = dict(harmony_track_roles)
+    required_binding = admission_harmony["required_per_track_binding"]
+    if not isinstance(required_binding, dict) or not isinstance(
+        required_binding.get("source_task"), dict
+    ):  # pragma: no cover
+        raise RuntimeError("Vocal Harmony binding template is invalid")
+    required_binding["track_name"] = "|".join(harmony_track_roles)
+    required_binding["audio_role"] = "exact-canonical-HARM-to-harm-role/v1"
+    source_task = required_binding["source_task"]
+    source_task["format"] = source_task_format
+    source_task["source_policy_format"] = source_policy_format
+    composition_outputs["harmony"]["tracks"] = list(harmony_track_roles)
+    evaluation["held_out_report_format"] = report_format
+    evaluation["harmony_protocol"] = {
+        "source_task_format": source_task_format,
+        "source_policy_format": source_policy_format,
+        "track_audio_roles": dict(harmony_track_roles),
+        "identity": protocol_identity,
+    }
     evaluation_evidence["quality_policy"] = {
-        **identity,
+        **quality_identity,
         "outcomes": "strum-vocal-profile-quality-outcomes/v1",
         "aggregation": "all-required-metrics-pass/v1",
     }
     packaging["quality_policy"] = {
-        **identity,
+        **quality_identity,
         "failure_behavior": "reject-package/v1",
         "verification": "recompute-outcomes-do-not-trust-reported-pass/v1",
     }
     packaging["quality_policy_definition"] = vocal_profile_quality_policy_definition()
-    packaging["quality_policy_sha256"] = identity["sha256"]
+    packaging["quality_policy_sha256"] = quality_identity["sha256"]
     return contract
 
 
