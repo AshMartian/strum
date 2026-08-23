@@ -1,18 +1,22 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import io
 import json
+import sys
 import wave
 from pathlib import Path
 
 import mido
 import numpy as np
 import pytest
+import torch
 
 from src.catalog_task_manifest import build_catalog_task_manifest
 from src.model_bundle import MANIFEST_FILENAME
 from src.pro_audio_preprocessing import _tempo_segments, _tick_seconds, prepare_pro_audio_windows
+from src.pro_event_proposal_preprocessing import prepare_pro_event_proposal_windows
 from src.pro_event_worker_training import _source_inputs
 from src.pro_target_manifest import (
     PRO_AUDIO_PREPROCESSING_ID,
@@ -155,7 +159,7 @@ def _catalog(root: Path, *, standard_fret: int = 3, valid_audio: bool = False) -
     )
 
 
-def _catalog_with_train_and_val(root: Path) -> None:
+def _catalog_with_train_and_val(root: Path, *, valid_audio: bool = False) -> None:
     """Create enough immutable catalog records to prove split-disjoint training.
 
     The shared managed MIDI/audio bytes are intentional: task identity is the
@@ -163,7 +167,7 @@ def _catalog_with_train_and_val(root: Path) -> None:
     contract and both required splits.  It mocks materialization and training
     so it cannot accidentally exercise a path-bearing external process.
     """
-    _catalog(root)
+    _catalog(root, valid_audio=valid_audio)
     record = json.loads((root / "records.jsonl").read_text(encoding="utf-8"))
     records = []
     for index in range(32):
@@ -411,6 +415,95 @@ def test_pro_audio_preprocessing_materializes_exact_event_windows_without_paths(
     assert str(tmp_path) not in serialized
 
 
+def test_worker_runs_proposal_candidate_without_midi_or_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _catalog_with_train_and_val(tmp_path)
+    task_view = tmp_path / "views" / "pro-guitar-targets.json"
+    task_view.parent.mkdir()
+    task_view.write_text(
+        json.dumps(build_catalog_pro_target_manifest(tmp_path, "pro_guitar")), encoding="utf-8"
+    )
+    output_dir = tmp_path / "proposal-candidate"
+    request = tmp_path / "pro-proposal-train.json"
+    request.write_text(
+        json.dumps(
+            {
+                "pipeline_id": "strum.instrument-chart/pro-guitar/v1",
+                "task_view": str(task_view),
+                "output": str(output_dir),
+                "catalog_root": str(tmp_path),
+                "options": {
+                    "model_id": "pro-proposal-fixture",
+                    "candidate_kind": "free_running_event_proposal/v1",
+                    "epochs": 1,
+                    "device": "cpu",
+                    "negative_ratio": 2,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_preprocess(**kwargs: object) -> dict[str, object]:
+        assert kwargs["splits"] == ("train", "val")
+        assert kwargs["negative_ratio"] == 2
+        return {
+            "preprocessing": {"id": "pro-logmel-event-proposal-windows/v1"},
+            "splits": {
+                "train": {"positive_window_count": 3, "negative_window_count": 6},
+                "val": {"positive_window_count": 2, "negative_window_count": 4},
+            },
+        }
+
+    def fake_train(command: list[str]) -> None:
+        checkpoint_dir = Path(command[command.index("--checkpoint-dir") + 1])
+        checkpoint_dir.mkdir(parents=True)
+        (checkpoint_dir / "best.pt").write_bytes(b"mock proposal candidate")
+        (checkpoint_dir / "history.json").write_text(
+            json.dumps(
+                [
+                    {
+                        "epoch": 1,
+                        "train_loss": 0.5,
+                        "val_loss": 0.4,
+                        "val_proposal_precision": 0.75,
+                        "val_proposal_recall": 0.5,
+                        "val_proposal_f1": 0.6,
+                        "val_proposal_balanced_accuracy": 0.7,
+                    }
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr(
+        "src.pro_event_proposal_worker_training.prepare_pro_event_proposal_windows", fake_preprocess
+    )
+    monkeypatch.setattr("src.pro_event_proposal_worker_training._run_script", fake_train)
+    monkeypatch.setattr("src.worker._revision", lambda: ("b" * 40, False))
+
+    result = run_training_request(request)
+    inspection = inspect_model_bundle(output_dir / "bundle")
+    manifest = json.loads((output_dir / "bundle" / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+    experiment = json.loads((output_dir / "experiment.json").read_text(encoding="utf-8"))
+
+    assert result["status"] == "completed"
+    assert result["deployment_status"] == (
+        "not_deployable_requires_pro_sequence_evaluation_packaging_and_execution"
+    )
+    assert inspection["profiles"] == []
+    assert inspection["deployment_status"] == "not_deployable"
+    assert set(manifest["components"]) == {"pro.guitar.event_proposal"}
+    assert "profiles" not in manifest
+    assert experiment["candidate_scope"] == "free_running_audio_event_proposal_only"
+    assert experiment["release_requirements"]["status"] == "blocked"
+    assert str(tmp_path) not in json.dumps(result)
+    assert str(tmp_path) not in json.dumps(inspection)
+    assert str(tmp_path) not in json.dumps(manifest)
+    assert str(tmp_path) not in json.dumps(experiment)
+
+
 def test_pro_audio_preprocessing_rejects_modified_feature_contract(tmp_path: Path) -> None:
     _catalog(tmp_path)
     manifest = build_catalog_pro_target_manifest(tmp_path, "pro_keys")
@@ -468,3 +561,94 @@ def test_pro_audio_tick_alignment_honors_global_tempo_changes(tmp_path: Path) ->
 
     assert _tick_seconds(480, ticks_per_beat, segments) == pytest.approx(0.5)
     assert _tick_seconds(960, ticks_per_beat, segments) == pytest.approx(1.5)
+
+
+def test_pro_proposal_preprocessing_generates_deterministic_negative_audio_windows(
+    tmp_path: Path,
+) -> None:
+    _catalog_with_train_and_val(tmp_path, valid_audio=True)
+    manifest = build_catalog_pro_target_manifest(tmp_path, "pro_guitar")
+    assert {song["split"] for song in manifest["songs"]} >= {"train", "val"}
+    task_view = tmp_path / "pro-guitar-targets.json"
+    task_view.write_text(json.dumps(manifest), encoding="utf-8")
+
+    first = prepare_pro_event_proposal_windows(
+        manifest_path=task_view,
+        catalog_root=tmp_path,
+        cache_dir=tmp_path / "proposal-cache-first",
+        negative_ratio=2,
+        negative_seed=31,
+    )
+    second = prepare_pro_event_proposal_windows(
+        manifest_path=task_view,
+        catalog_root=tmp_path,
+        cache_dir=tmp_path / "proposal-cache-second",
+        negative_ratio=2,
+        negative_seed=31,
+    )
+
+    assert first == second
+    for split in ("train", "val"):
+        cache = tmp_path / "proposal-cache-first"
+        labels = [
+            json.loads(line)
+            for line in (cache / f"{split}_proposal_targets.jsonl").read_text().splitlines()
+        ]
+        features = np.load(cache / f"{split}_logmel.npy")
+        assert features.shape[0] == len(labels)
+        assert any(row["is_event"] for row in labels)
+        assert any(not row["is_event"] for row in labels)
+        assert all(row["split"] == split for row in labels)
+        assert all(str(tmp_path) not in json.dumps(row) for row in labels)
+    assert first["format"] == "strum-pro-event-proposal-feature-cache/v1"
+    assert (
+        str(tmp_path)
+        not in (tmp_path / "proposal-cache-first" / "preprocess_summary.json").read_text()
+    )
+
+
+def test_proposal_trainer_learns_only_binary_audio_window_scores(tmp_path: Path) -> None:
+    script = Path(__file__).parents[1] / "scripts" / "train_pro_event_proposals.py"
+    spec = importlib.util.spec_from_file_location("train_pro_event_proposals", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    for split in ("train", "val"):
+        np.save(cache / f"{split}_logmel.npy", np.zeros((4, 8, 8), dtype=np.float16))
+        (cache / f"{split}_proposal_targets.jsonl").write_text(
+            "".join(
+                json.dumps(
+                    {
+                        "source_id": f"source-{split}-{index}",
+                        "split": split,
+                        "center_frame": index,
+                        "is_event": index % 2 == 0,
+                    }
+                )
+                + "\n"
+                for index in range(4)
+            ),
+            encoding="utf-8",
+        )
+    metrics = module.train_pro_event_proposals(
+        module.TrainingSettings(
+            cache_dir=cache,
+            checkpoint_dir=tmp_path / "checkpoints",
+            task_kind="pro_guitar",
+            epochs=1,
+            batch_size=2,
+            learning_rate=0.001,
+            device="cpu",
+            max_train_batches=1,
+            max_val_batches=1,
+            seed=12,
+            channels=2,
+        )
+    )
+    checkpoint = torch.load(tmp_path / "checkpoints" / "best.pt", map_location="cpu")
+    assert {"val_proposal_f1", "val_proposal_precision", "val_proposal_recall"} <= metrics.keys()
+    assert checkpoint["format"] == "strum-pro-event-proposal-candidate-checkpoint/v1"
+    assert "midi" not in checkpoint

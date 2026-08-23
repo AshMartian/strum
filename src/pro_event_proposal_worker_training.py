@@ -1,14 +1,13 @@
-"""Catalog-backed exact-Pro known-event attribute candidate training.
+"""Catalog-backed raw Pro free-running event-proposal candidate training.
 
-The candidate is deliberately *not* a free-running sequence model.  Its
-feature windows are centered on supplied reference event times, so it can only
-evaluate exact Pro attributes at an existing event.  It has no profile, MIDI
-writer, or chart execution path.
+This is the first audio-only stage in the Pro path.  It samples both positive
+and negative windows from approved catalog audio and does not consume authored
+event times at inference.  The output is deliberately a profile-less research
+candidate: it cannot emit MIDI or execute an auto-chart run.
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 import shutil
@@ -20,47 +19,39 @@ from typing import Any
 
 from src import PROJECT_ROOT, __version__
 from src.model_bundle import MANIFEST_FILENAME
-from src.pro_audio_preprocessing import prepare_pro_audio_windows
+from src.pro_event_proposal_preprocessing import (
+    PRO_EVENT_PROPOSAL_PREPROCESSING_ID,
+    ProEventProposalPreprocessError,
+    prepare_pro_event_proposal_windows,
+)
+from src.pro_event_worker_training import (
+    _canonical_sha256,
+    _resolve_device,
+    _sha256,
+    _source_inputs,
+)
 from src.pro_target_manifest import (
     PRO_TARGET_MANIFEST_FORMAT,
     resolve_catalog_pro_target_manifest_songs,
 )
 from src.song_source_catalog import CatalogValidationError
 
-EXPERIMENT_FORMAT = "strum-pro-event-attribute-candidate-experiment/v1"
-PREPROCESSING_ID = "pro-logmel-event-windows/v1"
-MODEL_IMPLEMENTATION = "ProEventAttributeCNN/v1"
+EXPERIMENT_FORMAT = "strum-pro-event-proposal-candidate-experiment/v1"
+MODEL_IMPLEMENTATION = "ProEventProposalCNN/v1"
 _MODEL_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 _PIPELINE_BY_KIND = {
     "pro_guitar": "strum.instrument-chart/pro-guitar/v1",
     "pro_bass": "strum.instrument-chart/pro-bass/v1",
     "pro_keys": "strum.instrument-chart/pro-keys/v1",
 }
-_EXPECTED_LABEL_SCHEMAS = {
-    "pro_guitar": {
-        "id": "pro-string-fret-midi/v1",
-        "track_names": ["PART REAL_GUITAR", "PART REAL_GUITAR_22"],
-        "difficulty_encoding": "pro-string-note-offsets/v1",
-    },
-    "pro_bass": {
-        "id": "pro-string-fret-midi/v1",
-        "track_names": ["PART REAL_BASS", "PART REAL_BASS_22"],
-        "difficulty_encoding": "pro-string-note-offsets/v1",
-    },
-    "pro_keys": {
-        "id": "pro-keys-pitch-midi/v1",
-        "track_names": ["PART REAL_KEYS_X"],
-        "difficulty_encoding": "pro-keys-chromatic-notes-and-range/v1",
-    },
-}
 
 
-class ProEventTrainingError(ValueError):
-    """Raised when exact-Pro candidate training cannot prove its inputs."""
+class ProEventProposalTrainingError(ValueError):
+    """Raised when an event-proposal candidate cannot prove its inputs."""
 
 
 @dataclass(frozen=True)
-class ProEventTrainingOptions:
+class ProEventProposalTrainingOptions:
     model_id: str
     epochs: int = 25
     batch_size: int = 32
@@ -71,9 +62,11 @@ class ProEventTrainingOptions:
     max_val_batches: int = 0
     seed: int = 20260822
     channels: int = 48
+    negative_ratio: int = 4
+    negative_exclusion_ms: int = 80
 
     @classmethod
-    def from_mapping(cls, raw: dict[str, Any]) -> ProEventTrainingOptions:
+    def from_mapping(cls, raw: dict[str, Any]) -> ProEventProposalTrainingOptions:
         permitted = {
             "model_id",
             "epochs",
@@ -85,12 +78,14 @@ class ProEventTrainingOptions:
             "max_val_batches",
             "seed",
             "channels",
+            "negative_ratio",
+            "negative_exclusion_ms",
         }
         if set(raw) - permitted:
-            raise ProEventTrainingError("unsupported Pro event candidate training option")
+            raise ProEventProposalTrainingError("unsupported Pro event proposal training option")
         model_id = raw.get("model_id")
         if not isinstance(model_id, str) or not _MODEL_ID.fullmatch(model_id):
-            raise ProEventTrainingError("Pro event candidate model_id is invalid")
+            raise ProEventProposalTrainingError("Pro event proposal model_id is invalid")
         values: dict[str, Any] = {"model_id": model_id}
         for key, default, minimum in (
             ("epochs", 25, 1),
@@ -100,10 +95,18 @@ class ProEventTrainingOptions:
             ("max_val_batches", 0, 0),
             ("seed", 20260822, 0),
             ("channels", 48, 1),
+            ("negative_ratio", 4, 1),
+            ("negative_exclusion_ms", 80, 0),
         ):
             value = raw.get(key, default)
             if not isinstance(value, int) or isinstance(value, bool) or value < minimum:
-                raise ProEventTrainingError(f"Pro event candidate {key} is invalid")
+                raise ProEventProposalTrainingError(f"Pro event proposal {key} is invalid")
+            if key == "negative_ratio" and value > 32:
+                raise ProEventProposalTrainingError("Pro event proposal negative_ratio is invalid")
+            if key == "negative_exclusion_ms" and value > 5000:
+                raise ProEventProposalTrainingError(
+                    "Pro event proposal negative_exclusion_ms is invalid"
+                )
             values[key] = value
         learning_rate = raw.get("learning_rate", 0.0003)
         if (
@@ -111,11 +114,11 @@ class ProEventTrainingOptions:
             or isinstance(learning_rate, bool)
             or learning_rate <= 0
         ):
-            raise ProEventTrainingError("Pro event candidate learning_rate is invalid")
+            raise ProEventProposalTrainingError("Pro event proposal learning_rate is invalid")
         values["learning_rate"] = float(learning_rate)
         device = raw.get("device", "auto")
         if device not in {"auto", "cpu", "cuda", "mps"}:
-            raise ProEventTrainingError("Pro event candidate device is invalid")
+            raise ProEventProposalTrainingError("Pro event proposal device is invalid")
         values["device"] = device
         return cls(**values)
 
@@ -131,33 +134,9 @@ class ProEventTrainingOptions:
             "max_val_batches": self.max_val_batches,
             "seed": self.seed,
             "channels": self.channels,
+            "negative_ratio": self.negative_ratio,
+            "negative_exclusion_ms": self.negative_exclusion_ms,
         }
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as source:
-        for chunk in iter(lambda: source.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _canonical_sha256(value: object) -> str:
-    return hashlib.sha256(
-        json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
-
-
-def _resolve_device(value: str) -> str:
-    if value != "auto":
-        return value
-    import torch  # noqa: PLC0415
-
-    if torch.cuda.is_available():
-        return "cuda"
-    if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
-        return "mps"
-    return "cpu"
 
 
 def _run_script(command: list[str]) -> None:
@@ -171,16 +150,14 @@ def _run_script(command: list[str]) -> None:
             stderr=subprocess.DEVNULL,
         )
     except (OSError, subprocess.CalledProcessError) as error:
-        raise ProEventTrainingError("Pro event preprocessing or training script failed") from error
+        raise ProEventProposalTrainingError("Pro event proposal trainer failed") from error
 
 
-def _read_task_view(
-    path: Path, catalog_root: Path, pipeline_id: str
-) -> tuple[dict[str, Any], list[dict[str, object]], str]:
+def _read_task_view(path: Path, catalog_root: Path, pipeline_id: str) -> tuple[dict[str, Any], str]:
     try:
         task_manifest = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
-        raise ProEventTrainingError("Pro target task view is unreadable") from error
+        raise ProEventProposalTrainingError("Pro target task view is unreadable") from error
     task_view = task_manifest.get("task_view") if isinstance(task_manifest, dict) else None
     task = task_view.get("task") if isinstance(task_view, dict) else None
     task_kind = task.get("kind") if isinstance(task, dict) else None
@@ -192,107 +169,90 @@ def _read_task_view(
         or task_kind not in _PIPELINE_BY_KIND
         or _PIPELINE_BY_KIND[task_kind] != pipeline_id
         or task.get("pipeline_id") != pipeline_id
-        or task.get("label_schema") != _EXPECTED_LABEL_SCHEMAS[task_kind]
     ):
-        raise ProEventTrainingError("Pro candidate requires the exact catalog target task view")
+        raise ProEventProposalTrainingError(
+            "Pro proposal requires the exact catalog target task view"
+        )
     try:
         songs = resolve_catalog_pro_target_manifest_songs(task_manifest, catalog_root)
     except CatalogValidationError:
         raise
     except (TypeError, ValueError) as error:
-        raise ProEventTrainingError("Pro target task view cannot be revalidated") from error
+        raise ProEventProposalTrainingError(
+            "Pro proposal task view cannot be revalidated"
+        ) from error
     if not all(any(song.get("split") == split for song in songs) for split in ("train", "val")):
-        raise ProEventTrainingError("Pro candidate requires non-empty train and val catalog splits")
-    return task_manifest, songs, task_kind
+        raise ProEventProposalTrainingError(
+            "Pro proposal requires non-empty train and val catalog splits"
+        )
+    return task_manifest, task_kind
 
 
 def _history_metrics(path: Path) -> dict[str, object]:
     try:
         history = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
-        raise ProEventTrainingError("Pro candidate trainer did not write metrics") from error
+        raise ProEventProposalTrainingError("Pro proposal trainer did not write metrics") from error
     if not isinstance(history, list) or not history or not isinstance(history[-1], dict):
-        raise ProEventTrainingError("Pro candidate trainer metrics are invalid")
+        raise ProEventProposalTrainingError("Pro proposal trainer metrics are invalid")
     expected = {
         "epoch",
         "train_loss",
         "val_loss",
-        "val_known_event_token_f1",
-        "val_known_event_state_accuracy",
-        "val_known_event_exact_accuracy",
+        "val_proposal_precision",
+        "val_proposal_recall",
+        "val_proposal_f1",
+        "val_proposal_balanced_accuracy",
     }
     metrics = {
         key: value
         for key, value in history[-1].items()
         if key in expected and isinstance(value, (int, float)) and not isinstance(value, bool)
     }
-    if not {"val_known_event_token_f1", "val_known_event_exact_accuracy"} <= metrics.keys():
-        raise ProEventTrainingError("Pro candidate trainer omitted held-out known-event metrics")
+    if not {"val_proposal_f1", "val_proposal_precision", "val_proposal_recall"} <= metrics.keys():
+        raise ProEventProposalTrainingError(
+            "Pro proposal trainer omitted held-out proposal metrics"
+        )
     return metrics
 
 
-def _source_inputs(task_manifest: dict[str, Any]) -> list[dict[str, object]]:
-    """Copy only immutable source IDs/hashes from the portable target view."""
-    task_view = task_manifest.get("task_view")
-    task_songs = task_view.get("songs") if isinstance(task_view, dict) else None
-    if not isinstance(task_songs, list):
-        raise ProEventTrainingError("Pro target task view has no source lineage")
-    result: list[dict[str, object]] = []
-    for song in task_songs:
-        audio = song.get("audio") if isinstance(song, dict) else None
-        midi = song.get("notes_midi") if isinstance(song, dict) else None
-        if (
-            not isinstance(song, dict)
-            or not isinstance(song.get("source_id"), str)
-            or song.get("split") not in {"train", "val", "test"}
-            or not isinstance(audio, dict)
-            or not isinstance(midi, dict)
-            or not isinstance(audio.get("sha256"), str)
-            or not isinstance(midi.get("sha256"), str)
-        ):
-            raise ProEventTrainingError("Pro target task source lineage is invalid")
-        result.append(
-            {
-                "source_id": song["source_id"],
-                "split": song["split"],
-                "audio_sha256": audio["sha256"],
-                "notes_midi_sha256": midi["sha256"],
-            }
-        )
-    if not result or len({item["source_id"] for item in result}) != len(result):
-        raise ProEventTrainingError("Pro target task source lineage is incomplete")
-    return result
-
-
-def run_catalog_pro_event_training(
+def run_catalog_pro_event_proposal_training(
     *,
     task_view_path: Path,
     output_dir: Path,
     catalog_root: Path,
     pipeline_id: str,
-    options: ProEventTrainingOptions,
+    options: ProEventProposalTrainingOptions,
     strum_revision: str | None,
     strum_source_dirty: bool | None,
 ) -> dict[str, object]:
-    """Train a raw exact-Pro event-attribute candidate; never a chart profile."""
+    """Train one raw event-proposal candidate; never an auto-chart profile."""
     if output_dir.exists() and (not output_dir.is_dir() or any(output_dir.iterdir())):
-        raise ProEventTrainingError("Pro candidate output directory must be an empty directory")
-    task_manifest, songs, task_kind = _read_task_view(task_view_path, catalog_root, pipeline_id)
+        raise ProEventProposalTrainingError(
+            "Pro proposal output directory must be an empty directory"
+        )
+    task_manifest, task_kind = _read_task_view(task_view_path, catalog_root, pipeline_id)
     output_dir.mkdir(parents=True, exist_ok=True)
-    cache_dir = output_dir / "cache"
-    cache_summary = prepare_pro_audio_windows(
-        manifest_path=task_view_path,
-        catalog_root=catalog_root,
-        cache_dir=cache_dir,
-        splits=("train", "val"),
-        limit_songs=options.limit_songs,
-    )
+    cache_dir = output_dir / "proposal-cache"
+    try:
+        cache_summary = prepare_pro_event_proposal_windows(
+            manifest_path=task_view_path,
+            catalog_root=catalog_root,
+            cache_dir=cache_dir,
+            splits=("train", "val"),
+            limit_songs=options.limit_songs,
+            negative_ratio=options.negative_ratio,
+            negative_exclusion_ms=options.negative_exclusion_ms,
+            negative_seed=options.seed,
+        )
+    except (CatalogValidationError, ProEventProposalPreprocessError) as error:
+        raise ProEventProposalTrainingError("Pro proposal preprocessing failed") from error
     device = _resolve_device(options.device)
-    checkpoints = output_dir / "training-checkpoints" / "pro_event_attributes"
+    checkpoints = output_dir / "training-checkpoints" / "pro_event_proposal"
     _run_script(
         [
             sys.executable,
-            str(PROJECT_ROOT / "scripts" / "train_pro_event_attributes.py"),
+            str(PROJECT_ROOT / "scripts" / "train_pro_event_proposals.py"),
             "--cache-dir",
             str(cache_dir),
             "--checkpoint-dir",
@@ -319,63 +279,39 @@ def run_catalog_pro_event_training(
     )
     source_checkpoint = checkpoints / "best.pt"
     if not source_checkpoint.is_file():
-        raise ProEventTrainingError("Pro candidate trainer did not produce a checkpoint")
-    component_id = f"pro.{task_kind.removeprefix('pro_')}.event_attributes"
+        raise ProEventProposalTrainingError("Pro proposal trainer did not produce a checkpoint")
+    component_id = f"pro.{task_kind.removeprefix('pro_')}.event_proposal"
     bundle_dir = output_dir / "bundle"
-    checkpoint = bundle_dir / "weights" / f"{task_kind}-event-attributes.pt"
+    checkpoint = bundle_dir / "weights" / f"{task_kind}-event-proposal.pt"
     checkpoint.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source_checkpoint, checkpoint)
-    target_contract: dict[str, object] = (
-        {
-            "kind": "pro_string_fret_technique/v1",
-            "string_count": 6,
-            "fret_range": [0, 22],
-            "techniques": [
-                "normal",
-                "arpeggio_form",
-                "bent",
-                "muted",
-                "tapped",
-                "harmonic",
-                "pinch_harmonic",
-            ],
-            "track_variant_head": ["standard", "22_fret"],
-        }
-        if task_kind in {"pro_guitar", "pro_bass"}
-        else {
-            "kind": "pro_keys_pitch_channel_range_shift/v1",
-            "pitch_range": [48, 72],
-            "channel_metadata": "retained_in_labels_not_predicted/v1",
-            "range_state_head": ["none", "C", "D", "E", "F", "G", "A"],
-        }
-    )
     portable_config = {
         "schema_version": 1,
-        "format": "strum-pro-event-attribute-candidate-config/v1",
+        "format": "strum-pro-event-proposal-candidate-config/v1",
         "task_kind": task_kind,
         "pipeline_id": pipeline_id,
         "model_implementation": MODEL_IMPLEMENTATION,
-        "preprocessing": PREPROCESSING_ID,
+        "preprocessing": PRO_EVENT_PROPOSAL_PREPROCESSING_ID,
         "input_contract": {
-            "format": "strum-pro-known-reference-event-window/v1",
-            "event_time_source": "held_out_catalog_label_only",
-            "free_running_event_proposal": False,
+            "format": "strum-pro-arbitrary-audio-window/v1",
+            "requires_midi_at_inference": False,
+            "offline_window_scoring": True,
+            "free_running_event_proposal": True,
             "sequence_decoding": False,
             "midi_emission": False,
         },
-        "target_contract": target_contract,
+        "output_contract": {
+            "format": "strum-pro-event-proposal-scores/v1",
+            "event_attributes": False,
+            "midi_emission": False,
+        },
         "training": options.portable(),
     }
-    config_path = bundle_dir / "configs" / f"{task_kind}-event-attributes.json"
+    config_path = bundle_dir / "configs" / f"{task_kind}-event-proposal.json"
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(
         json.dumps(portable_config, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
-    # A commit ID by itself is not source provenance: a training worktree can
-    # contain uncommitted implementation changes.  Keep the dirty state next
-    # to the revision in the portable artifact, including ``None`` when this
-    # runtime was unable to inspect Git.  That makes an unknown state explicit
-    # rather than accidentally presenting the commit as a clean build.
     compatibility: dict[str, object] = {
         "manifest_schema": 1,
         "strum_version": f">={__version__}",
@@ -391,7 +327,7 @@ def run_catalog_pro_event_training(
         "config_sha256": _sha256(config_path),
         "config_byte_length": config_path.stat().st_size,
         "architecture": MODEL_IMPLEMENTATION,
-        "preprocessing": PREPROCESSING_ID,
+        "preprocessing": PRO_EVENT_PROPOSAL_PREPROCESSING_ID,
     }
     (bundle_dir / MANIFEST_FILENAME).write_text(
         json.dumps(
@@ -407,23 +343,22 @@ def run_catalog_pro_event_training(
         + "\n",
         encoding="utf-8",
     )
-    raw_task_view = task_manifest.get("task_view")
-    lineage = raw_task_view.get("lineage") if isinstance(raw_task_view, dict) else None
-    source_inputs = _source_inputs(task_manifest)
+    task_view = task_manifest.get("task_view")
+    lineage = task_view.get("lineage") if isinstance(task_view, dict) else None
     experiment = {
         "schema_version": 1,
         "format": EXPERIMENT_FORMAT,
         "lifecycle": "completed",
         "pipeline": {"id": pipeline_id, "version": 1},
-        "candidate_scope": "known_reference_event_attributes_only",
+        "candidate_scope": "free_running_audio_event_proposal_only",
         "task_view": {
             "format": PRO_TARGET_MANIFEST_FORMAT,
             "sha256": _sha256(task_view_path),
             "catalog_id": lineage.get("catalog_id") if isinstance(lineage, dict) else None,
-            "source_inputs": source_inputs,
+            "source_inputs": _source_inputs(task_manifest),
         },
         "preprocessing": {
-            "id": PREPROCESSING_ID,
+            "id": PRO_EVENT_PROPOSAL_PREPROCESSING_ID,
             "configuration_sha256": _canonical_sha256(cache_summary.get("preprocessing")),
             "cache_counts": cache_summary.get("splits"),
         },
@@ -439,12 +374,12 @@ def run_catalog_pro_event_training(
             "device": device,
         },
         "metrics": _history_metrics(checkpoints / "history.json"),
-        "deployment_status": "not_deployable_requires_pro_event_proposal_sequence_evaluation_and_packaging",
+        "deployment_status": "not_deployable_requires_pro_sequence_evaluation_packaging_and_execution",
         "release_requirements": {
             "format": "strum-pro-chart-release-requirements/v1",
             "status": "blocked",
             "requirements": [
-                "free_running_Pro event proposal with negative-event coverage",
+                "validated free-running proposal operating point with song-disjoint negative coverage",
                 "variant-aware Pro sequence decoder with duration and chord constraints",
                 "held-out chart-level evaluation against exact REAL_* MIDI",
                 "typed Pro profile package and registered chart execution handler",

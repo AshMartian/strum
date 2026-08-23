@@ -17,7 +17,7 @@ auto-chart handler.
 | Drums onset + classifier | Available | Available; V2 evaluation package | `drums.v14-expert/v1` direct Expert charts; V2 is evaluation-only |
 | Five-lane difficulty transform (Guitar/Bass/Keys/Drums) | Available | Available | `difficulty.transform/v1` |
 | Generic Keys / Vocals | Available | Planned | Planned |
-| Pro Guitar / Pro Bass / Pro Keys | Exact REAL_* task views + known-event attribute candidate | Free-running event proposal, sequence decoding, chart evaluation, packaging | Planned |
+| Pro Guitar / Pro Bass / Pro Keys | Exact REAL_* task views + raw known-event and audio proposal candidates | Quality-gated proposal, sequence decoding, chart evaluation, packaging | Planned |
 | Guitar/Bass fret mapper | Available | Available; requires `pitch` extra and records exact Basic Pitch provenance | Planned; requires evaluation/profile packaging |
 | Guitar/Bass section classifier | Available | Available; experiment-only | Planned; requires section-routing evaluation and runtime profile |
 

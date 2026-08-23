@@ -771,15 +771,16 @@ package` command may then copy it into a hash-verified
 difficulty-transform decision.
 
 Pro Guitar, Pro Bass, and Pro Keys are deliberately **not** aliases for those
-five-lane experiments. Their discovered descriptors now support one narrow,
-catalog-backed **known-event attribute candidate**: a private log-mel window is
-centered on an already-supplied REAL_* reference event and the raw checkpoint
-learns only its exact attributes. It has no negative-event coverage, event
-proposal, free-running sequence decoder, MIDI writer, profile, or chart
-handler. The descriptor's `strum-planned-training-contract/v1` therefore has
-`training_status: experiment_only` and `execution.status: not_available`; its
-remaining requirements explicitly retain event proposal, sequence decoding,
-held-out chart evaluation, packaging, and execution. Pro Guitar/Bass task views
+five-lane experiments. Their discovered descriptors now support two narrow,
+catalog-backed raw candidates: a known-event attribute candidate, and a
+bounded **audio event-proposal candidate**. The latter samples deterministic
+negative windows from approved catalog audio and scores arbitrary offline
+audio windows without MIDI at inference. It produces neither attributes,
+sequence, MIDI, profile, nor chart handler. The descriptor's
+`strum-planned-training-contract/v1` remains `training_status: experiment_only`
+with `execution.status: not_available`; remaining requirements retain a
+quality-gated proposal operating point, sequence decoding, held-out chart
+evaluation, packaging, and execution. Pro Guitar/Bass task views
 select only the exact `PART REAL_GUITAR` / `PART REAL_GUITAR_22` or
 `PART REAL_BASS` / `PART REAL_BASS_22` identities. Prepare materializes a
 path-free `strum-pro-target-task-manifest/v1`: it decodes Expert string, fret,
@@ -792,11 +793,11 @@ the path-free `pro-logmel-event-windows/v1` contract; the supplied
 `preprocess_pro_targets.py` revalidates every asset and writes only local
 exact-event windows. Each string window retains its standard/`_22` variant,
 string/fret/technique targets; each Pro Keys window retains chromatic
-pitch/channel and range-shift targets. This cache and its candidate checkpoint
+pitch/channel and range-shift targets. Both caches and all candidate checkpoints
 are research-only. No Pro descriptor has an inference capability or chart
-handler until a free-running event model, sequence decoder, held-out chart
-evaluator, profile package, and chart execution stages are implemented and
-validated.
+handler until a quality-gated free-running event model, sequence decoder,
+held-out chart evaluator, profile package, and chart execution stages are
+implemented and validated.
 
 Keys has the same narrow experiment boundary: `keys.onset-fret/v1` revalidates
 the dedicated `keys_onset_fret` task view, whose label schema selects only

@@ -428,6 +428,10 @@ def test_pro_descriptors_publish_non_executable_real_midi_training_contracts(
     assert descriptor.training_status == "available"
     assert descriptor.train_schema is not None
     assert descriptor.train_schema["required"] == ["model_id"]
+    assert descriptor.train_schema["properties"]["candidate_kind"]["enum"] == [
+        "known_event_attributes/v1",
+        "free_running_event_proposal/v1",
+    ]
     assert descriptor.inference_capability is None
     assert descriptor.catalog_requirements["label_schema"] == schema_id
     assert descriptor.catalog_requirements["label_tracks"] == tracks
@@ -453,14 +457,17 @@ def test_pro_descriptors_publish_non_executable_real_midi_training_contracts(
     assert contract["label_source"]["schema_id"] == schema_id
     assert contract["label_source"]["tracks"] == tracks
     assert contract["prepared_target_encoding"] == "strum-pro-midi-target-decoder/v1"
-    stage = contract["available_experiment_stages"][0]
-    assert stage["free_running_event_proposal"] is False
-    assert stage["sequence_decoding"] is False
-    assert stage["chart_execution"] is False
+    known_event, proposal = contract["available_experiment_stages"]
+    assert known_event["free_running_event_proposal"] is False
+    assert known_event["sequence_decoding"] is False
+    assert known_event["chart_execution"] is False
+    assert proposal["requires_midi_at_inference"] is False
+    assert proposal["sequence_decoding"] is False
+    assert proposal["chart_execution"] is False
     assert contract["available_preprocessing"] == {
         "id": "pro-logmel-event-windows/v1",
         "target_binding": "exact-real-track-event-windows/v1",
-        "deployment_status": "known_event_candidate_only",
+        "deployment_status": "raw_experiment_candidates_only",
     }
     assert set(contract["required_stages"]) == set(descriptor.training_requirements)
     assert required_stages <= set(contract["required_stages"])

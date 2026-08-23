@@ -769,7 +769,7 @@ PRO_TRAINING_CONTRACTS: dict[str, dict[str, object]] = {
         "available_preprocessing": {
             "id": "pro-logmel-event-windows/v1",
             "target_binding": "exact-real-track-event-windows/v1",
-            "deployment_status": "known_event_candidate_only",
+            "deployment_status": "raw_experiment_candidates_only",
         },
         "available_experiment_stages": [
             {
@@ -779,7 +779,16 @@ PRO_TRAINING_CONTRACTS: dict[str, dict[str, object]] = {
                 "free_running_event_proposal": False,
                 "sequence_decoding": False,
                 "chart_execution": False,
-            }
+            },
+            {
+                "id": "pro_guitar_free_running_event_proposal_candidate/v1",
+                "input_contract": "strum-pro-arbitrary-audio-window/v1",
+                "outputs": ["audio_event_proposal_scores"],
+                "negative_event_coverage": "deterministic_catalog_audio_windows/v1",
+                "requires_midi_at_inference": False,
+                "sequence_decoding": False,
+                "chart_execution": False,
+            },
         ],
         "required_stages": list(PLANNED_TRAINING_REQUIREMENTS["pro_guitar"]),
         "execution": {"status": "not_available", "inference_capability": None},
@@ -803,7 +812,7 @@ PRO_TRAINING_CONTRACTS: dict[str, dict[str, object]] = {
         "available_preprocessing": {
             "id": "pro-logmel-event-windows/v1",
             "target_binding": "exact-real-track-event-windows/v1",
-            "deployment_status": "known_event_candidate_only",
+            "deployment_status": "raw_experiment_candidates_only",
         },
         "available_experiment_stages": [
             {
@@ -813,7 +822,16 @@ PRO_TRAINING_CONTRACTS: dict[str, dict[str, object]] = {
                 "free_running_event_proposal": False,
                 "sequence_decoding": False,
                 "chart_execution": False,
-            }
+            },
+            {
+                "id": "pro_bass_free_running_event_proposal_candidate/v1",
+                "input_contract": "strum-pro-arbitrary-audio-window/v1",
+                "outputs": ["audio_event_proposal_scores"],
+                "negative_event_coverage": "deterministic_catalog_audio_windows/v1",
+                "requires_midi_at_inference": False,
+                "sequence_decoding": False,
+                "chart_execution": False,
+            },
         ],
         "required_stages": list(PLANNED_TRAINING_REQUIREMENTS["pro_bass"]),
         "execution": {"status": "not_available", "inference_capability": None},
@@ -838,7 +856,7 @@ PRO_TRAINING_CONTRACTS: dict[str, dict[str, object]] = {
         "available_preprocessing": {
             "id": "pro-logmel-event-windows/v1",
             "target_binding": "exact-real-track-event-windows/v1",
-            "deployment_status": "known_event_candidate_only",
+            "deployment_status": "raw_experiment_candidates_only",
         },
         "available_experiment_stages": [
             {
@@ -848,7 +866,16 @@ PRO_TRAINING_CONTRACTS: dict[str, dict[str, object]] = {
                 "free_running_event_proposal": False,
                 "sequence_decoding": False,
                 "chart_execution": False,
-            }
+            },
+            {
+                "id": "pro_keys_free_running_event_proposal_candidate/v1",
+                "input_contract": "strum-pro-arbitrary-audio-window/v1",
+                "outputs": ["audio_event_proposal_scores"],
+                "negative_event_coverage": "deterministic_catalog_audio_windows/v1",
+                "requires_midi_at_inference": False,
+                "sequence_decoding": False,
+                "chart_execution": False,
+            },
         ],
         "required_stages": list(PLANNED_TRAINING_REQUIREMENTS["pro_keys"]),
         "execution": {"status": "not_available", "inference_capability": None},
@@ -887,9 +914,14 @@ VOCALS_ACTIVITY_TRAIN_SCHEMA = _object_schema(
     },
     required=("model_id",),
 )
-PRO_EVENT_ATTRIBUTE_TRAIN_SCHEMA = _object_schema(
+PRO_EVENT_CANDIDATE_TRAIN_SCHEMA = _object_schema(
     {
         "model_id": {"type": "string"},
+        "candidate_kind": {
+            "type": "string",
+            "enum": ["known_event_attributes/v1", "free_running_event_proposal/v1"],
+            "default": "known_event_attributes/v1",
+        },
         "epochs": {"type": "integer", "minimum": 1, "default": 25},
         "batch_size": {"type": "integer", "minimum": 1, "default": 32},
         "learning_rate": {"type": "number", "exclusiveMinimum": 0, "default": 0.0003},
@@ -899,6 +931,8 @@ PRO_EVENT_ATTRIBUTE_TRAIN_SCHEMA = _object_schema(
         "max_val_batches": {"type": "integer", "minimum": 0, "default": 0},
         "seed": {"type": "integer", "minimum": 0, "default": 20260822},
         "channels": {"type": "integer", "minimum": 1, "default": 48},
+        "negative_ratio": {"type": "integer", "minimum": 1, "maximum": 32, "default": 4},
+        "negative_exclusion_ms": {"type": "integer", "minimum": 0, "maximum": 5000, "default": 80},
     },
     required=("model_id",),
 )
@@ -1310,7 +1344,7 @@ PIPELINES = (
                 }
             ),
             train_schema=(
-                PRO_EVENT_ATTRIBUTE_TRAIN_SCHEMA
+                PRO_EVENT_CANDIDATE_TRAIN_SCHEMA
                 if task_kind in PRO_TRAINING_CONTRACTS
                 else FRET_MAPPER_TRAIN_SCHEMA
                 if task_kind.startswith("fret_mapper_")
@@ -4233,12 +4267,6 @@ def run_training_request(request_path: Path) -> dict[str, object]:
         "strum.instrument-chart/pro-bass/v1",
         "strum.instrument-chart/pro-keys/v1",
     }:
-        from src.pro_event_worker_training import (  # noqa: PLC0415
-            ProEventTrainingError,
-            ProEventTrainingOptions,
-            run_catalog_pro_event_training,
-        )
-
         if "parent_bundle" in request:
             raise WorkerRequestError("Pro event candidate training does not accept parent_bundle")
         catalog_root = request.get("catalog_root")
@@ -4246,24 +4274,67 @@ def run_training_request(request_path: Path) -> dict[str, object]:
             raise WorkerRequestError(
                 "Pro event candidate training requires worker-local catalog_root"
             )
+        raw_options = dict(request["options"])
+        candidate_kind = raw_options.pop("candidate_kind", "known_event_attributes/v1")
+        if candidate_kind not in {"known_event_attributes/v1", "free_running_event_proposal/v1"}:
+            raise WorkerRequestError("Pro event candidate kind is invalid")
         try:
-            options = ProEventTrainingOptions.from_mapping(request["options"])
             revision, dirty = _revision()
-            result = run_catalog_pro_event_training(
-                task_view_path=Path(request["task_view"]),
-                output_dir=Path(request["output"]),
-                catalog_root=Path(catalog_root),
-                pipeline_id=pipeline_id,
-                options=options,
-                strum_revision=revision,
-                strum_source_dirty=dirty,
-            )
+            if candidate_kind == "known_event_attributes/v1":
+                from src.pro_event_worker_training import (  # noqa: PLC0415
+                    ProEventTrainingOptions,
+                    run_catalog_pro_event_training,
+                )
+
+                # A renderer may submit every descriptor default.  Proposal
+                # sampling defaults carry no meaning for the historical
+                # known-event candidate, but non-default values must not be
+                # silently misrepresented as having been used.
+                for key, default in (("negative_ratio", 4), ("negative_exclusion_ms", 80)):
+                    value = raw_options.pop(key, default)
+                    if value != default:
+                        raise WorkerRequestError(
+                            "Pro proposal sampling options require free_running_event_proposal/v1"
+                        )
+                options = ProEventTrainingOptions.from_mapping(raw_options)
+                result = run_catalog_pro_event_training(
+                    task_view_path=Path(request["task_view"]),
+                    output_dir=Path(request["output"]),
+                    catalog_root=Path(catalog_root),
+                    pipeline_id=pipeline_id,
+                    options=options,
+                    strum_revision=revision,
+                    strum_source_dirty=dirty,
+                )
+                required_components = descriptor.checkpoint_outputs
+            else:
+                from src.pro_event_proposal_worker_training import (  # noqa: PLC0415
+                    ProEventProposalTrainingOptions,
+                    run_catalog_pro_event_proposal_training,
+                )
+
+                options = ProEventProposalTrainingOptions.from_mapping(raw_options)
+                result = run_catalog_pro_event_proposal_training(
+                    task_view_path=Path(request["task_view"]),
+                    output_dir=Path(request["output"]),
+                    catalog_root=Path(catalog_root),
+                    pipeline_id=pipeline_id,
+                    options=options,
+                    strum_revision=revision,
+                    strum_source_dirty=dirty,
+                )
+                component_id = result.get("component_id")
+                if not isinstance(component_id, str):
+                    raise WorkerRequestError(
+                        "Pro proposal candidate omitted its component identity"
+                    )
+                required_components = (component_id,)
             preflight = preflight_bundle(
-                result["bundle_dir"], required_components=descriptor.checkpoint_outputs
+                result["bundle_dir"], required_components=required_components
             )
         except (BundleValidationError, CatalogValidationError):
             raise
-        except (ProEventTrainingError, OSError, TypeError, ValueError) as error:
+        except (OSError, TypeError, ValueError) as error:
             raise WorkerRequestError(
                 "Pro event candidate training request failed validation or execution"
             ) from error
