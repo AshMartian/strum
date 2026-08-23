@@ -102,10 +102,12 @@ presented as a successful OCTAVE auto-chart result.
   while materializing log-mel caches, and packages a hash-verified
   `section_classifier.{instrument}` component with no inference profile. The
   artifact records the exact legacy `SectionRouter` librosa frontend contract
-  rather than relying on matching mel dimensions and labels. Promotion still
-  requires a tensor-only profile loader, held-out calibration, router-on/off
-  chart-impact evaluation, and composition with a concrete Guitar or Bass
-  auto-chart profile.
+  rather than relying on matching mel dimensions and labels. A strict
+  tensor-only candidate loader and validation-calibrated, test-only
+  `section.classifier-evaluation/v1` profile are now available for evidence
+  collection only. Promotion still requires a router-on/off chart-impact
+  ablation, composition with a concrete Guitar or Bass auto-chart profile,
+  and a registered chart-execution handler.
 - ✅ A catalog-worker Drums V2 experiment can be integrity-packaged as
   `drums.onset-classifier-evaluation/v1`. Its hash-verified runtime accepts
   only STRUM's prepared onset windows and returns eight class probabilities;

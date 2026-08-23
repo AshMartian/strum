@@ -4031,6 +4031,37 @@ def _parse_args() -> argparse.Namespace:
     keys_package.add_argument("--fret-thresholds", help="JSON array of exactly five values")
     keys_package.add_argument("--note-duration-ms", type=float, default=100.0)
     keys_package.add_argument("--json", action="store_true")
+    section = commands.add_parser(
+        "section", help="calibrate and package SectionClassifier evaluation profiles"
+    )
+    section_commands = section.add_subparsers(dest="section_command", required=True)
+    section_profile = section_commands.add_parser(
+        "profile", help="manage non-executable Section classifier profiles"
+    )
+    section_profile_commands = section_profile.add_subparsers(
+        dest="section_profile_command", required=True
+    )
+    section_evaluate = section_profile_commands.add_parser(
+        "evaluate", help="calibrate on validation and evaluate held-out test windows"
+    )
+    section_evaluate.add_argument("--bundle-root", type=Path, required=True)
+    section_evaluate.add_argument("--task-view", type=Path, required=True)
+    section_evaluate.add_argument("--catalog-root", type=Path, required=True)
+    section_evaluate.add_argument("--output", type=Path, required=True)
+    section_evaluate.add_argument("--instrument", choices=("guitar", "bass"), required=True)
+    section_evaluate.add_argument("--device", choices=("cpu", "cuda", "mps"), default="cpu")
+    section_evaluate.add_argument("--json", action="store_true")
+    section_package = section_profile_commands.add_parser(
+        "package", help="package a held-out Section evaluator, never a chart profile"
+    )
+    section_package.add_argument("--experiment", type=Path, required=True)
+    section_package.add_argument("--evaluation", type=Path, required=True)
+    section_package.add_argument("--output", type=Path, required=True)
+    section_package.add_argument("--profile", required=True)
+    section_package.add_argument("--instrument", choices=("guitar", "bass"), required=True)
+    section_package.add_argument("--minimum-accuracy", type=float, required=True)
+    section_package.add_argument("--maximum-expected-calibration-error", type=float, required=True)
+    section_package.add_argument("--json", action="store_true")
     model = commands.add_parser("model", help="inspect model bundles")
     model_commands = model.add_subparsers(dest="model_command", required=True)
     preflight = model_commands.add_parser("preflight", help="validate a deployable model bundle")
@@ -4263,6 +4294,42 @@ def main() -> int:
                 )
             except KeysProfilePackagingError as error:
                 raise WorkerRequestError("Keys profile packaging request is invalid") from error
+            return 0
+        if args.command == "section" and args.section_command == "profile":
+            from src.section_profile_evaluation import (  # noqa: PLC0415
+                SectionProfileEvaluationError,
+                evaluate_section_candidate,
+                package_section_evaluation_profile,
+            )
+
+            try:
+                if args.section_profile_command == "evaluate":
+                    _print_json(
+                        evaluate_section_candidate(
+                            bundle_root=args.bundle_root,
+                            task_view_path=args.task_view,
+                            catalog_root=args.catalog_root,
+                            output_path=args.output,
+                            instrument=args.instrument,
+                            device=args.device,
+                        )
+                    )
+                else:
+                    _print_json(
+                        package_section_evaluation_profile(
+                            experiment_dir=args.experiment,
+                            evaluation_path=args.evaluation,
+                            output_dir=args.output,
+                            profile_id=args.profile,
+                            instrument=args.instrument,
+                            minimum_accuracy=args.minimum_accuracy,
+                            maximum_expected_calibration_error=(
+                                args.maximum_expected_calibration_error
+                            ),
+                        )
+                    )
+            except SectionProfileEvaluationError as error:
+                raise WorkerRequestError("Section profile request is invalid") from error
             return 0
         if args.command == "model" and args.model_command == "preflight":
             _print_json(
