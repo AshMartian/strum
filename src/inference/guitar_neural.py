@@ -13,9 +13,10 @@ from __future__ import annotations
 
 import logging
 import sys
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Any
 
 import numpy as np
 import torch
@@ -26,12 +27,15 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from src.models.guitar_v1 import (  # noqa: E402
-    GuitarOnsetCRNN, GuitarFretClassifier,
-    OnsetCRNNConfig, FretClassifierConfig,
-)
-from src.model_bundle import get_active_bundle  # noqa: E402
 import preprocess_guitar_windows as pgw  # noqa: E402
+
+from src.model_bundle import BundleValidationError, ModelBundle, get_active_bundle  # noqa: E402
+from src.models.guitar_v1 import (  # noqa: E402
+    FretClassifierConfig,
+    GuitarFretClassifier,
+    GuitarOnsetCRNN,
+    OnsetCRNNConfig,
+)
 
 log = logging.getLogger("guitar_neural")
 
@@ -59,29 +63,86 @@ class GuitarNeuralCharter:
         fret_ckpt: Path,
         config_path: Path = ROOT / "configs" / "guitar_v2.yaml",
         device: str | None = None,
+        *,
+        config: Mapping[str, Any] | None = None,
     ):
-        self.cfg = yaml.safe_load(open(config_path))
+        if config is None:
+            try:
+                with config_path.open(encoding="utf-8") as source:
+                    config = yaml.safe_load(source)
+            except (OSError, yaml.YAMLError) as error:
+                raise BundleValidationError("Guitar neural configuration is unreadable") from error
+        if not isinstance(config, Mapping):
+            raise BundleValidationError("Guitar neural configuration must be an object")
+        self.cfg = dict(config)
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 
         # Stage 1
-        ocfg = OnsetCRNNConfig(**self.cfg["onset"]["model"])
+        try:
+            ocfg = OnsetCRNNConfig(**self.cfg["onset"]["model"])
+            fcfg = FretClassifierConfig(**self.cfg["fret"]["model"])
+            inf = self.cfg["onset"]["inference"]
+        except (KeyError, TypeError) as error:
+            raise BundleValidationError("Guitar neural configuration is incomplete") from error
         self.onset = GuitarOnsetCRNN(ocfg).to(self.device).eval()
-        ck = torch.load(onset_ckpt, map_location=self.device, weights_only=False)
-        self.onset.load_state_dict(ck["state_dict"])
+        ck = self._load_checkpoint(onset_ckpt, "onset")
+        self.onset.load_state_dict(ck["state_dict"], strict=True)
         self.onset_meta = {"epoch": ck.get("epoch"), "val_f1": ck.get("val_f1")}
 
         # Stage 2
-        fcfg = FretClassifierConfig(**self.cfg["fret"]["model"])
         self.fret = GuitarFretClassifier(fcfg).to(self.device).eval()
-        ck = torch.load(fret_ckpt, map_location=self.device, weights_only=False)
-        self.fret.load_state_dict(ck["state_dict"])
+        ck = self._load_checkpoint(fret_ckpt, "fret")
+        self.fret.load_state_dict(ck["state_dict"], strict=True)
         self.fret_meta = {"epoch": ck.get("epoch"), "val_f1": ck.get("val_f1")}
 
         # Inference hyperparams (config defaults; override at call time)
-        inf = self.cfg["onset"]["inference"]
-        self.default_onset_thr = float(inf["peak_threshold"])
-        self.default_min_dist_frames = int(inf["peak_min_distance_frames"])
+        try:
+            self.default_onset_thr = float(inf["peak_threshold"])
+            self.default_min_dist_frames = int(inf["peak_min_distance_frames"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise BundleValidationError("Guitar neural inference configuration is invalid") from error
         self.default_fret_thr = 0.5
+
+    @staticmethod
+    def _load_checkpoint(path: Path, stage: str) -> dict[str, Any]:
+        """Load the trainer's tensor-only checkpoint format without pickle."""
+        try:
+            raw = torch.load(path, map_location="cpu", weights_only=True)
+        except Exception as error:  # torch may raise pickle-specific load errors.
+            raise BundleValidationError(f"Guitar {stage} checkpoint cannot be safely loaded") from error
+        if not isinstance(raw, dict) or not isinstance(raw.get("state_dict"), dict):
+            raise BundleValidationError(f"Guitar {stage} checkpoint has no tensor state dict")
+        if not all(isinstance(name, str) and isinstance(value, torch.Tensor) for name, value in raw["state_dict"].items()):
+            raise BundleValidationError(f"Guitar {stage} checkpoint state dict is invalid")
+        return raw
+
+    @classmethod
+    def from_bundle_profile(
+        cls,
+        bundle: ModelBundle,
+        profile: Any,
+        *,
+        device: str | None,
+    ) -> GuitarNeuralCharter:
+        """Construct only from a typed profile and its declared components."""
+        onset, fret = bundle.component(profile.onset_component), bundle.component(profile.fret_component)
+        if onset is None or fret is None or onset.checkpoint is None or fret.checkpoint is None:
+            raise BundleValidationError("Guitar neural profile components are incomplete")
+        return cls(
+            onset.checkpoint,
+            fret.checkpoint,
+            device=device,
+            config={
+                "onset": {
+                    "model": dict(profile.onset_model),
+                    "inference": {
+                        "peak_threshold": profile.onset_threshold,
+                        "peak_min_distance_frames": profile.peak_min_distance_frames,
+                    },
+                },
+                "fret": {"model": dict(profile.fret_model)},
+            },
+        )
 
     # ─── Mel ────────────────────────────────────────────────────────────────
     def compute_logmel(self, audio: np.ndarray) -> torch.Tensor:
@@ -138,7 +199,6 @@ class GuitarNeuralCharter:
         n_mels, T = log_mel.shape
         win_before_samp = pgw.WIN_BEFORE_SAMP
         win_frames = pgw.WIN_FRAMES
-        sample_rate = pgw.SAMPLE_RATE
         hop = pgw.HOP_LENGTH
 
         N = len(onset_frames)
@@ -176,10 +236,10 @@ class GuitarNeuralCharter:
     def transcribe(
         self,
         audio: np.ndarray,
-        onset_threshold: Optional[float] = None,
-        min_distance_frames: Optional[int] = None,
-        fret_threshold: Optional[float] = None,
-        fret_thresholds_per_bit: Optional["np.ndarray | list[float]"] = None,
+        onset_threshold: float | None = None,
+        min_distance_frames: int | None = None,
+        fret_threshold: float | None = None,
+        fret_thresholds_per_bit: np.ndarray | list[float] | None = None,
     ) -> list[GuitarEvent]:
         """Full audio → list[GuitarEvent].
 
@@ -250,7 +310,8 @@ def export_events_to_midi(
     track.append(mido.MetaMessage("set_tempo", tempo=tempo_us))
 
     tpb = mid.ticks_per_beat
-    sec_to_tick = lambda s: int(round(s * tempo_bpm / 60.0 * tpb))
+    def sec_to_tick(seconds: float) -> int:
+        return int(round(seconds * tempo_bpm / 60.0 * tpb))
 
     msgs: list[tuple[int, bool, int]] = []
     for ev in events:
@@ -297,10 +358,10 @@ _DEFAULT_FRET_THRESHOLDS = (0.30, 0.75, 0.475, 0.625, 0.65)
 _DEFAULT_ONSET_THRESHOLD = 0.35  # tuned with the per-bit sweep above
 
 # Singleton — Demucs-style; loading the two CRNNs is non-trivial.
-_CHARTER_CACHE: dict[str, "GuitarNeuralCharter"] = {}
+_CHARTER_CACHE: dict[str, GuitarNeuralCharter] = {}
 
 
-def _get_charter(device: str | None = None) -> "GuitarNeuralCharter":
+def _get_charter(device: str | None = None) -> GuitarNeuralCharter:
     key = device or "auto"
     ch = _CHARTER_CACHE.get(key)
     if ch is None:
@@ -314,7 +375,7 @@ def _get_charter(device: str | None = None) -> "GuitarNeuralCharter":
 
 
 def transcribe_guitar_neural(
-    audio_path: "Path | str",
+    audio_path: Path | str,
     tempo_bpm: float = 0.0,
     confidence_threshold: float | None = None,
     is_bass: bool = False,
@@ -333,7 +394,8 @@ def transcribe_guitar_neural(
         device:     "cuda" / "cpu" / None (auto).
     """
     import librosa as _lr
-    from src.inference.guitar_bass import GuitarChart, GuitarNote, GuitarChord
+
+    from src.inference.guitar_bass import GuitarChart, GuitarChord, GuitarNote
 
     audio_path = Path(audio_path)
     audio, sr = _lr.load(str(audio_path), sr=22050, mono=True)

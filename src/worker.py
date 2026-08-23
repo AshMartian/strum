@@ -188,7 +188,7 @@ PIPELINES = (
         prepare_schema=_object_schema(CATALOG_AUDIO_OPTIONS),
         train_schema=GUITAR_TRAIN_SCHEMA,
         checkpoint_outputs=("guitar.onset", "guitar.fret"),
-        inference_capability="guitar.audio_to_chart/v1",
+        inference_capability="guitar.neural-v1-expert/v1",
         status="catalog_ready",
         preparation_status="available",
         training_status="available",
@@ -589,6 +589,7 @@ def _chart_execution_available(
     """Return true only for a worker handler with matching single-stage semantics."""
     expected = {
         "guitar.hybrid-v2-rule/v1": ("guitar", "expert_only"),
+        "guitar.neural-v1-expert/v1": ("guitar", "expert_only"),
         "drums.v14-expert/v1": ("drums", "expert_only"),
     }
     if capability == "difficulty.transform/v1":
@@ -659,7 +660,7 @@ def preflight_chart_request(request_path: Path) -> dict[str, object]:
     )
     if not set(instruments) <= set(plan["instruments"]):
         raise WorkerRequestError("profile does not cover requested instruments")
-    profile_configuration_sha256 = None
+    profile_configuration_sha256 = plan["profile_configuration_sha256"]
     transform_instrument = None
     transform_target_difficulty = None
     if plan["capability"] == "guitar.hybrid-v2-rule/v1":
@@ -669,6 +670,14 @@ def preflight_chart_request(request_path: Path) -> dict[str, object]:
 
         bundle = load_model_bundle(raw["model_root"], check_files=True)
         typed = load_guitar_hybrid_rule_profile(bundle, raw["profile_id"])
+        profile_configuration_sha256 = typed.configuration_sha256
+    elif plan["capability"] == "guitar.neural-v1-expert/v1":
+        from src.inference.guitar_neural_profile import (  # noqa: PLC0415
+            load_guitar_neural_expert_profile,
+        )
+
+        bundle = load_model_bundle(raw["model_root"], check_files=True)
+        typed = load_guitar_neural_expert_profile(bundle, raw["profile_id"])
         profile_configuration_sha256 = typed.configuration_sha256
     elif plan["capability"] == "drums.v14-expert/v1":
         from src.inference.drums_v14_profile import (  # noqa: PLC0415
@@ -737,7 +746,8 @@ def _read_chart_run_request(request_path: Path, capability: str) -> dict[str, An
         raise WorkerRequestError("chart run request is unreadable or not valid JSON") from error
     expected = (
         {"preflight_request", "audio_path", "output_dir"}
-        if capability in {"guitar.hybrid-v2-rule/v1", "drums.v14-expert/v1"}
+        if capability
+        in {"guitar.hybrid-v2-rule/v1", "guitar.neural-v1-expert/v1", "drums.v14-expert/v1"}
         else {"preflight_request", "source_midi_path", "song_path", "output_dir", "threshold"}
     )
     if not isinstance(raw, dict) or set(raw) != expected:
@@ -987,6 +997,71 @@ def run_chart_request(request_path: Path) -> dict[str, object]:
                 "output_name": midi_path.name,
                 "expert_event_count": len(chart.notes) + len(chart.chords),
             }
+        elif plan["capability"] == "guitar.neural-v1-expert/v1":
+            audio_path = Path(request["audio_path"])
+            if not audio_path.is_file():
+                raise WorkerRequestError("chart input audio is unavailable")
+            from scripts.preprocess_guitar_windows import load_audio_mono_22050  # noqa: PLC0415
+            from src.inference.guitar_bass import (  # noqa: PLC0415
+                GuitarChart,
+                GuitarChord,
+                GuitarNote,
+            )
+            from src.inference.guitar_neural import GuitarNeuralCharter  # noqa: PLC0415
+            from src.inference.guitar_neural_profile import (  # noqa: PLC0415
+                load_guitar_neural_expert_profile,
+            )
+
+            audio = load_audio_mono_22050(audio_path)
+            if audio is None:
+                raise WorkerRequestError("chart input audio is unreadable")
+            profile = load_guitar_neural_expert_profile(bundle, preflight_raw["profile_id"])
+            events = _run_without_legacy_output(
+                lambda: GuitarNeuralCharter.from_bundle_profile(
+                    bundle, profile, device=plan["device"]
+                ).transcribe(
+                    audio,
+                    onset_threshold=profile.onset_threshold,
+                    min_distance_frames=profile.peak_min_distance_frames,
+                    fret_thresholds_per_bit=profile.fret_thresholds,
+                )
+            )
+            chart = GuitarChart(tempo_bpm=120.0, instrument="guitar")
+            for event in events:
+                if len(event.frets) >= 2:
+                    chart.chords.append(
+                        GuitarChord(
+                            time_ms=event.time_sec * 1000.0,
+                            frets=list(event.frets),
+                            duration_ms=profile.note_duration_ms,
+                        )
+                    )
+                elif event.frets:
+                    chart.notes.append(
+                        GuitarNote(
+                            time_ms=event.time_sec * 1000.0,
+                            fret=event.frets[0],
+                            duration_ms=profile.note_duration_ms,
+                        )
+                    )
+            midi_path = output_dir / "notes.mid"
+            _write_expert_guitar_midi(chart, midi_path)
+            artifacts = {"notes_midi": {"name": midi_path.name, "sha256": _sha256(midi_path)}}
+            stages = {
+                "guitar_neural": {
+                    "status": "succeeded",
+                    "expert_event_count": len(events),
+                    "evaluation_sha256": profile.evaluation_sha256,
+                }
+            }
+            _complete_chart_stage(
+                instrument_results,
+                difficulty,
+                instrument="guitar",
+                stage_name="expert_chart",
+                artifact_ids=("notes_midi",),
+            )
+            response = {"output_name": midi_path.name, "expert_event_count": len(events)}
         elif plan["capability"] == "drums.v14-expert/v1":
             audio = Path(request["audio_path"])
             if not audio.is_file():
@@ -1951,6 +2026,36 @@ def _parse_args() -> argparse.Namespace:
     )
     training_start.add_argument("--request", type=Path, required=True)
     training_start.add_argument("--json-events", action="store_true")
+    guitar = commands.add_parser("guitar", help="evaluate and package Guitar V1 profiles")
+    guitar_commands = guitar.add_subparsers(dest="guitar_command", required=True)
+    guitar_profile = guitar_commands.add_parser("profile", help="manage Guitar neural profiles")
+    guitar_profile_commands = guitar_profile.add_subparsers(
+        dest="guitar_profile_command", required=True
+    )
+    guitar_evaluate = guitar_profile_commands.add_parser(
+        "evaluate", help="evaluate an un-packaged catalog-trained Guitar pair"
+    )
+    guitar_evaluate.add_argument("--bundle-root", type=Path, required=True)
+    guitar_evaluate.add_argument("--task-view", type=Path, required=True)
+    guitar_evaluate.add_argument("--catalog-root", type=Path, required=True)
+    guitar_evaluate.add_argument("--output", type=Path, required=True)
+    guitar_evaluate.add_argument("--device", choices=("cpu", "cuda", "mps"), default="cpu")
+    guitar_evaluate.add_argument("--tolerance-ms", type=float, default=50.0)
+    guitar_evaluate.add_argument("--limit-songs", type=int, default=0)
+    guitar_evaluate.add_argument("--json", action="store_true")
+    guitar_package = guitar_profile_commands.add_parser(
+        "package", help="copy an evaluated Guitar experiment into a deployable bundle"
+    )
+    guitar_package.add_argument("--experiment", type=Path, required=True)
+    guitar_package.add_argument("--evaluation", type=Path, required=True)
+    guitar_package.add_argument("--output", type=Path, required=True)
+    guitar_package.add_argument("--profile", required=True)
+    guitar_package.add_argument("--minimum-onset-f1", type=float, required=True)
+    guitar_package.add_argument("--minimum-fret-f1", type=float, required=True)
+    guitar_package.add_argument("--onset-threshold", type=float)
+    guitar_package.add_argument("--fret-thresholds", help="JSON array of exactly five values")
+    guitar_package.add_argument("--note-duration-ms", type=float, default=100.0)
+    guitar_package.add_argument("--json", action="store_true")
     model = commands.add_parser("model", help="inspect model bundles")
     model_commands = model.add_subparsers(dest="model_command", required=True)
     preflight = model_commands.add_parser("preflight", help="validate a deployable model bundle")
@@ -2028,6 +2133,54 @@ def main() -> int:
                     args.request, "training", lambda: run_training_request(args.request)
                 )
             _print_json(run_training_request(args.request))
+            return 0
+        if args.command == "guitar" and args.guitar_command == "profile":
+            from src.guitar_profile_packaging import (  # noqa: PLC0415
+                GuitarProfilePackagingError,
+                evaluate_guitar_candidate,
+                package_guitar_profile,
+            )
+
+            if args.guitar_profile_command == "evaluate":
+                try:
+                    _print_json(
+                        evaluate_guitar_candidate(
+                            bundle_root=args.bundle_root,
+                            task_view_path=args.task_view,
+                            catalog_root=args.catalog_root,
+                            output_path=args.output,
+                            device=args.device,
+                            tolerance_ms=args.tolerance_ms,
+                            limit_songs=args.limit_songs,
+                        )
+                    )
+                except GuitarProfilePackagingError as error:
+                    raise WorkerRequestError("Guitar profile evaluation request is invalid") from error
+                return 0
+            try:
+                fret_thresholds = (
+                    tuple(json.loads(args.fret_thresholds))
+                    if args.fret_thresholds is not None
+                    else None
+                )
+            except json.JSONDecodeError as error:
+                raise WorkerRequestError("Guitar fret thresholds are invalid JSON") from error
+            try:
+                _print_json(
+                    package_guitar_profile(
+                        experiment_dir=args.experiment,
+                        evaluation_path=args.evaluation,
+                        output_dir=args.output,
+                        profile_id=args.profile,
+                        minimum_onset_f1=args.minimum_onset_f1,
+                        minimum_fret_f1=args.minimum_fret_f1,
+                        onset_threshold=args.onset_threshold,
+                        fret_thresholds=fret_thresholds,
+                        note_duration_ms=args.note_duration_ms,
+                    )
+                )
+            except GuitarProfilePackagingError as error:
+                raise WorkerRequestError("Guitar profile packaging request is invalid") from error
             return 0
         if args.command == "model" and args.model_command == "preflight":
             _print_json(

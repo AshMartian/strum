@@ -141,6 +141,12 @@ def test_guitar_worker_trains_from_catalog_task_view_and_packages_provenance(
     experiment_data = json.loads(experiment)
     assert experiment_data["task_view"]["catalog_id"] == "guitar-training-fixture"
     assert experiment_data["deployment_status"] == "requires_profile_packaging"
+    portable_config = json.loads(
+        (bundle / "configs" / "guitar-training-config.json").read_text()
+    )
+    assert portable_config["format"] == "strum-guitar-neural-model-config/v1"
+    assert portable_config["audio"]["sample_rate"] == 22050
+    assert portable_config["onset_inference"]["peak_min_distance_frames"] == 3
 
 
 def test_guitar_pipeline_advertises_a_strict_worker_training_schema() -> None:

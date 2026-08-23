@@ -383,6 +383,35 @@ than requiring STRUM to retain a private-path job. A model folder is validated
 separately from a STRUM runtime with `checkpoint inspect`, `inference profile
 validate`, `chart preflight`, and `chart run`.
 
+### Guitar V1 deployment gate
+
+`guitar.onset-fret/v1` produces an experiment bundle, not an auto-chart
+profile. To deploy a newly trained pair, STRUM first revalidates the selected
+catalog task view and measures its validation split, then copies the verified
+experiment into a separate immutable profile bundle:
+
+```bash
+strum-worker guitar profile evaluate \
+  --bundle-root /private/experiment/bundle \
+  --task-view /private/task-view.json \
+  --catalog-root /private/catalog \
+  --output /private/evaluation.json --device cuda
+
+strum-worker guitar profile package \
+  --experiment /private/experiment \
+  --evaluation /private/evaluation.json \
+  --output /private/deployable-guitar-v1 \
+  --profile guitar-v1-expert \
+  --minimum-onset-f1 0.50 --minimum-fret-f1 0.50
+```
+
+Packaging copies, rather than mutates, the experiment; freezes the exact
+22.05 kHz / 128-mel configuration and inference thresholds; and supports only
+Expert Guitar. `chart run` loads only tensor state dictionaries whose component
+and evaluation hashes were preflighted. Older Guitar experiments without the
+portable `strum-guitar-neural-model-config/v1` component configuration are
+intentionally not packageable and should be retrained.
+
 ## 11. Hardware
 
 Developed on NVIDIA DGX Spark (GB10 GPU, CUDA 12.8). Inference runs in

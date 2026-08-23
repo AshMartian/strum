@@ -10,7 +10,7 @@ auto-chart handler.
 
 | Family | Catalog task view | Worker training | Executable worker profile |
 | --- | --- | --- | --- |
-| Guitar onset + fret | Available | Available; experiment-only | `guitar.hybrid-v2-rule/v1`, Expert only |
+| Guitar onset + fret | Available | Available; experiment-only | `guitar.hybrid-v2-rule/v1`, or evaluated `guitar.neural-v1-expert/v1`; Expert only |
 | Drums onset + classifier | Available | Available; V2 evaluation package | `drums.v14-expert/v1` direct Expert charts; V2 is evaluation-only |
 | Five-lane difficulty transform (Guitar/Bass/Keys/Drums) | Available | Available | `difficulty.transform/v1` |
 | Bass / Keys / Vocals / Pro Guitar / Pro Bass / Pro Keys | Available | Planned | Planned |
@@ -45,9 +45,10 @@ presented as a successful OCTAVE auto-chart result.
   Guitar, Bass, Keys, and Drums, including explicit Expert → lower-difficulty
   provenance.
 - ✅ Catalog-backed, worker-trainable Guitar onset/fret and Drums onset
-  classifier experiments. Both reuse their established preprocessing/trainers,
-  record path-free provenance, and remain non-deployable until a compatible
-  auto-chart profile is explicitly packaged and validated.
+  classifier experiments. Both reuse their established preprocessing/trainers
+  and record path-free provenance. Guitar V1 has an explicit validation and
+  packaging path; its raw experiment remains non-deployable until a separate
+  Expert-only profile bundle passes that path.
 - ✅ A catalog-worker Drums V2 experiment can be integrity-packaged as
   `drums.onset-classifier-evaluation/v1`. Its hash-verified runtime accepts
   only STRUM's prepared onset windows and returns eight class probabilities;
@@ -58,11 +59,13 @@ presented as a successful OCTAVE auto-chart result.
 
 ## Next worker milestones
 
-1. Package and evaluate compatible Guitar auto-chart profiles, and establish
-   a complete, evaluated Drums onset-plus-classifier profile if one is trained
-   and validated as a single execution contract. The current V2 Drums package
-   is intentionally Stage-2 evaluation only; it must not be promoted solely
-   because its checkpoint file exists.
+1. Calibrate/evaluate Guitar V1 on a useful held-out catalog and establish a
+   complete evaluated Drums onset-plus-classifier profile if one is trained as
+   a single execution contract. Guitar's packaging path verifies architecture,
+   preprocessing, component hashes, tensor-only state dictionaries, and a
+   revalidated validation report. The current V2 Drums package is intentionally
+   Stage-2 evaluation only; neither artifact is promoted solely because its
+   checkpoint exists.
 2. Replace the remaining legacy auto-chart assembly behavior with declared,
    component-level bundle requirements and typed stage graphs. The current
    typed manifests cover each executable single-profile run; the full

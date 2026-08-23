@@ -158,9 +158,12 @@ def _write_training_config(
     config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
     portable = {
         "schema_version": 1,
-        "format": "strum-guitar-training-config/v1",
-        "pipeline_id": PIPELINE_ID,
+        # This is intentionally an inference-compatible, path-free subset of
+        # the worker-local YAML.  Profile packaging verifies it byte-for-byte
+        # for both components instead of guessing defaults from the checkout.
+        "format": "strum-guitar-neural-model-config/v1",
         "preprocessing": PREPROCESSING_ID,
+        "audio": config.get("audio"),
         "onset_model": config.get("onset", {}).get("model"),
         "fret_model": config.get("fret", {}).get("model"),
         "onset_inference": config.get("onset", {}).get("inference"),
