@@ -732,7 +732,10 @@ execution.
 STRUM also publishes a distinct `lead_only_candidate_contract` under the
 planned Vocal descriptor. It is deliberately **not** a reduced Vocal profile:
 it accepts and could eventually emit only `PART VOCALS`, contains no Harmony
-inputs or outputs, and remains `not_deployable` even if its evidence passes.
+inputs or outputs, and remains `not_deployable`. Its current public report
+checker is schema-only: caller-provided 40/10/10 counts and source-hash strings
+are not admission evidence, so its aggregate result is always non-admitting
+until STRUM implements a private catalog/task-view resolver.
 It records the smallest honest route for developing the lead event composer
 before OCTAVE has isolated Harmony material.
 
@@ -742,7 +745,9 @@ tensor-only component loader; pitched-frame-to-note, phrase-boundary,
 timestamped-CTC-lyric, and talky-span decoders; a `PART VOCALS` MIDI assembler;
 and a STRUM-recomputed held-out evaluator. It cannot use the legacy charter,
 external lyrics, a component selected by filename, implicit Harmony output, or
-any runtime fallback.
+any runtime fallback. The future evaluator must resolve the selected task views
+and catalog itself to compute label coverage and prove train/validation/test
+source disjointness; distinct claimed SHA-256 strings do not prove either fact.
 
 Before that candidate may be evaluated, the pinned lead data gate requires
 source-disjoint splits of at least 40/10/10 train/validation/test songs, with

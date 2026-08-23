@@ -4,9 +4,12 @@ This is intentionally smaller than :mod:`src.vocal_profile_contract`: it
 describes ``PART VOCALS`` only and has no HARM-track inputs or outputs.  It is
 not a chart runtime, model loader, event decoder, evaluator, package writer,
 or deployable profile.  The four current catalog workers produce independent
-experiments; a future implementation can use this module to prove that a
-proposed lead composition has enough compatible, source-disjoint evidence
-before it is even considered for a full Vocal profile.
+experiments. This module is only a public report-schema checker until STRUM
+has a private catalog/task-view resolver. A report can claim source counts and
+hashes, but cannot prove that they came from the selected catalog or that its
+source sets are disjoint. The checker therefore never admits a candidate; a
+future implementation must recompute that evidence from revalidated catalog
+assets before it can be considered for a full Vocal profile.
 
 The 3-song curated smoke views cannot meet this contract.  In particular,
 they have no test split and the current CTC lyric component has no timestamp
@@ -115,7 +118,7 @@ def vocal_lead_candidate_data_gate_definition() -> dict[str, object]:
 
 
 def vocal_lead_candidate_data_gate_identity() -> dict[str, object]:
-    """Return the hash-pinned identity a report must carry for data admission."""
+    """Return the pinned data-gate identity a report must declare."""
     gate = vocal_lead_candidate_data_gate_definition()
     return {
         "format": gate["format"],
@@ -127,8 +130,9 @@ def vocal_lead_candidate_data_gate_identity() -> dict[str, object]:
 def vocal_lead_candidate_contract_definition() -> dict[str, object]:
     """Describe the exact, planned lead-only candidate boundary.
 
-    A successful quality result remains deliberately non-deployable.  The
-    missing decoder/loader/evaluator stages must be implemented and registered
+    A public report satisfying this module's schema remains deliberately
+    non-admissible and non-deployable. The missing catalog/task-view resolver,
+    decoder/loader/evaluator stages must be implemented and registered
     separately; this contract is not permission to call the legacy charter.
     """
     return {
@@ -166,9 +170,11 @@ def vocal_lead_candidate_contract_definition() -> dict[str, object]:
             "ctc-lyric-timestamp-decoder/v1",
             "talky-frame-to-span-decoder/v1",
             "part-vocals-midi-assembler/v1",
+            "strum-owned-lead-catalog-task-admission-resolver/v1",
             "strum-recomputed-lead-held-out-evaluator/v1",
         ],
         "catalog_admission": {
+            "status": "not_available_without-strum-catalog-task-revalidation/v1",
             "required_splits": list(_SPLITS),
             "data_gate": {
                 **vocal_lead_candidate_data_gate_identity(),
@@ -179,6 +185,7 @@ def vocal_lead_candidate_contract_definition() -> dict[str, object]:
         "held_out_evaluation": {
             "format": "strum-vocal-lead-held-out-evaluation-report/v1",
             "recomputed_by": "strum",
+            "public_report_checker": "schema-only-never-admits/v1",
             "quality_policy": {
                 **vocal_lead_candidate_quality_policy_identity(),
                 "definition": vocal_lead_candidate_quality_policy_definition(),
@@ -357,12 +364,13 @@ def _evaluate_metrics(raw: object) -> dict[str, dict[str, dict[str, object]]]:
 
 
 def evaluate_vocal_lead_candidate_report(report: Mapping[str, object]) -> dict[str, object]:
-    """Recompute non-deployable lead-candidate admission and metric outcomes.
+    """Schema-check an untrusted lead-candidate report without admitting it.
 
-    The future evaluator must obtain all input data from revalidated catalog
-    assets; this validator accepts no paths and never loads a checkpoint.
-    Passing outcomes are evidence for a later implementation, *not* profile
-    packaging or chart execution authority.
+    This public function never resolves a catalog, opens a task view, or loads
+    a checkpoint. SHA-shaped strings, claimed source counts, and even distinct
+    claimed split hashes do not prove provenance or source disjointness. Its
+    output records only whether caller claims are complete and compare to the
+    pinned policy; aggregate admission is always false.
     """
     required = {
         "format",
@@ -409,7 +417,7 @@ def evaluate_vocal_lead_candidate_report(report: Mapping[str, object]) -> dict[s
         raise VocalLeadCandidateContractError("split source evidence must be distinct")
     if evidence["source_partition"] != "source-id-disjoint-train-val-test/v1":
         raise VocalLeadCandidateContractError("lead source partition is invalid")
-    data_outcomes = _evaluate_data_coverage(report["data_coverage"])
+    reported_data_coverage = _evaluate_data_coverage(report["data_coverage"])
     metric_outcomes = _evaluate_metrics(report["metrics"])
     assembled = _require_exact_keys(
         report["assembled_chart"],
@@ -424,25 +432,32 @@ def evaluate_vocal_lead_candidate_report(report: Mapping[str, object]) -> dict[s
         )
         for key in policy["assembled_chart"]
     }
-    quality_passed = all(
+    reported_quality_thresholds_met = all(
         item["passed"] for group in metric_outcomes.values() for item in group.values()
     ) and all(item["passed"] for item in assembled_outcomes.values())
     return {
         "format": "strum-vocal-lead-candidate-outcomes/v1",
         "quality_policy": vocal_lead_candidate_quality_policy_identity(),
         "data_gate": vocal_lead_candidate_data_gate_identity(),
-        "evidence": {
-            "component_hashes": component_hashes,
-            "component_configuration_hashes": configuration_hashes,
-            "catalog_control_sha256": catalog_control,
-            "task_view_hashes": task_view_hashes,
-            "split_source_ids_sha256": split_source_hashes,
+        "report_validation": {
+            "status": "schema-only-untrusted-report/v1",
+            "reported_data_coverage": reported_data_coverage,
+            "reported_component_hashes": component_hashes,
+            "reported_component_configuration_hashes": configuration_hashes,
+            "reported_task_view_hashes": task_view_hashes,
+            "reported_catalog_control_sha256": catalog_control,
+            "reported_split_source_ids_sha256": split_source_hashes,
         },
-        "data_admission": data_outcomes,
+        "data_admission": {
+            "status": "unavailable-without-strum-catalog-task-revalidation/v1",
+            "passed": False,
+            "reason": "caller-claimed-counts-and-hashes-are-not-catalog-admission-evidence/v1",
+        },
         "quality": {
-            "metrics": metric_outcomes,
-            "assembled_chart": assembled_outcomes,
-            "passed": quality_passed,
+            "status": "reported-only-not-strum-recomputed/v1",
+            "reported_metrics": metric_outcomes,
+            "reported_assembled_chart": assembled_outcomes,
+            "reported_thresholds_met": reported_quality_thresholds_met,
         },
         "candidate": {
             "status": "not_deployable",
@@ -451,7 +466,8 @@ def evaluate_vocal_lead_candidate_report(report: Mapping[str, object]) -> dict[s
             "fallback": "forbidden",
         },
         "aggregation": {
-            "rule": "data-gate-and-all-required-quality-metrics-pass/v1",
-            "passed": bool(data_outcomes["passed"] and quality_passed),
+            "rule": "public-report-schema-validation-never-admits/v1",
+            "passed": False,
+            "reason": "strum-owned-catalog-task-admission-resolver-not-implemented/v1",
         },
     }

@@ -92,6 +92,12 @@ def test_contract_is_lead_only_planned_and_cannot_deploy() -> None:
         "vocals.talky_activity",
     ]
     assert "ctc-lyric-timestamp-decoder/v1" in definition["required_new_stages"]
+    assert (
+        "strum-owned-lead-catalog-task-admission-resolver/v1" in definition["required_new_stages"]
+    )
+    assert definition["catalog_admission"]["status"] == (
+        "not_available_without-strum-catalog-task-revalidation/v1"
+    )
     assert definition["deployment"] == {
         "status": "not_deployable",
         "profile_package": "forbidden-until-full-vocal-profile-contract/v1",
@@ -102,12 +108,22 @@ def test_contract_is_lead_only_planned_and_cannot_deploy() -> None:
     assert "implicit-harmony-output" in definition["forbidden_shortcuts"]
 
 
-def test_report_recomputes_passing_lead_outcomes_but_remains_nondeployable() -> None:
+def test_synthetic_passing_report_is_schema_only_and_never_admits() -> None:
     outcomes = evaluate_vocal_lead_candidate_report(_passing_report())
 
-    assert outcomes["data_admission"]["passed"] is True
-    assert outcomes["quality"]["passed"] is True
-    assert outcomes["aggregation"]["passed"] is True
+    assert outcomes["report_validation"]["status"] == "schema-only-untrusted-report/v1"
+    assert outcomes["report_validation"]["reported_data_coverage"]["passed"] is True
+    assert outcomes["data_admission"] == {
+        "status": "unavailable-without-strum-catalog-task-revalidation/v1",
+        "passed": False,
+        "reason": "caller-claimed-counts-and-hashes-are-not-catalog-admission-evidence/v1",
+    }
+    assert outcomes["quality"]["reported_thresholds_met"] is True
+    assert outcomes["aggregation"] == {
+        "rule": "public-report-schema-validation-never-admits/v1",
+        "passed": False,
+        "reason": "strum-owned-catalog-task-admission-resolver-not-implemented/v1",
+    }
     assert outcomes["candidate"] == {
         "status": "not_deployable",
         "profile_packaging": "forbidden-until-full-vocal-profile-contract/v1",
@@ -116,7 +132,7 @@ def test_report_recomputes_passing_lead_outcomes_but_remains_nondeployable() -> 
     }
 
 
-def test_three_song_smoke_style_coverage_cannot_pass_data_gate() -> None:
+def test_three_song_smoke_style_claims_are_reported_but_never_admit() -> None:
     report = _passing_report()
     report["data_coverage"] = {
         "source_counts": {"train": 1, "val": 2, "test": 0},
@@ -133,13 +149,33 @@ def test_three_song_smoke_style_coverage_cannot_pass_data_gate() -> None:
 
     outcomes = evaluate_vocal_lead_candidate_report(report)
 
-    assert outcomes["data_admission"]["passed"] is False
+    reported = outcomes["report_validation"]["reported_data_coverage"]
+    assert reported["passed"] is False
     assert outcomes["aggregation"]["passed"] is False
-    assert outcomes["data_admission"]["source_counts"]["test"] == {
+    assert reported["source_counts"]["test"] == {
         "observed": 0,
         "minimum": 10,
         "passed": False,
     }
+
+
+def test_distinct_synthetic_split_hashes_cannot_establish_source_disjoint_admission() -> None:
+    report = _passing_report()
+    report["evidence"]["split_source_ids_sha256"] = {
+        "train": "d" * 64,
+        "val": "e" * 64,
+        "test": "f" * 64,
+    }
+
+    outcomes = evaluate_vocal_lead_candidate_report(report)
+
+    assert outcomes["report_validation"]["reported_split_source_ids_sha256"] == {
+        "train": "d" * 64,
+        "val": "e" * 64,
+        "test": "f" * 64,
+    }
+    assert outcomes["data_admission"]["passed"] is False
+    assert outcomes["aggregation"]["passed"] is False
 
 
 @pytest.mark.parametrize(

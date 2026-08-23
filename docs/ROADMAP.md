@@ -104,8 +104,11 @@ presented as a successful OCTAVE auto-chart result.
   is permanently non-deployable at this stage: shared frontend timing alone is
   not a loader, note/phrase/talky decoder, timestamped CTC lyric decoder, MIDI
   assembler, evaluator, or worker handler. Its pinned 40/10/10 source and
-  per-label coverage gate rejects the current three-song/no-test smoke views;
-  passing future candidate evidence still cannot package or execute a profile.
+  per-label coverage gate rejects the current three-song/no-test smoke views.
+  Its current public report checker is deliberately schema-only: claimed counts
+  and split hashes cannot admit a candidate until STRUM implements a private
+  catalog/task-view resolver that recomputes coverage and proves disjointness.
+  No candidate can package or execute a profile.
 - ✅ Catalog-backed, worker-trainable Guitar/Bass fret-mapper experiments.
   They require the `pitch` extra, preserve catalog train/validation splits,
   record the Basic Pitch distribution/version that generated their features,
