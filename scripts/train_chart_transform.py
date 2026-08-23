@@ -35,6 +35,7 @@ from src.models.chart_audio import (
     event_audio_features,
 )
 from src.models.chart_transform import EventTransformMLP
+from src.source_provenance import source_revision_identity
 
 DATASET_SCHEMA = "strum-chart-pairs/v1"
 AUDIO_ASSET_SCHEMA = "strum-local-audio-assets/v1"
@@ -134,8 +135,11 @@ class TrainingConfig:
                 "audio decode configuration exceeds the supported memory limits"
             )
         _resolve_device(config.device)
-        if config.strum_revision is not None and not config.strum_revision.strip():
-            raise DatasetValidationError("strum_revision must be non-empty when provided")
+        if (
+            config.strum_revision is not None
+            and source_revision_identity(config.strum_revision) is None
+        ):
+            raise DatasetValidationError("strum_revision must be a safe Git revision identity")
         if config.init_checkpoint is not None and not config.init_checkpoint.strip():
             raise DatasetValidationError("init_checkpoint must be non-empty when provided")
         checkpoint_mode = config.checkpoint_mode

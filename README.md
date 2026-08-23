@@ -392,6 +392,16 @@ editor integration) to enforce it. Otherwise validation reports the declared
 revision as unverified, rather than treating source trees without Git metadata
 as incompatible.
 
+Source provenance is intentionally an identity, not free-form build metadata:
+`STRUM_SOURCE_REVISION` and `compatibility.strum_revision` must be a lowercase
+Git object ID (`[0-9a-f]{7,64}`). Invalid values are redacted by the worker and
+rejected in bundle manifests, so paths and private host labels cannot enter
+portable artifacts. A configured revision records `source_dirty: false` or
+`true` only when the caller also supplies `STRUM_SOURCE_DIRTY=0` or `=1`;
+otherwise it records `null` (unknown). When STRUM can inspect a Git checkout,
+clean means no tracked changes and no untracked executable changes under
+`src/` or `scripts/`; a failed state check is likewise recorded as unknown.
+
 ### Chart-pair fine-tuning prototype
 
 `scripts/train_chart_transform.py` is a small CPU/CUDA baseline for learned

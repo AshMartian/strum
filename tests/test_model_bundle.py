@@ -147,7 +147,7 @@ def test_declared_source_revision_is_unverified_without_runtime_revision(
         compatibility={
             "manifest_schema": 1,
             "strum_version": ">=0.1.0",
-            "strum_revision": "abc123",
+            "strum_revision": "abc1234",
         },
     )
 
@@ -155,25 +155,41 @@ def test_declared_source_revision_is_unverified_without_runtime_revision(
 
     assert bundle.validate() == []
     assert bundle.compatibility_status() == [
-        "STRUM source revision abc123: declared, unverified (set STRUM_SOURCE_REVISION to verify)"
+        "STRUM source revision abc1234: declared, unverified (set STRUM_SOURCE_REVISION to verify)"
     ]
 
 
 def test_source_revision_mismatch_is_rejected_when_runtime_revision_is_set(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("STRUM_SOURCE_REVISION", "different")
+    monkeypatch.setenv("STRUM_SOURCE_REVISION", "def5678")
     write_manifest(
         tmp_path,
         {"guitar.onset": {"checkpoint": "weights/best.pt"}},
         compatibility={
             "manifest_schema": 1,
             "strum_version": ">=0.1.0",
-            "strum_revision": "abc123",
+            "strum_revision": "abc1234",
         },
     )
 
     with pytest.raises(BundleValidationError, match="requires STRUM source revision abc123"):
+        load_model_bundle(tmp_path)
+
+
+@pytest.mark.parametrize("revision", ["/private/host/build", "untrusted-build", "A" * 40])
+def test_manifest_rejects_unsafe_source_revision_identity(tmp_path: Path, revision: str) -> None:
+    write_manifest(
+        tmp_path,
+        {"guitar.onset": {"checkpoint": "weights/best.pt"}},
+        compatibility={
+            "manifest_schema": 1,
+            "strum_version": ">=0.1.0",
+            "strum_revision": revision,
+        },
+    )
+
+    with pytest.raises(BundleValidationError, match="safe Git revision identity"):
         load_model_bundle(tmp_path)
 
 

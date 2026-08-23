@@ -331,7 +331,7 @@ def test_cpu_chart_pair_training_writes_valid_model_bundle(tmp_path: Path) -> No
             hidden_dim=4,
             epochs=1,
             device="cpu",
-            strum_revision="test-revision",
+            strum_revision="f" * 40,
         )
     )
 

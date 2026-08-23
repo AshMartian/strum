@@ -66,6 +66,7 @@ from src.song_source_catalog import (
     load_catalog,
     select_training_sources,
 )
+from src.source_provenance import source_revision_identity
 from src.vocal_harmony_catalog import (
     build_vocal_harmony_source_task,
     inspect_vocal_harmony_source_catalog,
@@ -1385,17 +1386,40 @@ class WorkerRequestError(ValueError):
 
 
 def _revision() -> tuple[str | None, bool | None]:
-    """Return a best-effort revision without making Git a runtime dependency."""
-    configured = os.environ.get("STRUM_SOURCE_REVISION", "").strip()
-    if configured:
-        return configured, os.environ.get("STRUM_SOURCE_DIRTY", "0") == "1"
+    """Return path-safe source identity and a conservative dirty-state value.
+
+    A configured revision is only trusted when it is a canonical Git object
+    identity.  It carries no trustworthy dirty state unless the caller also
+    supplies the explicit ``STRUM_SOURCE_DIRTY=0`` or ``=1`` attestation.
+    For a Git checkout, tracked changes anywhere and untracked executable
+    source below ``src/`` or ``scripts/`` make the state dirty.  A failed status
+    check produces ``None`` rather than claiming a clean source tree.
+    """
+    configured_raw = os.environ.get("STRUM_SOURCE_REVISION")
+    if configured_raw is not None and configured_raw:
+        configured = source_revision_identity(configured_raw)
+        if configured is None:
+            # Do not return hostile configuration in a portable runtime or
+            # bundle payload.  Its source state is unknown too.
+            return None, None
+        configured_dirty = os.environ.get("STRUM_SOURCE_DIRTY")
+        if configured_dirty == "1":
+            return configured, True
+        if configured_dirty == "0":
+            return configured, False
+        return configured, None
+    revision: str | None = None
     try:
-        revision = subprocess.check_output(
-            ["git", "-C", str(PROJECT_ROOT), "rev-parse", "HEAD"],
-            text=True,
-            stderr=subprocess.DEVNULL,
-        ).strip()
-        dirty = bool(
+        revision = source_revision_identity(
+            subprocess.check_output(
+                ["git", "-C", str(PROJECT_ROOT), "rev-parse", "HEAD"],
+                text=True,
+                stderr=subprocess.DEVNULL,
+            ).strip()
+        )
+        if revision is None:
+            return None, None
+        tracked_dirty = bool(
             subprocess.check_output(
                 [
                     "git",
@@ -1409,9 +1433,29 @@ def _revision() -> tuple[str | None, bool | None]:
                 stderr=subprocess.DEVNULL,
             ).strip()
         )
-        return revision, dirty
+        executable_untracked_dirty = bool(
+            subprocess.check_output(
+                [
+                    "git",
+                    "-C",
+                    str(PROJECT_ROOT),
+                    "status",
+                    "--porcelain",
+                    "--untracked-files=all",
+                    "--",
+                    "src",
+                    "scripts",
+                ],
+                text=True,
+                stderr=subprocess.DEVNULL,
+            ).strip()
+        )
+        return revision, tracked_dirty or executable_untracked_dirty
     except (OSError, subprocess.CalledProcessError):
-        return None, None
+        # ``rev-parse`` and ``status`` have different evidentiary value.  A
+        # revision obtained before status fails is still useful, but it must
+        # never be represented as a clean source tree.
+        return revision, None
 
 
 def _runtime_payload() -> dict[str, object]:

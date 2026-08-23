@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -216,20 +217,94 @@ def test_probe_declares_versioned_runtime_and_available_pipelines() -> None:
     ]
 
 
-def test_runtime_revision_ignores_untracked_non_source_files(
+@pytest.mark.parametrize("source_directory", ["src", "scripts"])
+def test_runtime_revision_tracks_untracked_executable_source_but_not_other_untracked_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    source_directory: str,
+) -> None:
+    monkeypatch.delenv("STRUM_SOURCE_REVISION", raising=False)
+    monkeypatch.delenv("STRUM_SOURCE_DIRTY", raising=False)
+    root = tmp_path / "clean-repository"
+    (root / "src").mkdir(parents=True)
+    (root / "scripts").mkdir()
+    (root / "src" / "committed.py").write_text("VALUE = 1\n", encoding="utf-8")
+    subprocess.run(["git", "init", str(root)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(root), "config", "user.email", "test@example.invalid"],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(root), "config", "user.name", "STRUM test"],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(["git", "-C", str(root), "add", "src"], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(root), "commit", "-m", "initial source"],
+        check=True,
+        capture_output=True,
+    )
+    revision = subprocess.check_output(
+        ["git", "-C", str(root), "rev-parse", "HEAD"], text=True
+    ).strip()
+    monkeypatch.setattr("src.worker.PROJECT_ROOT", root)
+
+    # A committed checkout is representable as a positively clean smoke.
+    assert _revision() == (revision, False)
+    # Non-source scratch files do not change executable source provenance.
+    (root / "notes.txt").write_text("private note\n", encoding="utf-8")
+    assert _revision() == (revision, False)
+    # New executable source must not be hidden by Git's default untracked
+    # exclusion; this is exactly the state portable candidates need to report.
+    (root / source_directory / "new_worker.py").write_text("VALUE = 2\n", encoding="utf-8")
+    assert _revision() == (revision, True)
+
+
+@pytest.mark.parametrize("dirty", [(None, None), ("0", False), ("1", True), ("unknown", None)])
+def test_configured_runtime_revision_requires_explicit_dirty_attestation(
+    monkeypatch: pytest.MonkeyPatch, dirty: tuple[str | None, bool | None]
+) -> None:
+    configured_dirty, expected_dirty = dirty
+    revision = "a" * 40
+    monkeypatch.setenv("STRUM_SOURCE_REVISION", revision)
+    if configured_dirty is None:
+        monkeypatch.delenv("STRUM_SOURCE_DIRTY", raising=False)
+    else:
+        monkeypatch.setenv("STRUM_SOURCE_DIRTY", configured_dirty)
+
+    assert _revision() == (revision, expected_dirty)
+
+
+@pytest.mark.parametrize("revision", ["/private/host/build", "build-20260822", "A" * 40])
+def test_runtime_revision_redacts_unsafe_configured_identity(
+    monkeypatch: pytest.MonkeyPatch, revision: str
+) -> None:
+    monkeypatch.setenv("STRUM_SOURCE_REVISION", revision)
+    monkeypatch.setenv("STRUM_SOURCE_DIRTY", "0")
+
+    result = _runtime_payload()
+
+    assert result["runtime"]["source_revision"] is None
+    assert result["runtime"]["source_dirty"] is None
+    assert revision not in json.dumps(result)
+
+
+def test_runtime_revision_marks_status_failure_unknown(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls: list[list[str]] = []
+    revision = "a" * 40
 
     def check_output(command: list[str], **_kwargs: object) -> str:
-        calls.append(command)
-        return "" if "--untracked-files=no" in command else "0123456789abcdef\n"
+        if command[-2:] == ["rev-parse", "HEAD"]:
+            return f"{revision}\n"
+        raise subprocess.CalledProcessError(1, command)
 
     monkeypatch.delenv("STRUM_SOURCE_REVISION", raising=False)
     monkeypatch.setattr("src.worker.subprocess.check_output", check_output)
 
-    assert _revision() == ("0123456789abcdef", False)
-    assert calls[1][-2:] == ["--porcelain", "--untracked-files=no"]
+    assert _revision() == (revision, None)
 
 
 def test_chart_transform_schema_exposes_opaque_parent_artifact_selection() -> None:

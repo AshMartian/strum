@@ -26,6 +26,10 @@ def test_training_options_are_strict_and_do_not_accept_catalog_locations(tmp_pat
         )
     with pytest.raises(DrumsTrainingError, match="epochs"):
         DrumsTrainingOptions.from_mapping({"model_id": "drums-local-v1", "epochs": True})
+    with pytest.raises(DrumsTrainingError, match="safe Git revision identity"):
+        DrumsTrainingOptions.from_mapping(
+            {"model_id": "drums-local-v1", "strum_revision": "/private/host/build"}
+        )
 
 
 def test_experiment_ledger_links_task_preprocessing_and_checkpoint_without_paths(

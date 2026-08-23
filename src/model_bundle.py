@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from src import PROJECT_ROOT, __version__
+from src.source_provenance import source_revision_identity
 
 MANIFEST_FILENAME = "strum-model-bundle.json"
 MANIFEST_SCHEMA_VERSION = 1
@@ -238,8 +239,8 @@ class ModelBundle:
             errors.append(f"bundle requires STRUM {required_strum}; running {__version__}")
         required_revision = self.compatibility.get("strum_revision")
         if required_revision is not None:
-            if not isinstance(required_revision, str) or not required_revision.strip():
-                errors.append("bundle strum_revision must be a non-empty string")
+            if source_revision_identity(required_revision) is None:
+                errors.append("bundle strum_revision must be a safe Git revision identity")
             else:
                 runtime_revision = get_runtime_revision()
                 if runtime_revision is not None and runtime_revision != required_revision:
@@ -515,8 +516,7 @@ def get_runtime_revision() -> str | None:
     set ``STRUM_SOURCE_REVISION`` to make a bundle's revision requirement
     enforceable.  Absence means "declared but unverified", not incompatibility.
     """
-    revision = os.environ.get("STRUM_SOURCE_REVISION")
-    return revision.strip() if revision and revision.strip() else None
+    return source_revision_identity(os.environ.get("STRUM_SOURCE_REVISION"))
 
 
 def _version_tuple(value: str) -> tuple[int, ...]:
@@ -970,6 +970,13 @@ def load_model_bundle(path: str | Path, *, check_files: bool = False) -> ModelBu
     model_id = _parse_identifier(raw["model_id"], "model_id")
     if not isinstance(raw["compatibility"], dict):
         raise BundleValidationError("compatibility must be an object")
+    if (
+        "strum_revision" in raw["compatibility"]
+        and source_revision_identity(raw["compatibility"]["strum_revision"]) is None
+    ):
+        raise BundleValidationError(
+            "compatibility.strum_revision must be a safe Git revision identity"
+        )
     if (
         "strum_source_dirty" in raw["compatibility"]
         and raw["compatibility"]["strum_source_dirty"] is not None

@@ -19,6 +19,7 @@ from typing import Any
 from src import PROJECT_ROOT
 from src.catalog_drums_manifest import MANIFEST_FORMAT, task_view_sha256
 from src.song_source_catalog import CatalogValidationError
+from src.source_provenance import source_revision_identity
 
 EXPERIMENT_FORMAT = "strum-drums-onset-experiment/v1"
 TRAINING_PROFILE = "onset_classifier_v2"
@@ -99,8 +100,11 @@ class DrumsTrainingOptions:
             or values["learning_rate"] <= 0
         ):
             raise DrumsTrainingError("learning_rate must be positive")
-        if values["strum_revision"] is not None and not isinstance(values["strum_revision"], str):
-            raise DrumsTrainingError("strum_revision must be a string")
+        if (
+            values["strum_revision"] is not None
+            and source_revision_identity(values["strum_revision"]) is None
+        ):
+            raise DrumsTrainingError("strum_revision must be a safe Git revision identity")
         values["learning_rate"] = float(values["learning_rate"])
         return cls(**values)
 
