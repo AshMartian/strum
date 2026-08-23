@@ -1,14 +1,20 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.metadata
 import json
 from pathlib import Path
 
 import numpy as np
 import pytest
 
+from scripts.build_mapper_dataset import build_payloads
 from scripts.train_fret_mapper import load_cache
-from src.fret_mapper_worker_training import FretMapperTrainingError, _read_task_view
+from src.fret_mapper_worker_training import (
+    FretMapperTrainingError,
+    _read_task_view,
+    _require_basic_pitch,
+)
 from src.model_bundle import load_model_bundle
 from src.worker import PIPELINES, prepare_dataset_request, run_training_request
 
@@ -127,6 +133,9 @@ def test_guitar_fret_mapper_worker_uses_catalog_splits_and_packages_no_profile(
     monkeypatch.setattr(
         "src.fret_mapper_worker_training.importlib.util.find_spec", lambda _: object()
     )
+    monkeypatch.setattr(
+        "src.fret_mapper_worker_training.importlib.metadata.version", lambda _: "0.4.0"
+    )
     output = tmp_path / "experiments" / "guitar-mapper-v1"
     train_request = tmp_path / "train.json"
     train_request.write_text(
@@ -155,9 +164,69 @@ def test_guitar_fret_mapper_worker_uses_catalog_splits_and_packages_no_profile(
     assert experiment["task_view"]["catalog_id"] == "fret-mapper-training-fixture"
     assert experiment["preprocessing"]["cache_counts"]["train"] > 0
     assert experiment["preprocessing"]["cache_counts"]["val"] > 0
+    assert experiment["release_requirements"] == {
+        "schema_version": 1,
+        "format": "strum-fret-mapper-release-requirements/v1",
+        "status": "blocked",
+        "requirements": [
+            "component profile must compose an exact onset source and one instrument-specific mapper",
+            "runtime loader must require the recorded Basic Pitch distribution and version",
+            "runtime loader must use a tensor-only checkpoint format with strict architecture validation",
+            "held-out evaluation must exercise Basic Pitch, onset alignment, mapper decoding, and MIDI output",
+            "profile must pin a versioned Viterbi decoding policy and all thresholds",
+        ],
+    }
     bundle = load_model_bundle(output / "bundle", check_files=True)
     assert set(bundle.components) == {"fret_mapper.guitar"}
     assert not bundle.profiles
+    config = json.loads(bundle.component("fret_mapper.guitar").config.read_text())
+    assert config["basic_pitch"] == {
+        "distribution": "basic-pitch",
+        "version": "0.4.0",
+        "onset_threshold": 0.5,
+        "frame_threshold": 0.3,
+        "min_note_length": 11,
+    }
+
+
+def test_mapper_dataset_payload_keeps_the_catalog_split(tmp_path: Path) -> None:
+    payloads = build_payloads(
+        [("approved-song", tmp_path / "guitar.ogg", tmp_path / "notes.mid", "val")],
+        cache_dir=tmp_path / "cache",
+        onset_threshold=0.5,
+        frame_threshold=0.3,
+        min_note_length=11,
+        instrument="guitar",
+    )
+
+    assert payloads == [
+        (
+            "approved-song",
+            str(tmp_path / "guitar.ogg"),
+            str(tmp_path / "notes.mid"),
+            str(tmp_path / "cache"),
+            0.5,
+            0.3,
+            11,
+            "guitar",
+            "val",
+        )
+    ]
+
+
+def test_mapper_training_requires_exact_basic_pitch_distribution_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "src.fret_mapper_worker_training.importlib.util.find_spec", lambda _: object()
+    )
+    monkeypatch.setattr(
+        "src.fret_mapper_worker_training.importlib.metadata.version",
+        lambda _: (_ for _ in ()).throw(importlib.metadata.PackageNotFoundError()),
+    )
+
+    with pytest.raises(FretMapperTrainingError, match="distribution metadata"):
+        _require_basic_pitch()
 
 
 def test_fret_mapper_rejects_the_wrong_catalog_task_kind(tmp_path: Path) -> None:

@@ -245,6 +245,37 @@ def process_song(args: tuple) -> dict:
         return {"song": song_id, "status": f"error: {e}", "n": 0, "trace": traceback.format_exc()}
 
 
+def build_payloads(
+    candidates: list[tuple[str, Path, Path, str]],
+    *,
+    cache_dir: Path,
+    onset_threshold: float,
+    frame_threshold: float,
+    min_note_length: int,
+    instrument: str,
+) -> list[tuple[object, ...]]:
+    """Build immutable per-song preprocessing inputs without dropping the split.
+
+    The worker treats catalog train/validation membership as a hard boundary.
+    Each cache file therefore receives its owning song split rather than
+    deriving one later from an untrusted cache directory.
+    """
+    return [
+        (
+            song_id,
+            str(audio_path),
+            str(midi_path),
+            str(cache_dir),
+            onset_threshold,
+            frame_threshold,
+            min_note_length,
+            instrument,
+            split,
+        )
+        for song_id, audio_path, midi_path, split in candidates
+    ]
+
+
 # ─────────────────────────── Main ───────────────────────────────────────────
 def main():
     ap = argparse.ArgumentParser()
@@ -305,19 +336,14 @@ def main():
     log.info(f"Found {len(candidates)} candidate songs")
 
     args.cache_dir.mkdir(parents=True, exist_ok=True)
-    payloads = [
-        (
-            song_id,
-            str(audio_path),
-            str(midi_path),
-            str(args.cache_dir),
-            args.onset_threshold,
-            args.frame_threshold,
-            args.min_note_length,
-            instrument,
-        )
-        for song_id, audio_path, midi_path, split in candidates
-    ]
+    payloads = build_payloads(
+        candidates,
+        cache_dir=args.cache_dir,
+        onset_threshold=args.onset_threshold,
+        frame_threshold=args.frame_threshold,
+        min_note_length=args.min_note_length,
+        instrument=instrument,
+    )
 
     n_ok = n_err = n_cached = n_skip = 0
     t0 = time.time()

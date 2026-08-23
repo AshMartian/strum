@@ -10,6 +10,7 @@ packaging before it can replace the established rule mapper.
 from __future__ import annotations
 
 import hashlib
+import importlib.metadata
 import importlib.util
 import json
 import math
@@ -31,6 +32,7 @@ from src.song_source_catalog import CatalogValidationError
 EXPERIMENT_FORMAT = "strum-experiment/v1"
 PREPROCESSING_ID = "basic-pitch-onset-features/v1"
 MODEL_IMPLEMENTATION = "FretMapperMLP/v1"
+BASIC_PITCH_DISTRIBUTION = "basic-pitch"
 _MODEL_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 _TASKS = {
     "strum.fret-mapper/guitar/v1": ("fret_mapper_guitar", "guitar"),
@@ -194,9 +196,24 @@ def _read_task_view(
     return task_view, songs, instrument
 
 
-def _require_basic_pitch() -> None:
+def _require_basic_pitch() -> str:
+    """Return the exact Basic Pitch build that generated mapper features.
+
+    A mapper checkpoint only applies to the feature distribution emitted by
+    Basic Pitch.  Recording just its thresholds would allow an incompatible
+    package upgrade to masquerade as the same preprocessing contract.
+    """
     if importlib.util.find_spec("basic_pitch") is None:
         raise FretMapperTrainingError("fret-mapper training requires the STRUM pitch extra")
+    try:
+        version = importlib.metadata.version(BASIC_PITCH_DISTRIBUTION)
+    except importlib.metadata.PackageNotFoundError as error:
+        raise FretMapperTrainingError(
+            "fret-mapper training requires the Basic Pitch distribution metadata"
+        ) from error
+    if not version:
+        raise FretMapperTrainingError("fret-mapper training requires an exact Basic Pitch version")
+    return version
 
 
 def _resolve_device(value: str) -> str:
@@ -291,7 +308,7 @@ def run_catalog_fret_mapper_training(
     if output_dir.exists() and (not output_dir.is_dir() or any(output_dir.iterdir())):
         raise FretMapperTrainingError("fret-mapper output directory must be an empty directory")
     task_view, songs, instrument = _read_task_view(task_view_path, catalog_root, pipeline_id)
-    _require_basic_pitch()
+    basic_pitch_version = _require_basic_pitch()
     output_dir.mkdir(parents=True, exist_ok=True)
     cache_dir = output_dir / "cache"
     checkpoint_dir = output_dir / "training-checkpoints"
@@ -363,6 +380,8 @@ def run_catalog_fret_mapper_training(
         "feature_dimension": 95,
         "label_schema": "five-lane-fret-mapper-midi/v1",
         "basic_pitch": {
+            "distribution": BASIC_PITCH_DISTRIBUTION,
+            "version": basic_pitch_version,
             "onset_threshold": options.onset_threshold,
             "frame_threshold": options.frame_threshold,
             "min_note_length": options.min_note_length,
@@ -460,6 +479,18 @@ def run_catalog_fret_mapper_training(
         },
         "metrics": metrics,
         "deployment_status": deployment_status,
+        "release_requirements": {
+            "schema_version": 1,
+            "format": "strum-fret-mapper-release-requirements/v1",
+            "status": "blocked",
+            "requirements": [
+                "component profile must compose an exact onset source and one instrument-specific mapper",
+                "runtime loader must require the recorded Basic Pitch distribution and version",
+                "runtime loader must use a tensor-only checkpoint format with strict architecture validation",
+                "held-out evaluation must exercise Basic Pitch, onset alignment, mapper decoding, and MIDI output",
+                "profile must pin a versioned Viterbi decoding policy and all thresholds",
+            ],
+        },
         "model_bundle": {"model_id": options.model_id, "manifest_sha256": _sha256(manifest_path)},
     }
     (output_dir / "experiment.json").write_text(

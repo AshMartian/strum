@@ -308,10 +308,11 @@ def _learned_fret_mapping(
 ) -> list[tuple[int, ...]]:
     """Map (CRNN onsets, BP pitch buckets) → fret subsets via learned MLP+Viterbi.
 
-    Uses the same featurizer as scripts/guitar_basicpitch.py so the v4 MLP
-    weights apply directly. Falls back to a flat (0,) sequence if anything
-    in the learned pipeline fails — caller still has the rule-based mapper
-    available as backup.
+    This is a legacy research bridge, not a bundle-backed worker profile.
+    It uses the same featurizer as scripts/guitar_basicpitch.py so historic
+    V4 MLP weights apply directly.  An explicit legacy request fails closed:
+    silently changing to rule mapping would make a run's chart semantics
+    unknowable.  New worker jobs use only declared profiles.
     """
     import os as _os
     import sys as _sys
@@ -654,18 +655,16 @@ class GuitarHybridV2Charter:
         learned_frets: list[tuple[int, ...]] | None = None
         if use_learned_mapper is None:
             use_learned_mapper = (
-                _os.environ.get("STRUM_GUITAR_FRET_MAPPER", "learned").lower() == "learned"
+                _os.environ.get("STRUM_GUITAR_FRET_MAPPER", "rule").lower() == "learned"
             )
         if use_learned_mapper and not harmonic_collapse:
             try:
                 learned_frets = _learned_fret_mapping(onset_times, buckets_full)
-            except Exception as _e:
-                # Honour the docstring contract: any failure in the learned
-                # pipeline (missing module, bad ckpt, shape mismatch, ...)
-                # silently falls back to the rule-based PitchToFretMapper
-                # below so PART GUITAR is still produced.
-                log.warning(f"guitar learned fret mapper unavailable, falling back to rule mapper ({_e})")
-                learned_frets = None
+            except Exception as error:
+                raise RuntimeError(
+                    "explicit legacy learned fret mapper request failed; "
+                    "no rule-mapper fallback is permitted"
+                ) from error
         mapper = PitchToFretMapper([n.midi for n in notes])
 
         # Stage 5: assemble events

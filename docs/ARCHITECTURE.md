@@ -188,7 +188,12 @@ HOPO threshold is 170 ms.
 
 Optional: **`PitchToFretMapper` (V4)** — a learned mapper trained on ~5k chart
 pitch→fret pairs (`scripts/build_mapper_dataset.py` +
-`scripts/train_fret_mapper.py`). Enabled with `STRUM_FRET_MAPPER=1`.
+`scripts/train_fret_mapper.py`). The legacy research bridge is explicitly
+enabled with `STRUM_GUITAR_FRET_MAPPER=learned`; it is not a bundle profile and
+fails closed when unavailable. Catalog-worker mapper experiments record the
+Basic Pitch distribution/version and cannot be promoted until a typed profile
+pins a tensor-only decoder, Basic Pitch/Viterbi policy, compatible onset
+source, and end-to-end held-out chart evaluation.
 
 ### 3.4 Section Router
 

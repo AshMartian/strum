@@ -17,7 +17,7 @@ auto-chart handler.
 | Drums onset + classifier | Available | Available; V2 evaluation package | `drums.v14-expert/v1` direct Expert charts; V2 is evaluation-only |
 | Five-lane difficulty transform (Guitar/Bass/Keys/Drums) | Available | Available | `difficulty.transform/v1` |
 | Generic Keys / Vocals / Pro Guitar / Pro Bass / Pro Keys | Available | Planned | Planned |
-| Guitar/Bass fret mapper | Available | Available; requires `pitch` extra | Planned; requires evaluation/profile packaging |
+| Guitar/Bass fret mapper | Available | Available; requires `pitch` extra and records exact Basic Pitch provenance | Planned; requires evaluation/profile packaging |
 | Guitar/Bass section classifier | Available | Available; experiment-only | Planned; requires section-routing evaluation and runtime profile |
 
 The legacy all-instrument batch scripts remain research/compatibility tools;
@@ -69,7 +69,11 @@ presented as a successful OCTAVE auto-chart result.
   chart still needs evaluated phrase, lyric, talky, and harmony stages.
 - ✅ Catalog-backed, worker-trainable Guitar/Bass fret-mapper experiments.
   They require the `pitch` extra, preserve catalog train/validation splits,
+  record the Basic Pitch distribution/version that generated their features,
   and remain profile-gated components rather than legacy fallback behavior.
+  Their immutable release requirements explicitly block promotion until STRUM
+  has an exact onset composition, tensor-only strict loader, pinned Viterbi
+  policy, and end-to-end held-out chart evaluation.
 - ✅ Catalog-backed, worker-trainable Guitar/Bass section-classifier
   experiments. STRUM derives the six chart-pattern labels from the declared
   `PART GUITAR` or `PART BASS` task-view track, revalidates the catalog split

@@ -90,7 +90,10 @@ Guitar and bass share the same hybrid architecture (`src/inference/guitar_hybrid
 
 1. **Onset Detection** — `OnsetCRNN` (V2) detects note attacks on the Demucs-separated stem so vocals/drums don't trigger false positives.
 2. **Polyphonic Pitch** — [Spotify Basic Pitch](https://github.com/spotify/basic-pitch) transcribes simultaneous notes (chords + single notes), with bass-specific MIDI range overrides (24–67) when running on the bass stem.
-3. **Pitch → Fret Mapping** — Rule-based register allocation by default, with an optional learned `PitchToFretMapper` (V4) gated behind `STRUM_FRET_MAPPER=1`.
+3. **Pitch → Fret Mapping** — Rule-based register allocation by default. The historic
+   learned mapper is a research-only compatibility path enabled with
+   `STRUM_GUITAR_FRET_MAPPER=learned`; it is not selectable as a STRUM model-bundle
+   profile, and an explicit request fails rather than silently using rules.
 4. **Section-Aware Density** — An optional `SectionRouter` modulates onset peak thresholds per section (verse/chorus/solo) to prevent over- or under-charting.
 
 ### Vocals — Whisper + pYIN Pitch Tracking
@@ -191,7 +194,7 @@ Each output folder contains `notes.mid`, `song.ini`, the source audio, and album
 |----------|--------|---------|--------|
 | `STRUM_GUITAR_BACKEND` | `hybrid`, `neural`, `rule`, `basicpitch` | `hybrid` | Guitar transcription pipeline |
 | `STRUM_BASS_BACKEND`   | `hybrid`, `neural`, `rule`, `basicpitch` | `hybrid` | Bass transcription pipeline |
-| `STRUM_FRET_MAPPER`    | `0`, `1` | `0` | Use learned pitch→fret mapper instead of rules |
+| `STRUM_GUITAR_FRET_MAPPER` | `rule`, `learned` | `rule` | Legacy research mapper only; `learned` fails closed if unavailable |
 | `STRUM_V12C_VARIANT`   | `default`, `community` | `default` | Swap drum classifier v12c checkpoint |
 
 ### Legacy script training
@@ -563,8 +566,12 @@ For example, a Guitar task-view request is:
 `strum.fret-mapper/guitar/v1` / `strum.fret-mapper/bass/v1` derived-label
 pipelines are worker-trainable. Fret-mapper training builds Basic-Pitch
 features only from its revalidated approved task view, preserves the catalog's
-song-level train/validation split, and requires the STRUM `pitch` extra. It
-produces an experiment component, not an auto-chart profile. Their renderer-visible
+song-level train/validation split, requires the STRUM `pitch` extra, and records
+the exact `basic-pitch` distribution version that emitted the feature data. It
+produces an experiment component, not an auto-chart profile. The immutable
+experiment release requirements block promotion until a profile composes a
+verified onset source, tensor-only loader, pinned Basic-Pitch/Viterbi policy,
+and an end-to-end held-out chart evaluation. Their renderer-visible
 schemas contain only bounded model/training knobs. The private top-level
 `catalog_root` request field is worker-local configuration for Guitar, Bass,
 Keys, Drums, Vocals, and fret-mapper task-view revalidation, never a pipeline
