@@ -3,13 +3,17 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import wave
 from pathlib import Path
 
 import mido
+import numpy as np
 import pytest
 
 from src.catalog_task_manifest import build_catalog_task_manifest
+from src.pro_audio_preprocessing import _tempo_segments, _tick_seconds, prepare_pro_audio_windows
 from src.pro_target_manifest import (
+    PRO_AUDIO_PREPROCESSING_ID,
     PRO_TARGET_MANIFEST_FORMAT,
     build_catalog_pro_target_manifest,
     resolve_catalog_pro_target_manifest_songs,
@@ -85,7 +89,21 @@ def _pro_midi(*, standard_fret: int = 3) -> bytes:
     return output.getvalue()
 
 
-def _catalog(root: Path, *, standard_fret: int = 3) -> None:
+def _wave_bytes(seconds: float = 1.0, sample_rate: int = 22050) -> bytes:
+    """Create a tiny valid PCM asset; the catalog extension is intentionally opaque."""
+    samples = (0.1 * np.sin(np.arange(round(seconds * sample_rate)) / sample_rate * 440)).astype(
+        np.float32
+    )
+    output = io.BytesIO()
+    with wave.open(output, "wb") as stream:
+        stream.setnchannels(1)
+        stream.setsampwidth(2)
+        stream.setframerate(sample_rate)
+        stream.writeframes((samples * 32767).astype("<i2").tobytes())
+    return output.getvalue()
+
+
+def _catalog(root: Path, *, standard_fret: int = 3, valid_audio: bool = False) -> None:
     source_id = "octave-src-pro-targets-0001"
     record = {
         "source_id": source_id,
@@ -113,7 +131,11 @@ def _catalog(root: Path, *, standard_fret: int = 3) -> None:
             },
         },
         "audio": {
-            role: _asset(root, f"{source_id}:{role}".encode(), f"{role}.ogg")
+            role: _asset(
+                root,
+                _wave_bytes() if valid_audio else f"{source_id}:{role}".encode(),
+                f"{role}.ogg",
+            )
             for role in ("mix", "guitar", "bass", "keys")
         },
     }
@@ -214,3 +236,95 @@ def test_worker_prepare_returns_a_decoded_pro_target_view(tmp_path: Path) -> Non
     assert result["output_name"] == output.name
     assert written["format"] == PRO_TARGET_MANIFEST_FORMAT
     assert str(tmp_path) not in json.dumps(written)
+
+
+def test_pro_audio_preprocessing_materializes_exact_event_windows_without_paths(
+    tmp_path: Path,
+) -> None:
+    _catalog(tmp_path, valid_audio=True)
+    manifest = build_catalog_pro_target_manifest(tmp_path, "pro_guitar")
+    assert manifest["audio_preprocessing"]["id"] == PRO_AUDIO_PREPROCESSING_ID
+    task_view = tmp_path / "pro-guitar-targets.json"
+    task_view.write_text(json.dumps(manifest), encoding="utf-8")
+    split = manifest["songs"][0]["split"]
+
+    result = prepare_pro_audio_windows(
+        manifest_path=task_view,
+        catalog_root=tmp_path,
+        cache_dir=tmp_path / "cache",
+        splits=(split,),
+    )
+
+    cache = tmp_path / "cache"
+    labels = [
+        json.loads(line) for line in (cache / f"{split}_targets.jsonl").read_text().splitlines()
+    ]
+    features = np.load(cache / f"{split}_logmel.npy")
+    serialized = (cache / "preprocess_summary.json").read_text() + "\n".join(
+        json.dumps(label) for label in labels
+    )
+    assert result["format"] == "strum-pro-audio-feature-cache/v1"
+    assert features.shape[0] == len(labels) == 2
+    assert features.shape[1:] == (128, 22)
+    assert {label["track_variant"] for label in labels} == {"standard", "22_fret"}
+    assert all(label["target_language"] == "string_fret_technique/v1" for label in labels)
+    assert str(tmp_path) not in serialized
+
+
+def test_pro_audio_preprocessing_rejects_modified_feature_contract(tmp_path: Path) -> None:
+    _catalog(tmp_path)
+    manifest = build_catalog_pro_target_manifest(tmp_path, "pro_keys")
+    manifest["audio_preprocessing"]["id"] = "five-lane-logmel/v1"
+    task_view = tmp_path / "pro-keys-targets.json"
+    task_view.write_text(json.dumps(manifest), encoding="utf-8")
+    split = manifest["songs"][0]["split"]
+
+    with pytest.raises(CatalogValidationError, match="audio preprocessing"):
+        prepare_pro_audio_windows(
+            manifest_path=task_view,
+            catalog_root=tmp_path,
+            cache_dir=tmp_path / "cache",
+            splits=(split,),
+        )
+
+
+def test_pro_keys_audio_preprocessing_retains_chromatic_targets_and_range_shifts(
+    tmp_path: Path,
+) -> None:
+    _catalog(tmp_path, valid_audio=True)
+    manifest = build_catalog_pro_target_manifest(tmp_path, "pro_keys")
+    task_view = tmp_path / "pro-keys-targets.json"
+    task_view.write_text(json.dumps(manifest), encoding="utf-8")
+    split = manifest["songs"][0]["split"]
+
+    prepare_pro_audio_windows(
+        manifest_path=task_view,
+        catalog_root=tmp_path,
+        cache_dir=tmp_path / "cache",
+        splits=(split,),
+    )
+
+    labels = [
+        json.loads(line)
+        for line in (tmp_path / "cache" / f"{split}_targets.jsonl").read_text().splitlines()
+    ]
+    assert len(labels) == 1
+    assert labels[0]["event_schema"] == "pro-keys-pitch-events/v1"
+    assert labels[0]["target_language"] == "pitch_channel_range_shift/v1"
+    assert labels[0]["events"] == [{"channel": 1, "duration_ticks": 240, "pitch": 60, "tick": 12}]
+    assert labels[0]["range_shifts"] == [{"anchor": "C", "tick": 4}]
+
+
+def test_pro_audio_tick_alignment_honors_global_tempo_changes(tmp_path: Path) -> None:
+    midi = mido.MidiFile(ticks_per_beat=480)
+    tempo = mido.MidiTrack()
+    tempo.append(mido.MetaMessage("set_tempo", tempo=500_000, time=0))
+    tempo.append(mido.MetaMessage("set_tempo", tempo=1_000_000, time=480))
+    midi.tracks.append(tempo)
+    path = tmp_path / "tempo.mid"
+    midi.save(path)
+
+    ticks_per_beat, segments = _tempo_segments(path)
+
+    assert _tick_seconds(480, ticks_per_beat, segments) == pytest.approx(0.5)
+    assert _tick_seconds(960, ticks_per_beat, segments) == pytest.approx(1.5)

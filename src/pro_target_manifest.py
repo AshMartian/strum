@@ -36,7 +36,21 @@ from src.song_source_catalog import CatalogValidationError
 PRO_TARGET_MANIFEST_FORMAT = "strum-pro-target-task-manifest/v1"
 PRO_TARGET_MANIFEST_VERSION = 1
 PRO_TARGET_DECODER_ID = "strum-pro-midi-target-decoder/v1"
+PRO_AUDIO_PREPROCESSING_ID = "pro-logmel-event-windows/v1"
 PRO_TASK_KINDS = frozenset({"pro_guitar", "pro_bass", "pro_keys"})
+
+# Pro training examples are labelled per authored REAL_* event, never by a
+# five-lane surrogate.  These compact bounds are both portable in task views
+# and sufficient to materialize deterministic local feature caches.
+_PRO_AUDIO_PREPROCESSING_DEFAULTS: dict[str, object] = {
+    "id": PRO_AUDIO_PREPROCESSING_ID,
+    "sample_rate": 22050,
+    "n_mels": 128,
+    "n_fft": 2048,
+    "hop_length": 512,
+    "window_before_ms": 100,
+    "window_after_ms": 400,
+}
 
 _PRO_GUITAR_TECHNIQUES = {
     0: "normal",
@@ -63,6 +77,47 @@ _PRO_KEYS_MAX_PITCH = 72
 
 class ProTargetDecodeError(ValueError):
     """Raised when an approved Pro source cannot supply unambiguous targets."""
+
+
+def normalize_pro_audio_preprocessing(raw: object | None) -> dict[str, object]:
+    """Return the path-free, bounded Pro audio feature specification.
+
+    The eventual free-running chart runtime needs its own evaluated onset and
+    sequence stages.  This setting describes only exact-target event windows;
+    it cannot carry paths or enable an inference profile.
+    """
+    if raw is None:
+        requested: dict[str, object] = {}
+    elif isinstance(raw, Mapping):
+        requested = dict(raw)
+    else:
+        raise CatalogValidationError("Pro audio preprocessing must be an object")
+    requested_id = requested.pop("id", PRO_AUDIO_PREPROCESSING_ID)
+    if requested_id != PRO_AUDIO_PREPROCESSING_ID:
+        raise CatalogValidationError("Pro audio preprocessing identifier is invalid")
+    permitted = set(_PRO_AUDIO_PREPROCESSING_DEFAULTS) - {"id"}
+    if set(requested) - permitted:
+        raise CatalogValidationError("Pro audio preprocessing has unsupported settings")
+    normalized = dict(_PRO_AUDIO_PREPROCESSING_DEFAULTS)
+    normalized.update(requested)
+    for key in (
+        "sample_rate",
+        "n_mels",
+        "n_fft",
+        "hop_length",
+        "window_before_ms",
+        "window_after_ms",
+    ):
+        value = normalized[key]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise CatalogValidationError(f"Pro audio preprocessing {key} is invalid")
+    if normalized["sample_rate"] > 192000 or normalized["n_mels"] > 512:
+        raise CatalogValidationError("Pro audio preprocessing exceeds supported limits")
+    if normalized["n_fft"] > 32768 or normalized["hop_length"] > normalized["n_fft"]:
+        raise CatalogValidationError("Pro audio preprocessing FFT settings are invalid")
+    if normalized["window_before_ms"] > 5000 or normalized["window_after_ms"] > 5000:
+        raise CatalogValidationError("Pro audio preprocessing window is too large")
+    return normalized
 
 
 def _is_note_on(message: mido.Message) -> bool:
@@ -256,6 +311,8 @@ def build_catalog_pro_target_manifest(
     """
     if task_kind not in PRO_TASK_KINDS:
         raise CatalogValidationError("unsupported Pro target task")
+    raw_preprocessing = options.pop("preprocessing", None)
+    audio_preprocessing = normalize_pro_audio_preprocessing(raw_preprocessing)
     task_view = build_catalog_task_manifest(catalog_root, task_kind, **options)
     try:
         resolved = resolve_catalog_task_manifest_songs(task_view, catalog_root)
@@ -281,6 +338,7 @@ def build_catalog_pro_target_manifest(
         "format": PRO_TARGET_MANIFEST_FORMAT,
         "task_view": task_view,
         "target_encoding": _target_encoding(task_kind),
+        "audio_preprocessing": audio_preprocessing,
         "songs": decoded_songs,
         "summary": {
             "record_count": len(decoded_songs),
@@ -310,6 +368,7 @@ def resolve_catalog_pro_target_manifest_songs(
         raise CatalogValidationError(f"manifest must use {PRO_TARGET_MANIFEST_FORMAT}")
     task_view = manifest.get("task_view")
     target_encoding = manifest.get("target_encoding")
+    audio_preprocessing = manifest.get("audio_preprocessing")
     stored_songs = manifest.get("songs")
     if not isinstance(task_view, dict) or task_view.get("format") != MANIFEST_FORMAT:
         raise CatalogValidationError("Pro target manifest task view is invalid")
@@ -317,6 +376,8 @@ def resolve_catalog_pro_target_manifest_songs(
     task_kind = task.get("kind") if isinstance(task, dict) else None
     if task_kind not in PRO_TASK_KINDS or target_encoding != _target_encoding(task_kind):
         raise CatalogValidationError("Pro target manifest encoding is invalid")
+    if audio_preprocessing != normalize_pro_audio_preprocessing(audio_preprocessing):
+        raise CatalogValidationError("Pro target manifest audio preprocessing is invalid")
     if not isinstance(stored_songs, list):
         raise CatalogValidationError("Pro target manifest songs are invalid")
     resolved = resolve_catalog_task_manifest_songs(task_view, catalog_root)

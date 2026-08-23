@@ -306,21 +306,21 @@ def test_pipeline_descriptors_advertise_safe_host_orchestration_requirements() -
             "pro_guitar",
             "pro-string-fret-midi/v1",
             ["PART REAL_GUITAR", "PART REAL_GUITAR_22"],
-            {"pro_guitar_audio_preprocessor/v1", "pro_guitar_chart_execution/v1"},
+            {"pro_guitar_sequence_trainer/v1", "pro_guitar_chart_execution/v1"},
         ),
         (
             "strum.instrument-chart/pro-bass/v1",
             "pro_bass",
             "pro-string-fret-midi/v1",
             ["PART REAL_BASS", "PART REAL_BASS_22"],
-            {"pro_bass_audio_preprocessor/v1", "pro_bass_chart_execution/v1"},
+            {"pro_bass_sequence_trainer/v1", "pro_bass_chart_execution/v1"},
         ),
         (
             "strum.instrument-chart/pro-keys/v1",
             "pro_keys",
             "pro-keys-pitch-midi/v1",
             ["PART REAL_KEYS_X"],
-            {"pro_keys_audio_preprocessor/v1", "pro_keys_chart_execution/v1"},
+            {"pro_keys_sequence_trainer/v1", "pro_keys_chart_execution/v1"},
         ),
     ],
 )
@@ -346,6 +346,10 @@ def test_pro_descriptors_publish_non_executable_real_midi_training_contracts(
         descriptor.catalog_requirements["prepared_target_encoding"]
         == "strum-pro-midi-target-decoder/v1"
     )
+    assert (
+        descriptor.catalog_requirements["prepared_audio_preprocessing"]
+        == "pro-logmel-event-windows/v1"
+    )
     contract = descriptor.as_json()["training_contract"]
     assert contract == {
         **contract,
@@ -356,6 +360,11 @@ def test_pro_descriptors_publish_non_executable_real_midi_training_contracts(
     assert contract["label_source"]["schema_id"] == schema_id
     assert contract["label_source"]["tracks"] == tracks
     assert contract["prepared_target_encoding"] == "strum-pro-midi-target-decoder/v1"
+    assert contract["available_preprocessing"] == {
+        "id": "pro-logmel-event-windows/v1",
+        "target_binding": "exact-real-track-event-windows/v1",
+        "deployment_status": "research_cache_only",
+    }
     assert set(contract["required_stages"]) == set(descriptor.training_requirements)
     assert required_stages <= set(contract["required_stages"])
     assert task_kind in pipeline_id.replace("-", "_")

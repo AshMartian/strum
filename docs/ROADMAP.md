@@ -42,9 +42,10 @@ presented as a successful OCTAVE auto-chart result.
 - ✅ Pro task views now use exact REAL_* track identities rather than prefix
   matching. Expert Pro Keys uses only `PART REAL_KEYS_X`; Pro Guitar/Bass
   preserve standard and `_22` source variants. Prepare now produces strict,
-  path-free decoded Pro targets (string/fret/technique or pitch/range shifts),
-  while their descriptor remains non-executable until STRUM supplies an audio
-  preprocessor, event trainer, held-out evaluator, package, and chart handler.
+  path-free decoded Pro targets (string/fret/technique or pitch/range shifts)
+  plus a catalog-revalidated, global-tempo-correct audio event-window cache.
+  The cache is research-only; descriptors remain non-executable until STRUM
+  supplies an event trainer, held-out evaluator, package, and chart handler.
 - ✅ Worker lifecycle streams for dataset preparation and training. OCTAVE
   owns process creation/cancellation and retains private paths.
 - ✅ Bundle-validated Expert Guitar hybrid profile and Expert Drums direct V14

@@ -668,10 +668,15 @@ duration, technique, and standard-versus-`_22` variant targets without ever
 mapping them to five lanes. Pro Keys preparation likewise decodes only
 `PART REAL_KEYS_X` pitches, durations, channels, and range shifts; `E`, `M`,
 and `H` are not accidental inputs. A malformed or unsupported REAL_* MIDI
-source is excluded explicitly. No Pro descriptor has a train schema,
-checkpoint profile, inference capability, or chart handler until its audio
-preprocessor, event model, held-out evaluator, profile package, and chart
-execution stages are implemented and validated.
+source is excluded explicitly. The selected catalog-audio role is now bound to
+the path-free `pro-logmel-event-windows/v1` contract; the supplied
+`preprocess_pro_targets.py` revalidates every asset and writes only local
+exact-event windows. Each string window retains its standard/`_22` variant,
+string/fret/technique targets; each Pro Keys window retains chromatic
+pitch/channel and range-shift targets. This cache is research-only. No Pro
+descriptor has a train schema, checkpoint profile, inference capability, or
+chart handler until its event model, held-out evaluator, profile package, and
+chart execution stages are implemented and validated.
 
 Keys has the same narrow experiment boundary: `keys.onset-fret/v1` revalidates
 the dedicated `keys_onset_fret` task view, whose label schema selects only
@@ -934,8 +939,18 @@ immutable catalog task view plus decoded label events. At train time the
 decoder revalidates catalog lineage and re-derives every target from the
 managed MIDI asset, so edited target JSON, drifted MIDI, invalid note pairing,
 unsupported Pro technique channels, or a standard-track fret above 17 cannot
-silently become training data. This closes the label-decoding gap only; it does
-not create a Pro trainer or auto-chart profile.
+silently become training data. The view additionally fixes
+`pro-logmel-event-windows/v1`; `scripts/preprocess_pro_targets.py` revalidates
+the view and catalog, derives global-tempo-correct event times, and writes a
+private cache with no source locations. This closes the label and audio-cache
+gaps only; it does not create a Pro trainer or auto-chart profile.
+
+```bash
+python scripts/preprocess_pro_targets.py \
+  --manifest /path/to/views/pro-guitar-targets-v1.json \
+  --catalog-root /path/to/catalog \
+  --cache-dir /path/to/private-cache/pro-guitar-v1
+```
 
 ```bash
 # Any chart/audio family: only Expert coverage and allowed catalog records.

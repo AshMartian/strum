@@ -405,11 +405,13 @@ accepts only `PART REAL_KEYS_X` for the Expert path; Pro Guitar/Bass retain
 the standard versus `_22` source variant in a worker-produced,
 `strum-pro-target-task-manifest/v1` target view. STRUM decodes those immutable
 catalog assets into exact string/fret/technique or Pro Keys pitch/range-shift
-events and re-derives them before a future trainer may consume the view. This
-is a label preparation stage, not a profile: OCTAVE must still treat Pro
-execution as unavailable. Section descriptors now expose their real catalog
-worker while retaining evaluation, profile-packaging, and runtime integration
-requirements.
+events and re-derives them before a future trainer may consume the view. Its
+`pro-logmel-event-windows/v1` cache revalidates audio and whole-song tempo
+maps, retaining target-track variants and event semantics rather than passing
+five-lane labels to a generic feature builder. It remains research-only: no
+Pro execution/profile is discoverable. Section descriptors now expose their
+real catalog worker while retaining evaluation, profile-packaging, and runtime
+integration requirements.
 
 The learned five-lane difficulty transform can be prepared as chart-only or
 with the bounded `rms_onset_v1` catalog-audio baseline. Audio conditioning is

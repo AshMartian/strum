@@ -262,21 +262,18 @@ PLANNED_TRAINING_REQUIREMENTS: dict[str, tuple[str, ...]] = {
         "vocal_chart_execution/v1",
     ),
     "pro_guitar": (
-        "pro_guitar_audio_preprocessor/v1",
         "pro_guitar_sequence_trainer/v1",
         "pro_guitar_held_out_evaluation/v1",
         "pro_guitar_profile_package/v1",
         "pro_guitar_chart_execution/v1",
     ),
     "pro_bass": (
-        "pro_bass_audio_preprocessor/v1",
         "pro_bass_sequence_trainer/v1",
         "pro_bass_held_out_evaluation/v1",
         "pro_bass_profile_package/v1",
         "pro_bass_chart_execution/v1",
     ),
     "pro_keys": (
-        "pro_keys_audio_preprocessor/v1",
         "pro_keys_sequence_trainer/v1",
         "pro_keys_held_out_evaluation/v1",
         "pro_keys_profile_package/v1",
@@ -344,6 +341,11 @@ PRO_TRAINING_CONTRACTS: dict[str, dict[str, object]] = {
             ],
         },
         "prepared_target_encoding": "strum-pro-midi-target-decoder/v1",
+        "available_preprocessing": {
+            "id": "pro-logmel-event-windows/v1",
+            "target_binding": "exact-real-track-event-windows/v1",
+            "deployment_status": "research_cache_only",
+        },
         "required_stages": list(PLANNED_TRAINING_REQUIREMENTS["pro_guitar"]),
         "execution": {"status": "not_available", "inference_capability": None},
     },
@@ -363,6 +365,11 @@ PRO_TRAINING_CONTRACTS: dict[str, dict[str, object]] = {
             ],
         },
         "prepared_target_encoding": "strum-pro-midi-target-decoder/v1",
+        "available_preprocessing": {
+            "id": "pro-logmel-event-windows/v1",
+            "target_binding": "exact-real-track-event-windows/v1",
+            "deployment_status": "research_cache_only",
+        },
         "required_stages": list(PLANNED_TRAINING_REQUIREMENTS["pro_bass"]),
         "execution": {"status": "not_available", "inference_capability": None},
     },
@@ -383,6 +390,11 @@ PRO_TRAINING_CONTRACTS: dict[str, dict[str, object]] = {
             ],
         },
         "prepared_target_encoding": "strum-pro-midi-target-decoder/v1",
+        "available_preprocessing": {
+            "id": "pro-logmel-event-windows/v1",
+            "target_binding": "exact-real-track-event-windows/v1",
+            "deployment_status": "research_cache_only",
+        },
         "required_stages": list(PLANNED_TRAINING_REQUIREMENTS["pro_keys"]),
         "execution": {"status": "not_available", "inference_capability": None},
     },
@@ -707,6 +719,7 @@ PIPELINES = (
                             {
                                 "prepared_task_view_format": "strum-pro-target-task-manifest/v1",
                                 "prepared_target_encoding": "strum-pro-midi-target-decoder/v1",
+                                "prepared_audio_preprocessing": "pro-logmel-event-windows/v1",
                             }
                             if task_kind in PRO_TRAINING_CONTRACTS
                             else {}
