@@ -821,8 +821,13 @@ path-free `checkpoint_output_contracts` uses `candidate_kind` as a selector:
 `pro-logmel-event-windows/v1`, while `free_running_event_proposal/v1` produces
 only `pro.{guitar|bass|keys}.event_proposal` with
 `pro-logmel-event-proposal-windows/v1`. Every selected map entry is explicitly
-a raw experiment candidate with no profile or chart execution. Hosts must
-select one candidate kind and never combine those artifacts as a runnable
+a raw experiment candidate with no profile or chart execution. STRUM uses the
+same selected-candidate resolver while training to verify the produced bundle:
+it requires the exact one-component set, no profiles or companions, and
+hash-verified configuration bytes whose format, task, pipeline,
+implementation, manifest preprocessing, and input/output (plus known-event
+target) semantics match that selected map. Hosts must select one candidate
+kind and never combine, rename, or relabel those artifacts as a runnable
 model.
 
 Keys has the same narrow experiment boundary: `keys.onset-fret/v1` revalidates

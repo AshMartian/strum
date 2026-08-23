@@ -17,6 +17,11 @@ from src.chart_transform_profile import (
     package_chart_transform_profile,
 )
 from src.model_bundle import MANIFEST_FILENAME, BundleValidationError
+from src.pro_candidate_contract import (
+    FREE_RUNNING_PROPOSAL_CANDIDATE_KIND,
+    KNOWN_EVENT_CANDIDATE_KIND,
+    resolve_pro_candidate_contract,
+)
 from src.worker import (
     PIPELINES,
     PROTOCOL_VERSION,
@@ -460,45 +465,41 @@ def test_pro_descriptors_publish_non_executable_real_midi_training_contracts(
     )
     payload = descriptor.as_json()
     output_contracts = payload["checkpoint_output_contracts"]
-    assert output_contracts == {
-        "format": "strum-candidate-checkpoint-output-contracts/v1",
-        "selector": {
-            "training_option": "candidate_kind",
-            "default": "known_event_attributes/v1",
-        },
-        "by_candidate_kind": {
-            "known_event_attributes/v1": {
-                "component_outputs": [f"pro.{task_kind.removeprefix('pro_')}.event_attributes"],
-                "model_outputs": (
-                    ["string_fret_technique", "track_variant"]
-                    if task_kind in {"pro_guitar", "pro_bass"}
-                    else ["chromatic_pitch_set", "range_shift_state"]
-                ),
-                "preprocessing": {
-                    "id": "pro-logmel-event-windows/v1",
-                    "input_contract": "strum-pro-known-reference-event-window/v1",
-                },
-                "deployment_scope": {
-                    "status": "raw_experiment_candidate_only",
-                    "profile": "not_available",
-                    "chart_execution": "not_available",
-                },
-            },
-            "free_running_event_proposal/v1": {
-                "component_outputs": [f"pro.{task_kind.removeprefix('pro_')}.event_proposal"],
-                "model_outputs": ["audio_event_proposal_scores"],
-                "preprocessing": {
-                    "id": "pro-logmel-event-proposal-windows/v1",
-                    "input_contract": "strum-pro-arbitrary-audio-window/v1",
-                    "negative_policy": "pro-event-proposal-asymmetric-window-exclusion/v1",
-                },
-                "deployment_scope": {
-                    "status": "raw_experiment_candidate_only",
-                    "profile": "not_available",
-                    "chart_execution": "not_available",
-                },
-            },
-        },
+    assert output_contracts["format"] == "strum-candidate-checkpoint-output-contracts/v1"
+    assert output_contracts["selector"] == {
+        "training_option": "candidate_kind",
+        "default": KNOWN_EVENT_CANDIDATE_KIND,
+    }
+    entries = output_contracts["by_candidate_kind"]
+    assert entries == {
+        candidate_kind: resolve_pro_candidate_contract(
+            task_kind, candidate_kind
+        ).as_descriptor_entry()
+        for candidate_kind in (KNOWN_EVENT_CANDIDATE_KIND, FREE_RUNNING_PROPOSAL_CANDIDATE_KIND)
+    }
+    for entry in entries.values():
+        assert entry["candidate_bundle"]["component_set"] == entry["component_outputs"]
+        assert entry["candidate_bundle"]["profiles"] == "forbidden"
+        assert entry["candidate_bundle"]["companions"] == "forbidden"
+    known_bundle = entries[KNOWN_EVENT_CANDIDATE_KIND]["candidate_bundle"]
+    assert known_bundle["config_format"] == "strum-pro-event-attribute-candidate-config/v1"
+    assert known_bundle["input_contract"]["format"] == ("strum-pro-known-reference-event-window/v1")
+    assert known_bundle["output_contract"]["midi_emission"] is False
+    assert known_bundle["target_contract"]["kind"].startswith("pro_")
+    proposal_bundle = entries[FREE_RUNNING_PROPOSAL_CANDIDATE_KIND]["candidate_bundle"]
+    assert proposal_bundle["config_format"] == "strum-pro-event-proposal-candidate-config/v1"
+    assert proposal_bundle["input_contract"] == {
+        "format": "strum-pro-arbitrary-audio-window/v1",
+        "requires_midi_at_inference": False,
+        "offline_window_scoring": True,
+        "free_running_event_proposal": True,
+        "sequence_decoding": False,
+        "midi_emission": False,
+    }
+    assert proposal_bundle["output_contract"] == {
+        "format": "strum-pro-event-proposal-scores/v1",
+        "event_attributes": False,
+        "midi_emission": False,
     }
     assert "/home/" not in json.dumps(output_contracts)
     assert "/tmp/" not in json.dumps(output_contracts)

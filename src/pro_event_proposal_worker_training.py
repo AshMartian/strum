@@ -19,6 +19,12 @@ from typing import Any
 
 from src import PROJECT_ROOT, __version__
 from src.model_bundle import MANIFEST_FILENAME
+from src.pro_candidate_contract import (
+    FREE_RUNNING_PROPOSAL_CANDIDATE_KIND,
+    ProCandidateContractError,
+    resolve_pro_candidate_contract,
+    validate_pro_candidate_bundle,
+)
 from src.pro_event_proposal_preprocessing import (
     PRO_EVENT_PROPOSAL_NEGATIVE_POLICY_ID,
     PRO_EVENT_PROPOSAL_PREPROCESSING_ID,
@@ -290,17 +296,20 @@ def run_catalog_pro_event_proposal_training(
     source_checkpoint = checkpoints / "best.pt"
     if not source_checkpoint.is_file():
         raise ProEventProposalTrainingError("Pro proposal trainer did not produce a checkpoint")
-    component_id = f"pro.{task_kind.removeprefix('pro_')}.event_proposal"
+    selected_contract = resolve_pro_candidate_contract(
+        task_kind, FREE_RUNNING_PROPOSAL_CANDIDATE_KIND
+    )
+    component_id = selected_contract.component_id
     bundle_dir = output_dir / "bundle"
     checkpoint = bundle_dir / "weights" / f"{task_kind}-event-proposal.pt"
     checkpoint.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source_checkpoint, checkpoint)
     portable_config = {
         "schema_version": 1,
-        "format": "strum-pro-event-proposal-candidate-config/v1",
+        "format": selected_contract.config_format,
         "task_kind": task_kind,
         "pipeline_id": pipeline_id,
-        "model_implementation": MODEL_IMPLEMENTATION,
+        "model_implementation": selected_contract.model_implementation,
         "preprocessing": {
             "id": PRO_EVENT_PROPOSAL_PREPROCESSING_ID,
             # This is copied from the private cache summary, which includes
@@ -308,19 +317,8 @@ def run_catalog_pro_event_proposal_training(
             # identifiers, bounded options, and hashes/frames -- never paths.
             "negative_policy": negative_policy,
         },
-        "input_contract": {
-            "format": "strum-pro-arbitrary-audio-window/v1",
-            "requires_midi_at_inference": False,
-            "offline_window_scoring": True,
-            "free_running_event_proposal": True,
-            "sequence_decoding": False,
-            "midi_emission": False,
-        },
-        "output_contract": {
-            "format": "strum-pro-event-proposal-scores/v1",
-            "event_attributes": False,
-            "midi_emission": False,
-        },
+        "input_contract": selected_contract.input_contract,
+        "output_contract": selected_contract.output_contract,
         "training": options.portable(),
     }
     config_path = bundle_dir / "configs" / f"{task_kind}-event-proposal.json"
@@ -342,7 +340,7 @@ def run_catalog_pro_event_proposal_training(
         "byte_length": checkpoint.stat().st_size,
         "config_sha256": _sha256(config_path),
         "config_byte_length": config_path.stat().st_size,
-        "architecture": MODEL_IMPLEMENTATION,
+        "architecture": selected_contract.model_implementation,
         "preprocessing": PRO_EVENT_PROPOSAL_PREPROCESSING_ID,
     }
     (bundle_dir / MANIFEST_FILENAME).write_text(
@@ -359,6 +357,12 @@ def run_catalog_pro_event_proposal_training(
         + "\n",
         encoding="utf-8",
     )
+    try:
+        validate_pro_candidate_bundle(bundle_dir, selected_contract)
+    except ProCandidateContractError as error:
+        raise ProEventProposalTrainingError(
+            "Pro proposal output bundle does not satisfy selected contract"
+        ) from error
     task_view = task_manifest.get("task_view")
     lineage = task_view.get("lineage") if isinstance(task_view, dict) else None
     experiment = {

@@ -21,6 +21,12 @@ from typing import Any
 from src import PROJECT_ROOT, __version__
 from src.model_bundle import MANIFEST_FILENAME
 from src.pro_audio_preprocessing import prepare_pro_audio_windows
+from src.pro_candidate_contract import (
+    KNOWN_EVENT_CANDIDATE_KIND,
+    ProCandidateContractError,
+    resolve_pro_candidate_contract,
+    validate_pro_candidate_bundle,
+)
 from src.pro_target_manifest import (
     PRO_TARGET_MANIFEST_FORMAT,
     resolve_catalog_pro_target_manifest_songs,
@@ -320,50 +326,23 @@ def run_catalog_pro_event_training(
     source_checkpoint = checkpoints / "best.pt"
     if not source_checkpoint.is_file():
         raise ProEventTrainingError("Pro candidate trainer did not produce a checkpoint")
-    component_id = f"pro.{task_kind.removeprefix('pro_')}.event_attributes"
+    selected_contract = resolve_pro_candidate_contract(task_kind, KNOWN_EVENT_CANDIDATE_KIND)
+    component_id = selected_contract.component_id
     bundle_dir = output_dir / "bundle"
     checkpoint = bundle_dir / "weights" / f"{task_kind}-event-attributes.pt"
     checkpoint.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source_checkpoint, checkpoint)
-    target_contract: dict[str, object] = (
-        {
-            "kind": "pro_string_fret_technique/v1",
-            "string_count": 6,
-            "fret_range": [0, 22],
-            "techniques": [
-                "normal",
-                "arpeggio_form",
-                "bent",
-                "muted",
-                "tapped",
-                "harmonic",
-                "pinch_harmonic",
-            ],
-            "track_variant_head": ["standard", "22_fret"],
-        }
-        if task_kind in {"pro_guitar", "pro_bass"}
-        else {
-            "kind": "pro_keys_pitch_channel_range_shift/v1",
-            "pitch_range": [48, 72],
-            "channel_metadata": "retained_in_labels_not_predicted/v1",
-            "range_state_head": ["none", "C", "D", "E", "F", "G", "A"],
-        }
-    )
+    assert selected_contract.target_contract is not None
     portable_config = {
         "schema_version": 1,
-        "format": "strum-pro-event-attribute-candidate-config/v1",
+        "format": selected_contract.config_format,
         "task_kind": task_kind,
         "pipeline_id": pipeline_id,
-        "model_implementation": MODEL_IMPLEMENTATION,
+        "model_implementation": selected_contract.model_implementation,
         "preprocessing": PREPROCESSING_ID,
-        "input_contract": {
-            "format": "strum-pro-known-reference-event-window/v1",
-            "event_time_source": "held_out_catalog_label_only",
-            "free_running_event_proposal": False,
-            "sequence_decoding": False,
-            "midi_emission": False,
-        },
-        "target_contract": target_contract,
+        "input_contract": selected_contract.input_contract,
+        "output_contract": selected_contract.output_contract,
+        "target_contract": selected_contract.target_contract,
         "training": options.portable(),
     }
     config_path = bundle_dir / "configs" / f"{task_kind}-event-attributes.json"
@@ -390,7 +369,7 @@ def run_catalog_pro_event_training(
         "byte_length": checkpoint.stat().st_size,
         "config_sha256": _sha256(config_path),
         "config_byte_length": config_path.stat().st_size,
-        "architecture": MODEL_IMPLEMENTATION,
+        "architecture": selected_contract.model_implementation,
         "preprocessing": PREPROCESSING_ID,
     }
     (bundle_dir / MANIFEST_FILENAME).write_text(
@@ -407,6 +386,12 @@ def run_catalog_pro_event_training(
         + "\n",
         encoding="utf-8",
     )
+    try:
+        validate_pro_candidate_bundle(bundle_dir, selected_contract)
+    except ProCandidateContractError as error:
+        raise ProEventTrainingError(
+            "Pro candidate output bundle does not satisfy selected contract"
+        ) from error
     raw_task_view = task_manifest.get("task_view")
     lineage = raw_task_view.get("lineage") if isinstance(raw_task_view, dict) else None
     source_inputs = _source_inputs(task_manifest)

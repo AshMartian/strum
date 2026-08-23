@@ -52,6 +52,14 @@ from src.model_bundle import (
     ModelBundle,
     load_model_bundle,
 )
+from src.pro_candidate_contract import (
+    FREE_RUNNING_PROPOSAL_CANDIDATE_KIND,
+    KNOWN_EVENT_CANDIDATE_KIND,
+    ProCandidateContractError,
+    pro_candidate_checkpoint_output_contracts,
+    resolve_pro_candidate_contract,
+    validate_pro_candidate_bundle,
+)
 from src.pro_event_proposal_preprocessing import (
     PRO_EVENT_PROPOSAL_NEGATIVE_POLICY_ID,
     PRO_EVENT_PROPOSAL_PREPROCESSING_ID,
@@ -784,74 +792,19 @@ def _pro_candidate_checkpoint_output_contracts(task_kind: str) -> dict[str, obje
     static ``checkpoint_outputs`` tuple, which means "all required outputs"
     for ordinary single-output workers.
     """
-    instrument = task_kind.removeprefix("pro_")
-    if instrument not in {"guitar", "bass", "keys"}:  # pragma: no cover - static callers
-        raise ValueError("unsupported Pro task kind")
-    known_event_outputs = (
-        ["string_fret_technique", "track_variant"]
-        if instrument in {"guitar", "bass"}
-        else ["chromatic_pitch_set", "range_shift_state"]
-    )
-    return {
-        "format": "strum-candidate-checkpoint-output-contracts/v1",
-        "selector": {
-            "training_option": "candidate_kind",
-            "default": "known_event_attributes/v1",
-        },
-        "by_candidate_kind": {
-            "known_event_attributes/v1": {
-                "component_outputs": [f"pro.{instrument}.event_attributes"],
-                "model_outputs": known_event_outputs,
-                "preprocessing": {
-                    "id": "pro-logmel-event-windows/v1",
-                    "input_contract": "strum-pro-known-reference-event-window/v1",
-                },
-                "deployment_scope": {
-                    "status": "raw_experiment_candidate_only",
-                    "profile": "not_available",
-                    "chart_execution": "not_available",
-                },
-            },
-            "free_running_event_proposal/v1": {
-                "component_outputs": [f"pro.{instrument}.event_proposal"],
-                "model_outputs": ["audio_event_proposal_scores"],
-                "preprocessing": {
-                    "id": PRO_EVENT_PROPOSAL_PREPROCESSING_ID,
-                    "input_contract": "strum-pro-arbitrary-audio-window/v1",
-                    "negative_policy": PRO_EVENT_PROPOSAL_NEGATIVE_POLICY_ID,
-                },
-                "deployment_scope": {
-                    "status": "raw_experiment_candidate_only",
-                    "profile": "not_available",
-                    "chart_execution": "not_available",
-                },
-            },
-        },
-    }
+    return pro_candidate_checkpoint_output_contracts(task_kind)
 
 
-def _checkpoint_outputs_for_candidate(
-    descriptor: PipelineDescriptor, candidate_kind: str
-) -> tuple[str, ...]:
-    """Resolve exactly the output component(s) selected by a train option."""
-    contract = descriptor.checkpoint_output_contracts
-    if not isinstance(contract, dict):  # pragma: no cover - static descriptor invariant
-        raise WorkerRequestError("pipeline has no candidate checkpoint-output contract")
-    by_candidate_kind = contract.get("by_candidate_kind")
-    candidate = (
-        by_candidate_kind.get(candidate_kind) if isinstance(by_candidate_kind, dict) else None
-    )
-    component_outputs = candidate.get("component_outputs") if isinstance(candidate, dict) else None
-    if (
-        not isinstance(component_outputs, list)
-        or not component_outputs
-        or not all(
-            isinstance(component_id, str) and component_id for component_id in component_outputs
-        )
-        or len(set(component_outputs)) != len(component_outputs)
-    ):  # pragma: no cover - static descriptor invariant
-        raise WorkerRequestError("pipeline candidate checkpoint-output contract is invalid")
-    return tuple(component_outputs)
+def _pro_task_kind_for_pipeline(pipeline_id: str) -> str:
+    """Resolve the catalog task identity before selecting an output contract."""
+    task_kind = {
+        "strum.instrument-chart/pro-guitar/v1": "pro_guitar",
+        "strum.instrument-chart/pro-bass/v1": "pro_bass",
+        "strum.instrument-chart/pro-keys/v1": "pro_keys",
+    }.get(pipeline_id)
+    if task_kind is None:  # pragma: no cover - protected by caller dispatch
+        raise WorkerRequestError("unsupported Pro event candidate pipeline")
+    return task_kind
 
 
 PRO_TRAINING_CONTRACTS: dict[str, dict[str, object]] = {
@@ -4455,13 +4408,13 @@ def run_training_request(request_path: Path) -> dict[str, object]:
                 "Pro event candidate training requires worker-local catalog_root"
             )
         raw_options = dict(request["options"])
-        candidate_kind = raw_options.pop("candidate_kind", "known_event_attributes/v1")
-        if candidate_kind not in {"known_event_attributes/v1", "free_running_event_proposal/v1"}:
-            raise WorkerRequestError("Pro event candidate kind is invalid")
+        candidate_kind = raw_options.pop("candidate_kind", KNOWN_EVENT_CANDIDATE_KIND)
         try:
-            required_components = _checkpoint_outputs_for_candidate(descriptor, candidate_kind)
+            task_kind = _pro_task_kind_for_pipeline(pipeline_id)
+            selected_contract = resolve_pro_candidate_contract(task_kind, candidate_kind)
+            required_components = (selected_contract.component_id,)
             revision, dirty = _revision()
-            if candidate_kind == "known_event_attributes/v1":
+            if candidate_kind == KNOWN_EVENT_CANDIDATE_KIND:
                 from src.pro_event_worker_training import (  # noqa: PLC0415
                     ProEventTrainingOptions,
                     run_catalog_pro_event_training,
@@ -4487,7 +4440,7 @@ def run_training_request(request_path: Path) -> dict[str, object]:
                     strum_revision=revision,
                     strum_source_dirty=dirty,
                 )
-            else:
+            elif candidate_kind == FREE_RUNNING_PROPOSAL_CANDIDATE_KIND:
                 from src.pro_event_proposal_worker_training import (  # noqa: PLC0415
                     ProEventProposalTrainingOptions,
                     run_catalog_pro_event_proposal_training,
@@ -4503,14 +4456,25 @@ def run_training_request(request_path: Path) -> dict[str, object]:
                     strum_revision=revision,
                     strum_source_dirty=dirty,
                 )
-                component_id = result.get("component_id")
-                if not isinstance(component_id, str) or (component_id,) != required_components:
-                    raise WorkerRequestError(
-                        "Pro proposal candidate component disagrees with its selected contract"
-                    )
+            else:  # pragma: no cover - resolver rejects unknown values first
+                raise WorkerRequestError("Pro event candidate kind is invalid")
+            component_id = result.get("component_id")
+            if component_id != selected_contract.component_id:
+                raise WorkerRequestError(
+                    "Pro candidate component disagrees with its selected contract"
+                )
+            # Generic preflight only establishes portable-file integrity.  A
+            # raw Pro candidate has an additional selected-kind boundary: the
+            # produced bundle may contain exactly one mapped component and its
+            # manifest/config semantics must still agree with this request.
+            validate_pro_candidate_bundle(result["bundle_dir"], selected_contract)
             preflight = preflight_bundle(
                 result["bundle_dir"], required_components=required_components
             )
+        except ProCandidateContractError as error:
+            raise WorkerRequestError(
+                "Pro candidate output bundle does not satisfy selected contract"
+            ) from error
         except (BundleValidationError, CatalogValidationError):
             raise
         except (OSError, TypeError, ValueError) as error:

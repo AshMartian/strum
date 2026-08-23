@@ -16,6 +16,13 @@ import torch
 from src.catalog_task_manifest import build_catalog_task_manifest
 from src.model_bundle import MANIFEST_FILENAME
 from src.pro_audio_preprocessing import _tempo_segments, _tick_seconds, prepare_pro_audio_windows
+from src.pro_candidate_contract import (
+    FREE_RUNNING_PROPOSAL_CANDIDATE_KIND,
+    KNOWN_EVENT_CANDIDATE_KIND,
+    ProCandidateContractError,
+    resolve_pro_candidate_contract,
+    validate_pro_candidate_bundle,
+)
 from src.pro_event_proposal_preprocessing import (
     PRO_EVENT_PROPOSAL_NEGATIVE_POLICY_ID,
     _negative_centers,
@@ -30,6 +37,105 @@ from src.pro_target_manifest import (
 )
 from src.song_source_catalog import CatalogValidationError
 from src.worker import inspect_model_bundle, prepare_dataset_request, run_training_request
+
+
+def _sha256_path(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _write_selected_pro_candidate_bundle(
+    root: Path, *, task_kind: str, candidate_kind: str
+) -> tuple[Path, dict[str, object]]:
+    """Write one minimal, hash-bound raw Pro bundle for contract tests."""
+    contract = resolve_pro_candidate_contract(task_kind, candidate_kind)
+    checkpoint = root / "weights" / "candidate.pt"
+    config_path = root / "configs" / "candidate.json"
+    checkpoint.parent.mkdir(parents=True)
+    config_path.parent.mkdir(parents=True)
+    checkpoint.write_bytes(b"raw candidate")
+    config: dict[str, object] = {
+        "schema_version": 1,
+        "format": contract.config_format,
+        "task_kind": contract.task_kind,
+        "pipeline_id": contract.pipeline_id,
+        "model_implementation": contract.model_implementation,
+        "input_contract": contract.input_contract,
+        "output_contract": contract.output_contract,
+        "training": {"model_id": "fixture"},
+    }
+    if contract.target_contract is not None:
+        config["target_contract"] = contract.target_contract
+        config["preprocessing"] = contract.preprocessing["id"]
+    else:
+        config["preprocessing"] = {
+            "id": contract.preprocessing["id"],
+            "negative_policy": {"id": contract.preprocessing["negative_policy"]},
+        }
+    config_path.write_text(json.dumps(config, sort_keys=True), encoding="utf-8")
+    manifest = {
+        "schema_version": 1,
+        "model_id": "pro-contract-fixture",
+        "compatibility": {"manifest_schema": 1, "strum_version": ">=0.1.0"},
+        "components": {
+            contract.component_id: {
+                "checkpoint": checkpoint.relative_to(root).as_posix(),
+                "sha256": _sha256_path(checkpoint),
+                "byte_length": checkpoint.stat().st_size,
+                "config": config_path.relative_to(root).as_posix(),
+                "config_sha256": _sha256_path(config_path),
+                "config_byte_length": config_path.stat().st_size,
+                "architecture": contract.model_implementation,
+                "preprocessing": contract.preprocessing["id"],
+            }
+        },
+    }
+    (root / MANIFEST_FILENAME).write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
+    return root, manifest
+
+
+@pytest.mark.parametrize(
+    "candidate_kind",
+    [KNOWN_EVENT_CANDIDATE_KIND, FREE_RUNNING_PROPOSAL_CANDIDATE_KIND],
+)
+def test_selected_pro_candidate_bundle_contract_rejects_combined_or_relabelled_output(
+    tmp_path: Path, candidate_kind: str
+) -> None:
+    contract = resolve_pro_candidate_contract("pro_guitar", candidate_kind)
+    bundle, manifest = _write_selected_pro_candidate_bundle(
+        tmp_path / candidate_kind.replace("/", "-"),
+        task_kind="pro_guitar",
+        candidate_kind=candidate_kind,
+    )
+
+    assert validate_pro_candidate_bundle(bundle, contract).profiles == {}
+
+    # A generic portable preflight would accept this added well-formed file.
+    # The selected-candidate validator must never let a host combine raw
+    # known-event and proposal artifacts as one model.
+    second_id = (
+        "pro.guitar.event_proposal"
+        if "attributes" in candidate_kind
+        else "pro.guitar.event_attributes"
+    )
+    original = next(iter(manifest["components"].values()))
+    assert isinstance(original, dict)
+    manifest["components"][second_id] = dict(original)
+    (bundle / MANIFEST_FILENAME).write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
+    with pytest.raises(ProCandidateContractError, match="component set"):
+        validate_pro_candidate_bundle(bundle, contract)
+
+    del manifest["components"][second_id]
+    config_path = bundle / "configs" / "candidate.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    # Rehashing proves this is not merely generic byte-integrity checking: it
+    # is an independent semantic mismatch against the selected map.
+    config["input_contract"] = {"format": "strum-pro-arbitrary-audio-window/v1"}
+    config_path.write_text(json.dumps(config, sort_keys=True), encoding="utf-8")
+    original["config_sha256"] = _sha256_path(config_path)
+    original["config_byte_length"] = config_path.stat().st_size
+    (bundle / MANIFEST_FILENAME).write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
+    with pytest.raises(ProCandidateContractError, match="config input_contract"):
+        validate_pro_candidate_bundle(bundle, contract)
 
 
 def _asset(root: Path, content: bytes, filename: str) -> dict[str, object]:

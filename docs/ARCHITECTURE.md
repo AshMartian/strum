@@ -451,6 +451,16 @@ There is intentionally no hard-coded score threshold: OCTAVE can show the
 evidence and request the explicit promotion, but cannot treat a one-epoch
 candidate as deployable.
 
+The descriptor map is also STRUM's bundle-admission authority, not advisory
+host metadata. The worker resolves the selected candidate before dispatch, and
+each candidate writer revalidates the same contract after emission. The raw bundle must contain exactly its one mapped
+component and no profile/companions; its manifest preprocessing and
+hash-verified config must match the configured format, task kind, pipeline,
+implementation, input/output semantics, and (for known-event candidates)
+target semantics. A hash-valid combined or rehashed relabelled bundle is
+rejected before the worker reports completion. This remains a raw experiment
+gate and does not add Pro chart execution.
+
 Discovery is dynamic rather than hard-coded in OCTAVE:
 
 ```bash
