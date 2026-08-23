@@ -113,7 +113,7 @@ def _candidate_config(bundle: ModelBundle) -> dict[str, Any]:
         "onset_inference",
     }
     if (
-        set(raw) != required
+        (set(raw) != required and set(raw) != required | {"training"})
         or raw.get("schema_version") != 1
         or raw.get("format") != "strum-guitar-neural-model-config/v1"
         or raw.get("preprocessing") != PREPROCESSING
@@ -121,6 +121,7 @@ def _candidate_config(bundle: ModelBundle) -> dict[str, Any]:
         or not isinstance(raw.get("onset_model"), dict)
         or not isinstance(raw.get("fret_model"), dict)
         or not isinstance(raw.get("onset_inference"), dict)
+        or ("training" in raw and not isinstance(raw["training"], dict))
         or raw["audio"] != EXPECTED_AUDIO
         or raw["onset_model"].get("n_mels") != EXPECTED_AUDIO["n_mels"]
         or raw["fret_model"].get("n_mels") != EXPECTED_AUDIO["n_mels"]

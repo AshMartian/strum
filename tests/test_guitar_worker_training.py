@@ -6,6 +6,8 @@ from pathlib import Path
 
 import yaml
 
+from src.inference.guitar_neural_profile import load_guitar_neural_candidate
+from src.model_bundle import load_model_bundle
 from src.worker import PIPELINES, prepare_dataset_request, run_training_request
 
 
@@ -145,6 +147,7 @@ def test_guitar_worker_trains_from_catalog_task_view_and_packages_provenance(
     assert portable_config["format"] == "strum-guitar-neural-model-config/v1"
     assert portable_config["audio"]["sample_rate"] == 22050
     assert portable_config["onset_inference"]["peak_min_distance_frames"] == 3
+    assert load_guitar_neural_candidate(load_model_bundle(bundle, check_files=True))["training"]
 
 
 def test_guitar_pipeline_advertises_a_strict_worker_training_schema() -> None:
