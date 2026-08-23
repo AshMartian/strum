@@ -65,6 +65,8 @@ class TrainingConfig:
     audio_window_ms: float = 50.0
     audio_max_duration_seconds: float = 900.0
     init_checkpoint: str | None = None
+    checkpoint_mode: str | None = None
+    parent_provenance: dict[str, str] | None = None
     strum_revision: str | None = None
 
     @classmethod
@@ -91,6 +93,11 @@ class TrainingConfig:
             raise DatasetValidationError(
                 "dataset_manifest, output_dir, and model_id must be non-empty"
             )
+        if not all(
+            isinstance(value, str) and value.strip()
+            for value in (config.source_difficulty, config.target_difficulty)
+        ):
+            raise DatasetValidationError("source_difficulty and target_difficulty must be non-empty strings")
         if not 0 < config.validation_fraction < 1:
             raise DatasetValidationError("validation_fraction must be between 0 and 1")
         if config.lane_count < 1 or config.hidden_dim < 1 or config.epochs < 1:
@@ -129,7 +136,35 @@ class TrainingConfig:
             raise DatasetValidationError("strum_revision must be non-empty when provided")
         if config.init_checkpoint is not None and not config.init_checkpoint.strip():
             raise DatasetValidationError("init_checkpoint must be non-empty when provided")
-        return config
+        checkpoint_mode = config.checkpoint_mode
+        if checkpoint_mode is None:
+            checkpoint_mode = "fine_tune" if config.init_checkpoint is not None else "fresh"
+        if checkpoint_mode not in {"fresh", "fine_tune"}:
+            raise DatasetValidationError("checkpoint_mode must be fresh or fine_tune")
+        if checkpoint_mode == "fresh" and config.init_checkpoint is not None:
+            raise DatasetValidationError("fresh checkpoint_mode must not set init_checkpoint")
+        if checkpoint_mode == "fine_tune" and config.init_checkpoint is None:
+            raise DatasetValidationError("fine_tune checkpoint_mode requires init_checkpoint")
+        if config.parent_provenance is not None:
+            expected_parent_fields = {
+                "model_id",
+                "manifest_sha256",
+                "component",
+                "checkpoint_sha256",
+            }
+            if (
+                set(config.parent_provenance) != expected_parent_fields
+                or not all(
+                    isinstance(value, str) and value
+                    for value in config.parent_provenance.values()
+                )
+            ):
+                raise DatasetValidationError("parent_provenance is invalid")
+            for checksum in ("manifest_sha256", "checkpoint_sha256"):
+                value = config.parent_provenance[checksum]
+                if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+                    raise DatasetValidationError("parent_provenance has an invalid SHA-256")
+        return replace(config, checkpoint_mode=checkpoint_mode)
 
 
 @dataclass(frozen=True)
@@ -634,7 +669,10 @@ def train(config: TrainingConfig) -> dict[str, Any]:
         initial_path = Path(config.init_checkpoint).expanduser().resolve()
         if not initial_path.is_file():
             raise DatasetValidationError(f"init_checkpoint not found: {initial_path}")
-        initial = torch.load(initial_path, map_location="cpu", weights_only=False)
+        try:
+            initial = torch.load(initial_path, map_location="cpu", weights_only=True)
+        except Exception as error:  # Torch reports different safe-load errors by version.
+            raise DatasetValidationError("init_checkpoint is not a safe tensor-only checkpoint") from error
         if not isinstance(initial, dict) or initial.get("model_type") != "EventTransformMLP":
             raise DatasetValidationError("init_checkpoint is not an EventTransformMLP checkpoint")
         if (
@@ -645,8 +683,19 @@ def train(config: TrainingConfig) -> dict[str, Any]:
             raise DatasetValidationError(
                 "init_checkpoint model shape does not match lane_count/hidden_dim"
             )
-        model.load_state_dict(initial["model_state_dict"])
+        state_dict = initial.get("model_state_dict")
+        if not isinstance(state_dict, dict) or not all(
+            isinstance(name, str) and isinstance(tensor, torch.Tensor)
+            for name, tensor in state_dict.items()
+        ):
+            raise DatasetValidationError("init_checkpoint has an invalid tensor state dictionary")
+        try:
+            model.load_state_dict(state_dict, strict=True)
+        except RuntimeError as error:
+            raise DatasetValidationError("init_checkpoint state does not match EventTransformMLP") from error
         initialization = {"checkpoint_sha256": _sha256(initial_path)}
+        if config.parent_provenance is not None:
+            initialization["parent"] = config.parent_provenance
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate)
     model.train()
     for _ in range(config.epochs):
@@ -787,7 +836,7 @@ def train(config: TrainingConfig) -> dict[str, Any]:
         "pipeline": {"id": "chart_transform.five_lane", "version": 1},
         "task_view_id": task_view_id,
         "configuration": {"sha256": config_fingerprint, "values": portable_config},
-        "checkpoint_mode": "fine_tune" if initialization else "fresh",
+        "checkpoint_mode": config.checkpoint_mode,
         "runtime": {
             "strum_version": __version__,
             "strum_revision": config.strum_revision,
@@ -799,6 +848,8 @@ def train(config: TrainingConfig) -> dict[str, Any]:
             "manifest_sha256": _sha256(output_dir / MANIFEST_FILENAME),
         },
     }
+    if config.parent_provenance is not None:
+        experiment["parent"] = config.parent_provenance
     (output_dir / "experiment.json").write_text(
         json.dumps(experiment, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )

@@ -95,6 +95,21 @@ CHART_TRANSFORM_PREPARE_SCHEMA = _object_schema(
 CHART_TRANSFORM_TRAIN_SCHEMA = _object_schema(
     {
         "model_id": {"type": "string"},
+        "checkpoint_mode": {
+            "type": "string",
+            "enum": ["fresh", "fine_tune"],
+            "default": "fresh",
+        },
+        # The parent location is supplied by OCTAVE's main process after its
+        # bundle picker has selected a directory.  It is deliberately an
+        # option rather than a renderer-visible output: worker responses and
+        # all portable artifacts retain only its verified identity below.
+        "parent_bundle": {
+            "type": "string",
+            "format": "strum-model-bundle-root",
+            "writeOnly": True,
+            "x-strum-scope": "main-process",
+        },
         "seed": {"type": "integer", "default": 20260813},
         "validation_fraction": {"type": "number", "minimum": 0, "maximum": 1, "default": 0.2},
         "lane_count": {"type": "integer", "minimum": 1, "default": 5},
@@ -1068,6 +1083,99 @@ def _read_train_request(request_path: Path) -> dict[str, Any]:
     return raw
 
 
+def _slug_component_part(value: str) -> str:
+    """Return the portable component-name spelling used by chart transforms."""
+    return "".join(character.lower() if character.isalnum() else "_" for character in value).strip(
+        "_"
+    )
+
+
+def _chart_transform_component_id(*, instrument: str, source: str, target: str) -> str:
+    return ".".join(
+        (
+            "chart_transform",
+            _slug_component_part(instrument),
+            f"{_slug_component_part(source)}_to_{_slug_component_part(target)}",
+        )
+    )
+
+
+def _validated_chart_transform_parent(
+    parent_bundle: str,
+    config: Any,
+    *,
+    instrument: str,
+) -> tuple[Path, dict[str, str]]:
+    """Resolve one compatible, integrity-verified transform parent.
+
+    This is the worker's only route from a fine-tune request to a checkpoint.
+    In particular, a caller cannot smuggle an arbitrary ``.pt`` location into
+    the trainer: the file must be declared by a portable bundle and pass its
+    hash/size preflight before the tensor-only loader sees it.
+    """
+    component_id = _chart_transform_component_id(
+        instrument=instrument,
+        source=config.source_difficulty,
+        target=config.target_difficulty,
+    )
+    try:
+        preflight = preflight_bundle(parent_bundle, required_components=(component_id,))
+        bundle = load_model_bundle(parent_bundle, check_files=True)
+    except BundleValidationError as error:
+        raise WorkerRequestError("fine-tune parent bundle failed verification") from error
+    component = bundle.component(component_id)
+    if component is None or component.checkpoint is None or component.config is None:
+        raise WorkerRequestError("fine-tune parent does not declare a complete chart-transform component")
+    if component.architecture != "EventTransformMLP/v1":
+        raise WorkerRequestError("fine-tune parent has an incompatible chart-transform architecture")
+    if component.preprocessing != "midi-five-lane-events/v1":
+        raise WorkerRequestError("fine-tune parent has incompatible chart-transform preprocessing")
+
+    profile = bundle.profile(f"difficulty-transform-{instrument}")
+    if (
+        profile is None
+        or profile.capability != "difficulty.transform/v1"
+        or profile.instruments != (instrument,)
+        or profile.required_components != (component_id,)
+        or profile.difficulty_policies != (f"learned:{component_id}",)
+    ):
+        raise WorkerRequestError("fine-tune parent does not declare the expected inference profile")
+
+    try:
+        parent_config = json.loads(component.config.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise WorkerRequestError("fine-tune parent configuration is unreadable") from error
+    if not isinstance(parent_config, dict):
+        raise WorkerRequestError("fine-tune parent configuration must be an object")
+    compatible_fields = (
+        "source_difficulty",
+        "target_difficulty",
+        "lane_count",
+        "hidden_dim",
+        "audio_feature_mode",
+        "audio_sample_rate",
+        "audio_window_ms",
+        "audio_max_duration_seconds",
+    )
+    if parent_config.get("instrument") != instrument:
+        raise WorkerRequestError("fine-tune parent is incompatible: instrument differs")
+    for field in compatible_fields:
+        if parent_config.get(field) != getattr(config, field):
+            raise WorkerRequestError(f"fine-tune parent is incompatible: {field} differs")
+
+    manifest_sha256 = preflight.get("manifest_sha256")
+    if not isinstance(manifest_sha256, str) or component.sha256 is None:
+        # ``preflight_bundle`` guarantees this today.  Keep the invariant local
+        # in case the generic bundle preflight later adds optional components.
+        raise WorkerRequestError("fine-tune parent is missing verified identity")
+    return component.checkpoint, {
+        "model_id": bundle.model_id,
+        "manifest_sha256": manifest_sha256,
+        "component": component_id,
+        "checkpoint_sha256": component.sha256,
+    }
+
+
 def run_training_request(request_path: Path) -> dict[str, object]:
     """Run one explicit, synchronous training job for a worker-supported pipeline.
 
@@ -1148,6 +1256,8 @@ def run_training_request(request_path: Path) -> dict[str, object]:
     options = request["options"]
     permitted = {
         "model_id",
+        "checkpoint_mode",
+        "parent_bundle",
         "seed",
         "validation_fraction",
         "lane_count",
@@ -1164,20 +1274,62 @@ def run_training_request(request_path: Path) -> dict[str, object]:
     }
     if set(options) - permitted or not isinstance(options.get("model_id"), str):
         raise WorkerRequestError("invalid chart-transform training options")
+    checkpoint_mode = options.get("checkpoint_mode", "fresh")
+    if checkpoint_mode == "resume":
+        raise WorkerRequestError(
+            "chart-transform resume is not supported; use fresh or fine_tune with a verified bundle"
+        )
+    if checkpoint_mode not in {"fresh", "fine_tune"}:
+        raise WorkerRequestError("chart-transform checkpoint_mode must be fresh or fine_tune")
+    parent_bundle = options.get("parent_bundle")
+    if parent_bundle is not None and (not isinstance(parent_bundle, str) or not parent_bundle):
+        raise WorkerRequestError("chart-transform parent_bundle must be a non-empty string")
+    if checkpoint_mode == "fresh" and parent_bundle is not None:
+        raise WorkerRequestError("fresh chart-transform training must not select a parent_bundle")
+    if checkpoint_mode == "fine_tune" and parent_bundle is None:
+        raise WorkerRequestError("fine_tune chart-transform training requires a parent_bundle")
     try:
         dataset = json.loads(Path(request["task_view"]).read_text(encoding="utf-8"))
+        config_values: dict[str, Any] = {
+            "dataset_manifest": request["task_view"],
+            "output_dir": request["output"],
+            "model_id": options["model_id"],
+            "source_difficulty": dataset["source_difficulty"],
+            "target_difficulty": dataset["target_difficulty"],
+            "checkpoint_mode": checkpoint_mode,
+            **{
+                key: value
+                for key, value in options.items()
+                if key not in {"model_id", "checkpoint_mode", "parent_bundle"}
+            },
+        }
+        # Build a typed compatibility target before a parent checkpoint has
+        # been resolved.  ``fine_tune`` becomes valid only once the verified
+        # parent supplies its declared checkpoint below.
         config = TrainingConfig.from_mapping(
             {
-                "dataset_manifest": request["task_view"],
-                "output_dir": request["output"],
-                "model_id": options["model_id"],
-                "source_difficulty": dataset["source_difficulty"],
-                "target_difficulty": dataset["target_difficulty"],
-                **{key: value for key, value in options.items() if key != "model_id"},
+                **config_values,
+                "checkpoint_mode": "fresh" if checkpoint_mode == "fine_tune" else checkpoint_mode,
             }
         )
+        if parent_bundle is not None:
+            instrument = dataset.get("instrument", "guitar")
+            if not isinstance(instrument, str):
+                raise WorkerRequestError("chart-transform task view has an invalid instrument")
+            init_checkpoint, parent_provenance = _validated_chart_transform_parent(
+                parent_bundle, config, instrument=instrument
+            )
+            config = TrainingConfig.from_mapping(
+                {
+                    **config_values,
+                    "init_checkpoint": str(init_checkpoint),
+                    "parent_provenance": parent_provenance,
+                }
+            )
         result = train(config)
         preflight = preflight_bundle(result["bundle_dir"])
+    except WorkerRequestError:
+        raise
     except (KeyError, OSError, TypeError, ValueError, DatasetValidationError) as error:
         raise WorkerRequestError("chart-transform training request failed validation") from error
     return {

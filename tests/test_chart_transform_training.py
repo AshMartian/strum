@@ -21,6 +21,15 @@ from src.models.chart_audio import AudioFeatureError, event_audio_features
 from src.models.chart_transform import EventTransformMLP
 
 
+def _unsafe_checkpoint_reducer() -> None:
+    raise AssertionError("unsafe checkpoint payload was deserialized")
+
+
+class _UnsafeCheckpointPayload:
+    def __reduce__(self) -> tuple[object, tuple[object, ...]]:
+        return _unsafe_checkpoint_reducer, ()
+
+
 def _write_test_song(path: Path, frequency_hz: float) -> None:
     sample_rate = 16_000
     samples = array(
@@ -164,6 +173,24 @@ def test_cpu_chart_pair_training_writes_valid_model_bundle(tmp_path: Path) -> No
 
     assert fine_tuned["metrics"]["validation"]["loss"] >= 0
     assert "checkpoint_sha256" in fine_tuned_metadata["initialization"]
+
+    unsafe_checkpoint = tmp_path / "unsafe-parent.pt"
+    torch.save({"payload": _UnsafeCheckpointPayload()}, unsafe_checkpoint)
+    with pytest.raises(DatasetValidationError, match="safe tensor-only checkpoint"):
+        train(
+            TrainingConfig(
+                dataset_manifest=str(dataset_dir / "dataset-manifest.json"),
+                output_dir=str(tmp_path / "unsafe-output"),
+                model_id="unsafe-test",
+                source_difficulty="Expert",
+                target_difficulty="Hard",
+                validation_fraction=0.5,
+                hidden_dim=4,
+                epochs=1,
+                device="cpu",
+                init_checkpoint=str(unsafe_checkpoint),
+            )
+        )
 
 
 @pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="FFmpeg is unavailable")

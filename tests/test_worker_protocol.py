@@ -65,6 +65,23 @@ def test_probe_declares_versioned_runtime_and_available_pipelines() -> None:
     assert "model_bundle_preflight" in payload["capabilities"]
 
 
+def test_chart_transform_schema_exposes_private_verified_parent_selection() -> None:
+    descriptor = next(item for item in PIPELINES if item.id == "chart_transform.five_lane/v1")
+    assert descriptor.train_schema is not None
+    properties = descriptor.train_schema["properties"]
+    assert properties["checkpoint_mode"] == {
+        "type": "string",
+        "enum": ["fresh", "fine_tune"],
+        "default": "fresh",
+    }
+    assert properties["parent_bundle"] == {
+        "type": "string",
+        "format": "strum-model-bundle-root",
+        "writeOnly": True,
+        "x-strum-scope": "main-process",
+    }
+
+
 def test_legacy_inference_output_is_not_exposed_to_worker_clients(
     capfd: pytest.CaptureFixture[str],
 ) -> None:
@@ -248,22 +265,152 @@ def test_drums_training_request_routes_catalog_task_view_to_existing_trainer(
     assert str(task_view) not in captured.out
 
 
-def test_chart_transform_training_rejects_drums_worker_location_fields(tmp_path: Path) -> None:
-    request = tmp_path / "chart-transform-train.json"
+def _chart_transform_task_view(root: Path, *, target_difficulty: str = "Hard") -> Path:
+    records = [
+        {
+            "song_id": "song-a",
+            "instrument": "guitar",
+            "source_difficulty": "Expert",
+            "target_difficulty": target_difficulty,
+            "source_events": [{"time_ms": 0, "lanes": [0]}],
+            "target_events": [{"time_ms": 0, "lanes": [0]}],
+        },
+        {
+            "song_id": "song-b",
+            "instrument": "guitar",
+            "source_difficulty": "Expert",
+            "target_difficulty": target_difficulty,
+            "source_events": [{"time_ms": 0, "lanes": [1]}],
+            "target_events": [{"time_ms": 0, "lanes": [1]}],
+        },
+    ]
+    (root / "pairs.jsonl").write_text("\n".join(json.dumps(record) for record in records) + "\n")
+    task_view = root / "dataset-manifest.json"
+    task_view.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "format": "strum-chart-pairs/v1",
+                "dataset_id": "worker-chart-transform-fixture",
+                "records": "pairs.jsonl",
+                "provenance": "synthetic worker fixture",
+                "license": "test-only",
+                "instrument": "guitar",
+                "source_difficulty": "Expert",
+                "target_difficulty": target_difficulty,
+            }
+        )
+    )
+    return task_view
+
+
+def _chart_transform_train_request(
+    root: Path,
+    *,
+    task_view: Path,
+    output: Path,
+    model_id: str,
+    checkpoint_mode: str = "fresh",
+    parent_bundle: Path | None = None,
+    hidden_dim: int = 4,
+) -> Path:
+    options: dict[str, object] = {
+        "model_id": model_id,
+        "checkpoint_mode": checkpoint_mode,
+        "validation_fraction": 0.5,
+        "hidden_dim": hidden_dim,
+        "epochs": 1,
+        "device": "cpu",
+    }
+    if parent_bundle is not None:
+        options["parent_bundle"] = str(parent_bundle)
+    request = root / f"{model_id}-request.json"
     request.write_text(
         json.dumps(
             {
                 "pipeline_id": "chart_transform.five_lane/v1",
-                "task_view": str(tmp_path / "pairs.json"),
-                "output": str(tmp_path / "experiment"),
-                "catalog_root": str(tmp_path / "catalog"),
-                "options": {"model_id": "not-run"},
+                "task_view": str(task_view),
+                "output": str(output),
+                "options": options,
             }
         )
     )
+    return request
 
-    with pytest.raises(WorkerRequestError, match="unsupported fields"):
-        run_training_request(request)
+
+def test_chart_transform_worker_fine_tune_requires_a_verified_compatible_parent(
+    tmp_path: Path,
+) -> None:
+    task_view = _chart_transform_task_view(tmp_path)
+    parent_root = tmp_path / "parent"
+    fresh = _chart_transform_train_request(
+        tmp_path,
+        task_view=task_view,
+        output=parent_root,
+        model_id="parent-transform",
+    )
+    assert run_training_request(fresh)["status"] == "completed"
+
+    child_root = tmp_path / "child"
+    fine_tune = _chart_transform_train_request(
+        tmp_path,
+        task_view=task_view,
+        output=child_root,
+        model_id="child-transform",
+        checkpoint_mode="fine_tune",
+        parent_bundle=parent_root,
+    )
+
+    result = run_training_request(fine_tune)
+
+    experiment = json.loads((child_root / "experiment.json").read_text())
+    metadata = json.loads((child_root / "training-metadata.json").read_text())
+    assert result["status"] == "completed"
+    assert experiment["checkpoint_mode"] == "fine_tune"
+    assert experiment["parent"]["model_id"] == "parent-transform"
+    assert experiment["parent"]["component"] == "chart_transform.guitar.expert_to_hard"
+    assert metadata["initialization"]["parent"] == experiment["parent"]
+    assert str(parent_root) not in json.dumps(experiment)
+    assert str(parent_root) not in json.dumps(metadata)
+
+    incompatible = _chart_transform_train_request(
+        tmp_path,
+        task_view=task_view,
+        output=tmp_path / "incompatible",
+        model_id="incompatible-transform",
+        checkpoint_mode="fine_tune",
+        parent_bundle=parent_root,
+        hidden_dim=8,
+    )
+    with pytest.raises(ValueError, match="hidden_dim differs"):
+        run_training_request(incompatible)
+
+
+def test_chart_transform_worker_rejects_resume_and_unverified_parent_paths(tmp_path: Path) -> None:
+    task_view = _chart_transform_task_view(tmp_path)
+    resume = _chart_transform_train_request(
+        tmp_path,
+        task_view=task_view,
+        output=tmp_path / "resume",
+        model_id="resume-transform",
+        checkpoint_mode="resume",
+    )
+    with pytest.raises(ValueError, match="resume is not supported"):
+        run_training_request(resume)
+
+    arbitrary_checkpoint = tmp_path / "arbitrary.pt"
+    arbitrary_checkpoint.write_bytes(b"not a bundle")
+    fine_tune = _chart_transform_train_request(
+        tmp_path,
+        task_view=task_view,
+        output=tmp_path / "unverified",
+        model_id="unverified-transform",
+        checkpoint_mode="fine_tune",
+        parent_bundle=arbitrary_checkpoint,
+    )
+    with pytest.raises(ValueError, match="parent bundle failed verification") as error:
+        run_training_request(fine_tune)
+    assert str(arbitrary_checkpoint) not in str(error.value)
 
 
 def test_preflight_requires_hash_and_length_for_deployable_components(tmp_path: Path) -> None:

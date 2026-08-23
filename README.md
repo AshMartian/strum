@@ -475,11 +475,13 @@ lossy conversion to five lanes. The original
 `prepare_guitar_chart_pairs.py` remains a compatible Guitar-default alias.
 
 The output is a registry-valid bundle plus reproducibility config, split IDs,
-provenance/license, alignment counts, and validation metrics. Set
-`init_checkpoint` to a compatible prior `EventTransformMLP` checkpoint to
-fine-tune it. STRUM releases weights and a benchmark manifest, not its
-original community-chart training corpus; supply only chart pairs you are
-authorized to use.
+provenance/license, alignment counts, and validation metrics. Direct script
+configuration may set `init_checkpoint` to a compatible prior
+`EventTransformMLP` checkpoint; it is always read with PyTorch's tensor-only
+loader. The worker contract is stricter: fine-tuning can select only a
+hash-verified STRUM model bundle, never an arbitrary checkpoint path. STRUM
+releases weights and a benchmark manifest, not its original community-chart
+training corpus; supply only chart pairs you are authorized to use.
 
 ## OCTAVE song-source catalogs
 
@@ -570,10 +572,19 @@ worker output:
 
 The chart-transform training request names a catalog-generated
 `dataset-manifest.json`, an output folder, and bounded configuration such as
-`model_id`, `epochs`, `device`, and `hidden_dim`. It does not accept arbitrary
-checkpoint paths or audio locations. Its resulting bundle includes a verified
-component hash/byte length, architecture and preprocessing IDs, plus a
-profile that can be checked with `strum-worker inference profile validate`.
+`model_id`, `epochs`, `device`, and `hidden_dim`. `checkpoint_mode` is either
+`fresh` (the default) or `fine_tune`; `resume` is intentionally rejected until
+STRUM has a portable optimizer/scheduler state contract. A `fine_tune` request
+must include a main-process-only `parent_bundle` option. STRUM verifies the
+bundle manifest, component hashes and byte lengths, its exact five-lane
+architecture/preprocessing, compatible task settings, and expected inference
+profile before opening its tensor-only checkpoint. The parent path is never
+placed in the result, `training-metadata.json`, or `experiment.json`; those
+artifacts retain only parent model/component and manifest/checkpoint hashes.
+It does not accept arbitrary checkpoint paths or audio locations. Its
+resulting bundle includes a verified component hash/byte length, architecture
+and preprocessing IDs, plus a profile that can be checked with
+`strum-worker inference profile validate`.
 The profile is executable through `strum-worker chart run`: it consumes an
 explicit Expert five-lane `notes.mid` and writes only its declared learned
 target difficulty. This lets OCTAVE compose an Expert chart stage with an
