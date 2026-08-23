@@ -1411,6 +1411,36 @@ def test_chart_transform_profile_runs_from_expert_midi_without_path_leaks(tmp_pa
     config_path.parent.mkdir()
     config_path.write_text(json.dumps({"instrument": "guitar", "target_difficulty": "Hard"}))
     component_id = "chart_transform.guitar.expert_to_hard"
+    evaluation_path = root / "evaluations" / "held-out.json"
+    evaluation_path.parent.mkdir()
+    evaluation_path.write_text(
+        json.dumps(
+            {
+                "format": "strum-chart-transform-held-out-evaluation/v1",
+                "candidate_manifest_sha256": "a" * 64,
+                "component_id": component_id,
+                "component_sha256": hashlib.sha256(checkpoint_path.read_bytes()).hexdigest(),
+            }
+        )
+    )
+    profile_config_path = root / "profiles" / "difficulty-transform-guitar.json"
+    profile_config_path.parent.mkdir()
+    profile_config_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "format": "strum-chart-transform-promoted-profile/v1",
+                "candidate_manifest_sha256": "a" * 64,
+                "component_id": component_id,
+                "component_sha256": hashlib.sha256(checkpoint_path.read_bytes()).hexdigest(),
+                "evaluation": {
+                    "path": "evaluations/held-out.json",
+                    "sha256": hashlib.sha256(evaluation_path.read_bytes()).hexdigest(),
+                    "byte_length": evaluation_path.stat().st_size,
+                },
+            }
+        )
+    )
     (root / MANIFEST_FILENAME).write_text(
         json.dumps(
             {
@@ -1435,6 +1465,11 @@ def test_chart_transform_profile_runs_from_expert_midi_without_path_leaks(tmp_pa
                         "instruments": ["guitar"],
                         "required_components": [component_id],
                         "difficulty_policies": [f"learned:{component_id}"],
+                        "configuration": "profiles/difficulty-transform-guitar.json",
+                        "configuration_sha256": hashlib.sha256(
+                            profile_config_path.read_bytes()
+                        ).hexdigest(),
+                        "configuration_byte_length": profile_config_path.stat().st_size,
                     }
                 },
             }

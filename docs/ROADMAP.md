@@ -52,7 +52,8 @@ presented as a successful OCTAVE auto-chart result.
   profile. Both fail closed rather than invoking legacy companion/fallback
   behavior.
 - ✅ Typed, path-free chart preflight and result manifests for the executable
-  Guitar, Drums, and learned difficulty-transform profiles. Per-instrument
+  Guitar, Drums, and explicitly evaluated/promoted learned difficulty-transform
+  profiles. Per-instrument
   component stages state `ready`, `provided`, `succeeded`, `not_requested`,
   or `unavailable`; the selected difficulty policy is always explicit.
 - ✅ Versioned, path-free composed-profile graph declarations. A bundle can
@@ -66,6 +67,9 @@ presented as a successful OCTAVE auto-chart result.
   selected during task preparation, has catalog audio hashes/roles and
   duration alignment verified before training, and uses only temporary
   worker-local audio copies.
+- ✅ Transform promotion admission: training produces profile-less raw
+  candidates; a held-out, hash-bound report and an explicit immutable promotion
+  package are required before a transform profile is discoverable as executable.
 - ✅ Catalog-backed, worker-trainable Guitar/Bass/Keys onset/fret and Drums
   onset classifier experiments. Guitar, Bass, and Keys reuse the same
   five-lane feature extractor only through their instrument-specific,

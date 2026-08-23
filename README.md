@@ -623,9 +623,10 @@ builds the maintained onset-window cache, and invokes the onset-classifier
 trainer. Its output remains an experiment artifact
 (`deployment_status: requires_profile_packaging`), not a claim that it can
 replace the verified `drums.v14-expert/v1` auto-chart profile. The five-lane
-transform creates a verified learned lower-difficulty component. OCTAVE must
-surface these distinct deployment states rather than selecting a checkpoint
-implicitly.
+transform creates a raw candidate
+(`requires_transform_profile_evaluation_and_promotion`), never a selectable
+profile. OCTAVE must surface these distinct deployment states rather than
+selecting a checkpoint implicitly.
 
 Vocals has separate bounded experiments because `PART VOCALS` is not a
 five-lane chart. `vocals.note-activity/v1` revalidates a dedicated
@@ -767,16 +768,35 @@ an opaque `parent_artifact_id`, which OCTAVE resolves in its main process. A
 `fine_tune` request then supplies the resolved `parent_bundle` as a private
 top-level request field, parallel to `catalog_root`; it is not a schema option
 and is never renderer-visible. STRUM verifies the bundle manifest, component
-hashes and byte lengths, its exact five-lane architecture/preprocessing,
-compatible task settings, and expected inference profile before opening its
-tensor-only checkpoint. The parent path is never placed in the result,
+hashes and byte lengths, and its exact five-lane architecture/preprocessing
+before opening its tensor-only checkpoint. Fine-tuning may use a verified raw
+candidate or promoted bundle; neither grants deployment authority. The parent
+path is never placed in the result,
 `training-metadata.json`, or `experiment.json`; those artifacts retain only
 parent model/component and manifest/checkpoint hashes.
 It does not accept arbitrary checkpoint paths or audio locations. Its
-resulting bundle includes a verified component hash/byte length, architecture
-and preprocessing IDs, plus a profile that can be checked with
-`strum-worker inference profile validate`.
-The profile is executable through `strum-worker chart run`: it consumes an
+resulting bundle includes only a verified component hash/byte length,
+architecture, and preprocessing IDs. It remains non-deployable until STRUM
+recomputes its declared song-disjoint held-out split and explicitly promotes a
+separate immutable bundle:
+
+```bash
+strum-worker transform profile evaluate \
+  --bundle-root /private/raw-transform \
+  --dataset-manifest /private/dataset-manifest.json \
+  --output /private/held-out-report.json --json
+strum-worker transform profile package \
+  --experiment /private/raw-transform \
+  --evaluation /private/held-out-report.json \
+  --output /private/promoted-transform \
+  --profile difficulty-transform-guitar-promoted --json
+```
+
+The report records verifiable held-out metrics and hashes; it deliberately
+does not invent a universal quality threshold. The explicit package command
+binds that report to copied tensor weights and configuration. Only the
+promoted profile can be checked with `strum-worker inference profile validate`
+or executed through `strum-worker chart run`: it consumes an
 explicit Expert five-lane `notes.mid` and writes only its declared learned
 target difficulty. This lets OCTAVE compose an Expert chart stage with an
 explicit STRUM difficulty stage, rather than applying a deterministic

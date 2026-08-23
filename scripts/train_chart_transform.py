@@ -456,6 +456,10 @@ def _parse_pair(
             or split != assignments[source_id]
         ):
             raise DatasetValidationError(f"record {line_number} does not match task_view lineage")
+    elif "split" in raw:
+        split = raw.get("split")
+        if split not in {"train", "validation"}:
+            raise DatasetValidationError(f"record {line_number} split must be train or validation")
     return ChartPair(
         song_id=song_id,
         source_events=_parse_events(
@@ -804,14 +808,10 @@ def train(config: TrainingConfig) -> dict[str, Any]:
                 "preprocessing": "midi-five-lane-events/v1",
             }
         },
-        "profiles": {
-            f"difficulty-transform-{_slug(dataset_manifest['instrument'])}": {
-                "capability": "difficulty.transform/v1",
-                "instruments": [dataset_manifest["instrument"]],
-                "required_components": [component_name],
-                "difficulty_policies": [f"learned:{component_name}"],
-            }
-        },
+        # A training run is a candidate, never an inference profile.  Promotion
+        # copies the verified component into a separate immutable bundle only
+        # after a held-out report has been produced and reviewed.
+        "profiles": {},
     }
     (output_dir / MANIFEST_FILENAME).write_text(
         json.dumps(bundle_manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
@@ -848,6 +848,7 @@ def train(config: TrainingConfig) -> dict[str, Any]:
             "window_ms": config.audio_window_ms if audio_feature_dim else None,
         },
         "metrics": metrics,
+        "deployment_status": "requires_transform_profile_evaluation_and_promotion",
     }
     if task_view is not None:
         metadata["split"].update(
@@ -873,6 +874,7 @@ def train(config: TrainingConfig) -> dict[str, Any]:
         "task_view_id": task_view_id,
         "configuration": {"sha256": config_fingerprint, "values": portable_config},
         "checkpoint_mode": config.checkpoint_mode,
+        "deployment_status": "requires_transform_profile_evaluation_and_promotion",
         "runtime": {
             "strum_version": __version__,
             "strum_revision": config.strum_revision,

@@ -429,6 +429,12 @@ a task-view choice: STRUM retains only approved audio roles and hashes,
 excludes tracks whose audio ends before the Expert chart, and builds an
 ephemeral worker-local audio manifest at training time. No local audio path or
 copy belongs in a task view, experiment, bundle, or OCTAVE renderer payload.
+Its training bundle has no inference profile. Promotion first recomputes its
+declared song-disjoint validation split into a hash-bound held-out report, then
+copies weights, configuration, and report into a separate immutable bundle.
+There is intentionally no hard-coded score threshold: OCTAVE can show the
+evidence and request the explicit promotion, but cannot treat a one-epoch
+candidate as deployable.
 
 Discovery is dynamic rather than hard-coded in OCTAVE:
 

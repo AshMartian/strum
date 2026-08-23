@@ -16,9 +16,15 @@ from scripts.train_chart_transform import (
     _parse_events,
     train,
 )
+from src.chart_transform_profile import (
+    ChartTransformPromotionError,
+    evaluate_chart_transform_candidate,
+    package_chart_transform_profile,
+)
 from src.model_bundle import load_model_bundle
 from src.models.chart_audio import AudioFeatureError, event_audio_features
 from src.models.chart_transform import EventTransformMLP
+from src.worker import inspect_model_bundle, preflight_chart_request
 
 
 def _unsafe_checkpoint_reducer() -> None:
@@ -44,6 +50,98 @@ def _write_test_song(path: Path, frequency_hz: float) -> None:
         output.setsampwidth(2)
         output.setframerate(sample_rate)
         output.writeframes(samples.tobytes())
+
+
+def test_transform_requires_held_out_evaluation_and_immutable_promotion(tmp_path: Path) -> None:
+    dataset = tmp_path / "dataset"
+    dataset.mkdir()
+    records = [
+        {
+            "song_id": "train-song",
+            "instrument": "guitar",
+            "split": "train",
+            "source_difficulty": "Expert",
+            "target_difficulty": "Hard",
+            "source_events": [{"time_ms": 0, "lanes": [0]}],
+            "target_events": [{"time_ms": 0, "lanes": [0]}],
+        },
+        {
+            "song_id": "held-out-song",
+            "instrument": "guitar",
+            "split": "validation",
+            "source_difficulty": "Expert",
+            "target_difficulty": "Hard",
+            "source_events": [{"time_ms": 0, "lanes": [1]}],
+            "target_events": [{"time_ms": 0, "lanes": [1]}],
+        },
+    ]
+    (dataset / "pairs.jsonl").write_text("\n".join(json.dumps(item) for item in records) + "\n")
+    manifest = dataset / "dataset-manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "format": "strum-chart-pairs/v1",
+                "dataset_id": "promotion-fixture",
+                "records": "pairs.jsonl",
+                "provenance": "synthetic test fixture",
+                "license": "test-only",
+                "instrument": "guitar",
+            }
+        )
+    )
+    candidate = tmp_path / "candidate"
+    train(
+        TrainingConfig(
+            dataset_manifest=str(manifest),
+            output_dir=str(candidate),
+            model_id="promotion-fixture",
+            source_difficulty="Expert",
+            target_difficulty="Hard",
+            hidden_dim=4,
+            epochs=1,
+            device="cpu",
+        )
+    )
+    assert inspect_model_bundle(candidate)["deployment_status"] == "not_deployable"
+    report = tmp_path / "held-out.json"
+    result = evaluate_chart_transform_candidate(
+        bundle_root=candidate, dataset_manifest=manifest, output_path=report
+    )
+    assert result["split"] == "validation"
+    assert result["records_evaluated"] == 1
+    promoted = tmp_path / "promoted"
+    packaged = package_chart_transform_profile(
+        experiment_dir=candidate,
+        evaluation_path=report,
+        output_dir=promoted,
+        profile_id="difficulty-transform-guitar-promoted",
+    )
+    assert packaged["status"] == "promoted"
+    assert inspect_model_bundle(promoted)["deployment_status"] == "ready"
+    request = tmp_path / "preflight.json"
+    request.write_text(
+        json.dumps(
+            {
+                "model_root": str(promoted),
+                "profile_id": "difficulty-transform-guitar-promoted",
+                "difficulty_policy": "learned:chart_transform.guitar.expert_to_hard",
+                "instruments": ["guitar"],
+                "device": "cpu",
+            }
+        )
+    )
+    assert preflight_chart_request(request)["execution"] == "available"
+    report_data = json.loads(report.read_text())
+    report_data["component_sha256"] = "0" * 64
+    report.write_text(json.dumps(report_data))
+    with pytest.raises(ChartTransformPromotionError, match="invalid"):
+        package_chart_transform_profile(
+            experiment_dir=candidate,
+            evaluation_path=report,
+            output_dir=tmp_path / "invalid",
+            profile_id="invalid-transform",
+        )
 
 
 @pytest.mark.parametrize("time_ms", [-1, float("nan"), float("inf")])
@@ -135,10 +233,7 @@ def test_cpu_chart_pair_training_writes_valid_model_bundle(tmp_path: Path) -> No
     assert component.byte_length and component.architecture == "EventTransformMLP/v1"
     assert component.config_sha256 and component.config_byte_length
     assert json.loads(component.config.read_text())["instrument"] == "bass"
-    profile = bundle.profile("difficulty-transform-bass")
-    assert profile is not None
-    assert profile.required_components == (component_name,)
-    assert profile.difficulty_policies == (f"learned:{component_name}",)
+    assert bundle.profiles == {}
     assert bundle.validate(check_files=True, verify_hashes=True) == []
     assert metadata["dataset"]["provenance"].startswith("synthetic")
     assert metadata["dataset"]["license"] == "test-only"
@@ -146,6 +241,7 @@ def test_cpu_chart_pair_training_writes_valid_model_bundle(tmp_path: Path) -> No
     assert experiment["format"] == "strum-experiment/v1"
     assert experiment["pipeline"] == {"id": "chart_transform.five_lane", "version": 1}
     assert experiment["checkpoint_mode"] == "fresh"
+    assert experiment["deployment_status"] == "requires_transform_profile_evaluation_and_promotion"
     assert experiment["model_bundle"]["manifest_sha256"]
     assert str(dataset_dir) not in json.dumps(experiment)
     assert set(metadata["split"]["train_song_ids"]).isdisjoint(

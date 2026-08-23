@@ -1054,6 +1054,15 @@ def validate_inference_profile(
             f"profile {profile_id} does not support difficulty policy {difficulty_policy}"
         )
     plan = preflight_bundle(path, required_components=profile.required_components)
+    if profile.capability == "difficulty.transform/v1":
+        # Generic manifest hashes are not an admission proof for a transform.
+        # Its promoted configuration must bind an immutable held-out report
+        # before either profile validation or chart preflight can proceed.
+        from src.chart_transform_profile import (  # noqa: PLC0415
+            validate_promoted_chart_transform_profile,
+        )
+
+        validate_promoted_chart_transform_profile(bundle, profile.profile_id)
     return {
         **plan,
         "profile_id": profile.profile_id,
@@ -1613,6 +1622,11 @@ def _executable_profile_contract_is_valid(bundle: ModelBundle, profile: Inferenc
                 return False
             if profile.difficulty_policies != (f"learned:{component.name}",):
                 return False
+            from src.chart_transform_profile import (  # noqa: PLC0415
+                validate_promoted_chart_transform_profile,
+            )
+
+            validate_promoted_chart_transform_profile(bundle, profile.profile_id)
             _chart_transform_metadata(
                 bundle,
                 component.name,
@@ -1620,7 +1634,7 @@ def _executable_profile_contract_is_valid(bundle: ModelBundle, profile: Inferenc
             )
         else:
             return False
-    except (BundleValidationError, WorkerRequestError, OSError):
+    except (BundleValidationError, WorkerRequestError, OSError, ValueError):
         return False
     return True
 
@@ -3380,16 +3394,6 @@ def _validated_chart_transform_parent(
     if component.preprocessing != "midi-five-lane-events/v1":
         raise WorkerRequestError("fine-tune parent has incompatible chart-transform preprocessing")
 
-    profile = bundle.profile(f"difficulty-transform-{instrument}")
-    if (
-        profile is None
-        or profile.capability != "difficulty.transform/v1"
-        or profile.instruments != (instrument,)
-        or profile.required_components != (component_id,)
-        or profile.difficulty_policies != (f"learned:{component_id}",)
-    ):
-        raise WorkerRequestError("fine-tune parent does not declare the expected inference profile")
-
     try:
         parent_config = json.loads(component.config.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
@@ -3980,6 +3984,7 @@ def run_training_request(request_path: Path) -> dict[str, object]:
         "manifest_sha256": preflight["manifest_sha256"],
         "components": preflight["components"],
         "validation": result["metrics"]["validation"],
+        "deployment_status": "requires_transform_profile_evaluation_and_promotion",
     }
 
 
@@ -4163,6 +4168,33 @@ def _parse_args() -> argparse.Namespace:
     section_package.add_argument("--minimum-accuracy", type=float, required=True)
     section_package.add_argument("--maximum-expected-calibration-error", type=float, required=True)
     section_package.add_argument("--json", action="store_true")
+    transform = commands.add_parser(
+        "transform", help="evaluate and promote five-lane difficulty transforms"
+    )
+    transform_commands = transform.add_subparsers(dest="transform_command", required=True)
+    transform_profile = transform_commands.add_parser(
+        "profile", help="manage held-out transform promotion artifacts"
+    )
+    transform_profile_commands = transform_profile.add_subparsers(
+        dest="transform_profile_command", required=True
+    )
+    transform_evaluate = transform_profile_commands.add_parser(
+        "evaluate", help="recompute declared held-out transform metrics"
+    )
+    transform_evaluate.add_argument("--bundle-root", type=Path, required=True)
+    transform_evaluate.add_argument("--dataset-manifest", type=Path, required=True)
+    transform_evaluate.add_argument("--output", type=Path, required=True)
+    transform_evaluate.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
+    transform_evaluate.add_argument("--audio-manifest", type=Path)
+    transform_evaluate.add_argument("--json", action="store_true")
+    transform_package = transform_profile_commands.add_parser(
+        "package", help="copy one evaluated transform candidate into an executable profile"
+    )
+    transform_package.add_argument("--experiment", type=Path, required=True)
+    transform_package.add_argument("--evaluation", type=Path, required=True)
+    transform_package.add_argument("--output", type=Path, required=True)
+    transform_package.add_argument("--profile", required=True)
+    transform_package.add_argument("--json", action="store_true")
     model = commands.add_parser("model", help="inspect model bundles")
     model_commands = model.add_subparsers(dest="model_command", required=True)
     preflight = model_commands.add_parser("preflight", help="validate a deployable model bundle")
@@ -4431,6 +4463,36 @@ def main() -> int:
                     )
             except SectionProfileEvaluationError as error:
                 raise WorkerRequestError("Section profile request is invalid") from error
+            return 0
+        if args.command == "transform" and args.transform_command == "profile":
+            from src.chart_transform_profile import (  # noqa: PLC0415
+                ChartTransformPromotionError,
+                evaluate_chart_transform_candidate,
+                package_chart_transform_profile,
+            )
+
+            try:
+                if args.transform_profile_command == "evaluate":
+                    _print_json(
+                        evaluate_chart_transform_candidate(
+                            bundle_root=args.bundle_root,
+                            dataset_manifest=args.dataset_manifest,
+                            output_path=args.output,
+                            device=args.device,
+                            audio_manifest=args.audio_manifest,
+                        )
+                    )
+                else:
+                    _print_json(
+                        package_chart_transform_profile(
+                            experiment_dir=args.experiment,
+                            evaluation_path=args.evaluation,
+                            output_dir=args.output,
+                            profile_id=args.profile,
+                        )
+                    )
+            except ChartTransformPromotionError as error:
+                raise WorkerRequestError("Transform profile request is invalid") from error
             return 0
         if args.command == "model" and args.model_command == "preflight":
             _print_json(
