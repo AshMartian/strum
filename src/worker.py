@@ -111,6 +111,17 @@ CHART_TRANSFORM_TRAIN_SCHEMA = _object_schema(
     },
     required=("model_id",),
 )
+GUITAR_TRAIN_SCHEMA = _object_schema(
+    {
+        "model_id": {"type": "string"},
+        "catalog_root": {"type": "string"},
+        "epochs": {"type": "integer", "minimum": 1, "default": 25},
+        "batch_size": {"type": "integer", "minimum": 1, "default": 128},
+        "device": {"type": "string", "enum": ["auto", "cuda", "mps", "cpu"], "default": "auto"},
+        "limit_songs": {"type": "integer", "minimum": 0, "default": 0},
+    },
+    required=("model_id", "catalog_root"),
+)
 
 PIPELINES = (
     PipelineDescriptor(
@@ -125,12 +136,12 @@ PIPELINES = (
             "audio_policy": "prefer:guitar,fallback:mix",
         },
         prepare_schema=_object_schema(CATALOG_AUDIO_OPTIONS),
-        train_schema=None,
-        checkpoint_outputs=("guitar_onset", "guitar_fret"),
+        train_schema=GUITAR_TRAIN_SCHEMA,
+        checkpoint_outputs=("guitar.onset", "guitar.fret"),
         inference_capability="guitar.audio_to_chart/v1",
         status="catalog_ready",
         preparation_status="available",
-        training_status="script_only",
+        training_status="available",
     ),
     PipelineDescriptor(
         id="chart_transform.five_lane/v1",
@@ -990,6 +1001,38 @@ def run_training_request(request_path: Path) -> dict[str, object]:
     descriptor = _pipeline_by_id(pipeline_id)
     if descriptor.training_status != "available":
         raise WorkerRequestError("pipeline does not support worker training")
+    if pipeline_id == "guitar.onset-fret/v1":
+        from src.guitar_worker_training import (  # noqa: PLC0415
+            GuitarTrainingError,
+            GuitarTrainingOptions,
+            run_catalog_guitar_training,
+        )
+
+        try:
+            options = GuitarTrainingOptions.from_mapping(request["options"])
+            revision, _dirty = _revision()
+            result = run_catalog_guitar_training(
+                task_view_path=Path(request["task_view"]),
+                output_dir=Path(request["output"]),
+                options=options,
+                strum_revision=revision,
+            )
+            preflight = preflight_bundle(
+                result["bundle_dir"], required_components=descriptor.checkpoint_outputs
+            )
+        except (BundleValidationError, CatalogValidationError):
+            raise
+        except (GuitarTrainingError, OSError, TypeError, ValueError) as error:
+            raise WorkerRequestError("Guitar training request failed validation or execution") from error
+        return {
+            "status": "completed",
+            "pipeline_id": pipeline_id,
+            "model_id": preflight["model_id"],
+            "bundle_name": Path(result["bundle_dir"]).name,
+            "manifest_sha256": preflight["manifest_sha256"],
+            "components": preflight["components"],
+            "metrics": result["metrics"],
+        }
     if pipeline_id != "chart_transform.five_lane/v1":
         raise WorkerRequestError("pipeline has no worker training handler")
 

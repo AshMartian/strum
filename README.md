@@ -529,14 +529,39 @@ For example, a Guitar task-view request is:
 }
 ```
 
-`guitar.onset-fret/v1` and `drums.onset-classifier/v1` are catalog-ready with
-their existing script-based trainers (`training_status: script_only`). The
-five-lane `chart_transform.five_lane/v1` is also worker-trainable; OCTAVE runs
-the synchronous command below in its own supervised background process. The
+`guitar.onset-fret/v1` is worker-trainable from its catalog task view. Its
+strict request requires `model_id` and the worker-local `catalog_root`, then
+accepts bounded `epochs`, `batch_size`, `device`, and `limit_songs` options.
+The worker invokes the established Guitar window-preprocessing and two-stage
+onset/fret trainers; it packages both resulting checkpoints as hash-verified
+`guitar.onset` and `guitar.fret` bundle components and records the task-view
+lineage in `experiment.json`. It does not accept an arbitrary resume or
+checkpoint path. `drums.onset-classifier/v1` remains catalog-ready with its
+existing script-based trainer (`training_status: script_only`). The five-lane
+`chart_transform.five_lane/v1` is also worker-trainable; OCTAVE runs the
+synchronous command below in its own supervised background process. The
 response contains only the bundle/model identity, checksums, and metrics.
 
 ```bash
 strum-worker train run --request /path/to/owned-train-request.json --json
+```
+
+For example, OCTAVE owns all of these locations and does not display them from
+worker output:
+
+```json
+{
+  "pipeline_id": "guitar.onset-fret/v1",
+  "task_view": "/private/task-views/guitar-v1.json",
+  "output": "/private/experiments/guitar-v1",
+  "options": {
+    "model_id": "my-guitar-v1",
+    "catalog_root": "/private/catalog",
+    "epochs": 25,
+    "batch_size": 128,
+    "device": "auto"
+  }
+}
 ```
 
 The chart-transform training request names a catalog-generated
