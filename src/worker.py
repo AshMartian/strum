@@ -277,6 +277,12 @@ PIPELINES = (
         status="catalog_ready",
         preparation_status="available",
         training_status="available",
+        private_request_fields=("catalog_root",),
+        catalog_inspection_option_keys=(
+            "audio_role",
+            "fallback_audio_role",
+            "required_difficulty",
+        ),
     ),
     PipelineDescriptor(
         id="chart_transform.five_lane/v1",
