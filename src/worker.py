@@ -53,6 +53,8 @@ from src.song_source_catalog import (
 PROTOCOL_VERSION = 1
 MODEL_BUNDLE_SCHEMA_VERSIONS = (1,)
 MAX_ESTIMATED_STORAGE_BYTES = (1 << 63) - 1
+CHART_PREFLIGHT_FORMAT = "strum-chart-preflight/v1"
+CHART_RUN_FORMAT = "strum-chart-run/v1"
 CATALOG_STORAGE_ESTIMATE_SEMANTICS = (
     "sum of distinct catalog input assets selected by the declared policy; "
     "excludes generated task views, preprocessing caches, checkpoints, and existing catalog storage"
@@ -297,6 +299,7 @@ def _runtime_payload() -> dict[str, object]:
         "dataset_prepare",
         "chart_preflight",
         "chart_run",
+        "typed_chart_results",
         "model_bundle_preflight",
         "checkpoint_inspect",
     ]
@@ -313,6 +316,8 @@ def _runtime_payload() -> dict[str, object]:
         "device_support": ["cuda", "mps", "cpu"],
         "capabilities": capabilities,
         "model_bundle_schema_versions": list(MODEL_BUNDLE_SCHEMA_VERSIONS),
+        "chart_result_schema_versions": [1],
+        "chart_result_formats": [CHART_PREFLIGHT_FORMAT, CHART_RUN_FORMAT],
         "optional_dependencies": {
             "basic_pitch": {
                 "available": importlib.util.find_spec("basic_pitch") is not None,
@@ -421,6 +426,201 @@ def validate_inference_profile(
     }
 
 
+def _stage(
+    *,
+    status: str,
+    required: bool,
+    component_ids: Sequence[str] = (),
+    difficulty: str | None = None,
+    reason: str | None = None,
+) -> dict[str, object]:
+    """Build one safe, typed chart-stage description.
+
+    Stage records deliberately identify declared model components and output
+    difficulty, but never their checkpoint locations or the caller's input or
+    output locations.  The same shape is used for a preflight plan and its
+    resulting chart-run manifest so OCTAVE can render partial work honestly.
+    """
+    stage: dict[str, object] = {
+        "status": status,
+        "required": required,
+        "component_ids": list(component_ids),
+    }
+    if difficulty is not None:
+        stage["difficulty"] = difficulty
+    if reason is not None:
+        stage["reason"] = reason
+    return stage
+
+
+def _copy_chart_contract(value: dict[str, object]) -> dict[str, object]:
+    """Return a JSON-shaped copy before a run updates a preflight stage state."""
+    return json.loads(json.dumps(value))
+
+
+def _chart_transform_metadata(
+    bundle: ModelBundle,
+    component_id: str,
+    *,
+    requested_instruments: Sequence[str],
+) -> tuple[str, str]:
+    """Read the two safe transform identities required by the stage contract."""
+    component = bundle.component(component_id)
+    if component is None or component.config is None:
+        raise WorkerRequestError("difficulty transform component is incomplete")
+    try:
+        config = json.loads(component.config.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise WorkerRequestError("difficulty transform configuration is unreadable") from error
+    if not isinstance(config, dict):
+        raise WorkerRequestError("difficulty transform configuration must be an object")
+    instrument = config.get("instrument")
+    target_difficulty = config.get("target_difficulty")
+    if (
+        not isinstance(instrument, str)
+        or not isinstance(target_difficulty, str)
+        or not target_difficulty
+        or tuple(requested_instruments) != (instrument,)
+    ):
+        raise WorkerRequestError("difficulty transform profile does not match its component")
+    return instrument, target_difficulty
+
+
+def _chart_result_contract(
+    plan: dict[str, object],
+    *,
+    execution: str,
+    transform_instrument: str | None = None,
+    transform_target_difficulty: str | None = None,
+) -> tuple[dict[str, object], dict[str, object]]:
+    """Describe every stage an executable profile will perform or intentionally omit.
+
+    ``expert_only`` profiles always expose the omitted lower-difficulty stage.
+    Learned transforms declare that Expert input is supplied by an earlier
+    stage, then name the resulting target difficulty.  This prevents a caller
+    from mistaking either narrow profile for a complete multi-instrument chart
+    assembly pipeline.
+    """
+    instruments = plan["instruments"]
+    capability = plan["capability"]
+    policy = plan["difficulty_policy"]
+    components = plan["components"]
+    if not isinstance(instruments, list) or not all(isinstance(item, str) for item in instruments):
+        raise AssertionError("validated chart plan must contain instruments")
+    if not isinstance(capability, str) or not isinstance(policy, str):
+        raise AssertionError("validated chart plan must contain capability and policy")
+    component_ids = [
+        component["id"]
+        for component in components
+        if isinstance(component, dict) and isinstance(component.get("id"), str)
+    ]
+
+    unavailable_reason = "execution_handler_not_declared"
+    instrument_results: dict[str, object] = {}
+    if capability == "difficulty.transform/v1":
+        if transform_instrument is None or transform_target_difficulty is None:
+            raise AssertionError("difficulty transform contract requires component metadata")
+        stage_status = "ready" if execution == "available" else "unavailable"
+        instrument_results[transform_instrument] = {
+            "status": "ready" if execution == "available" else "not_available",
+            "stages": {
+                "expert_chart": _stage(
+                    status="provided",
+                    required=True,
+                    difficulty="Expert",
+                    reason="source_midi_required",
+                ),
+                "difficulty_transform": _stage(
+                    status=stage_status,
+                    required=True,
+                    component_ids=component_ids,
+                    difficulty=transform_target_difficulty,
+                    reason=None if execution == "available" else unavailable_reason,
+                ),
+            },
+        }
+        difficulty = {
+            "policy": policy,
+            "status": "ready" if execution == "available" else "unavailable",
+            "source_difficulty": "Expert",
+            "target_difficulty": transform_target_difficulty,
+        }
+        return instrument_results, difficulty
+
+    stage_name_by_capability = {
+        "guitar.hybrid-v2-rule/v1": "expert_chart",
+        "drums.v14-expert/v1": "expert_chart",
+    }
+    stage_name = stage_name_by_capability.get(capability, "expert_chart")
+    stage_status = "ready" if execution == "available" else "unavailable"
+    for instrument in instruments:
+        instrument_results[instrument] = {
+            "status": "ready" if execution == "available" else "not_available",
+            "stages": {
+                stage_name: _stage(
+                    status=stage_status,
+                    required=True,
+                    component_ids=component_ids,
+                    difficulty="Expert",
+                    reason=None if execution == "available" else unavailable_reason,
+                ),
+                "difficulty_transform": _stage(
+                    status="not_requested",
+                    required=False,
+                    difficulty="Expert",
+                    reason="difficulty_policy_expert_only"
+                    if policy == "expert_only"
+                    else "profile_does_not_declare_transform",
+                ),
+            },
+        }
+    return instrument_results, {
+        "policy": policy,
+        "status": "expert_only" if policy == "expert_only" else "not_available",
+        "source_difficulty": None,
+        "target_difficulty": "Expert",
+    }
+
+
+def _chart_execution_available(
+    *, capability: str, difficulty_policy: str, instruments: Sequence[str]
+) -> bool:
+    """Return true only for a worker handler with matching single-stage semantics."""
+    expected = {
+        "guitar.hybrid-v2-rule/v1": ("guitar", "expert_only"),
+        "drums.v14-expert/v1": ("drums", "expert_only"),
+    }
+    if capability == "difficulty.transform/v1":
+        return len(instruments) == 1 and difficulty_policy.startswith("learned:")
+    required = expected.get(capability)
+    return required is not None and tuple(instruments) == (required[0],) and difficulty_policy == required[1]
+
+
+def _complete_chart_stage(
+    instrument_results: dict[str, object],
+    difficulty: dict[str, object],
+    *,
+    instrument: str,
+    stage_name: str,
+    artifact_ids: Sequence[str],
+) -> None:
+    """Update one preflight stage for a completed run without adding locations."""
+    instrument_result = instrument_results.get(instrument)
+    if not isinstance(instrument_result, dict):
+        raise AssertionError("chart preflight is missing the executed instrument")
+    stages = instrument_result.get("stages")
+    if not isinstance(stages, dict):
+        raise AssertionError("chart preflight has invalid instrument stages")
+    stage = stages.get(stage_name)
+    if not isinstance(stage, dict) or stage.get("status") != "ready":
+        raise AssertionError("chart preflight stage is not runnable")
+    stage["status"] = "succeeded"
+    stage["artifact_ids"] = list(artifact_ids)
+    instrument_result["status"] = "succeeded"
+    if stage_name == "difficulty_transform":
+        difficulty["status"] = "succeeded"
+
+
 def preflight_chart_request(request_path: Path) -> dict[str, object]:
     """Resolve a profile for a future chart job without loading model weights.
 
@@ -459,6 +659,8 @@ def preflight_chart_request(request_path: Path) -> dict[str, object]:
     if not set(instruments) <= set(plan["instruments"]):
         raise WorkerRequestError("profile does not cover requested instruments")
     profile_configuration_sha256 = None
+    transform_instrument = None
+    transform_target_difficulty = None
     if plan["capability"] == "guitar.hybrid-v2-rule/v1":
         from src.inference.guitar_hybrid_profile import (
             load_guitar_hybrid_rule_profile,  # noqa: PLC0415
@@ -486,12 +688,32 @@ def preflight_chart_request(request_path: Path) -> dict[str, object]:
         component_id = plan["components"][0]["id"]
         if plan["difficulty_policy"] != f"learned:{component_id}":
             raise WorkerRequestError("difficulty transform policy must name its declared component")
+        bundle = load_model_bundle(raw["model_root"], check_files=True)
+        transform_instrument, transform_target_difficulty = _chart_transform_metadata(
+            bundle,
+            component_id,
+            requested_instruments=instruments,
+        )
+    execution = (
+        "available"
+        if _chart_execution_available(
+            capability=plan["capability"],
+            difficulty_policy=plan["difficulty_policy"],
+            instruments=instruments,
+        )
+        else "not_available"
+    )
+    instrument_results, difficulty = _chart_result_contract(
+        plan,
+        execution=execution,
+        transform_instrument=transform_instrument,
+        transform_target_difficulty=transform_target_difficulty,
+    )
     return {
+        "schema_version": 1,
+        "format": CHART_PREFLIGHT_FORMAT,
         "status": "ready",
-        "execution": "available"
-        if plan["capability"]
-        in {"guitar.hybrid-v2-rule/v1", "drums.v14-expert/v1", "difficulty.transform/v1"}
-        else "not_available",
+        "execution": execution,
         "model_id": plan["model_id"],
         "profile_id": plan["profile_id"],
         "capability": plan["capability"],
@@ -502,6 +724,8 @@ def preflight_chart_request(request_path: Path) -> dict[str, object]:
         "components": plan["components"],
         "profile_configuration_sha256": profile_configuration_sha256,
         "profile_configuration_byte_length": plan["profile_configuration_byte_length"],
+        "instrument_results": instrument_results,
+        "difficulty": difficulty,
     }
 
 
@@ -715,6 +939,8 @@ def run_chart_request(request_path: Path) -> dict[str, object]:
     request = _read_chart_run_request(request_path, plan["capability"])
     if plan["execution"] != "available":
         raise WorkerRequestError("profile has no worker chart execution handler")
+    instrument_results = _copy_chart_contract(plan["instrument_results"])
+    difficulty = _copy_chart_contract(plan["difficulty"])
     try:
         preflight_raw = json.loads(Path(request["preflight_request"]).read_text(encoding="utf-8"))
         bundle = load_model_bundle(preflight_raw["model_root"], check_files=True)
@@ -749,6 +975,13 @@ def run_chart_request(request_path: Path) -> dict[str, object]:
                     "expert_event_count": len(chart.notes) + len(chart.chords),
                 }
             }
+            _complete_chart_stage(
+                instrument_results,
+                difficulty,
+                instrument="guitar",
+                stage_name="expert_chart",
+                artifact_ids=("notes_midi",),
+            )
             response = {
                 "output_name": midi_path.name,
                 "expert_event_count": len(chart.notes) + len(chart.chords),
@@ -778,6 +1011,13 @@ def run_chart_request(request_path: Path) -> dict[str, object]:
             _write_expert_drums_midi(events, midi_path)
             artifacts = {"notes_midi": {"name": midi_path.name, "sha256": _sha256(midi_path)}}
             stages = {"drums": {"status": "succeeded", "expert_event_count": len(events)}}
+            _complete_chart_stage(
+                instrument_results,
+                difficulty,
+                instrument="drums",
+                stage_name="expert_chart",
+                artifact_ids=("notes_midi",),
+            )
             response = {"output_name": midi_path.name, "expert_event_count": len(events)}
         elif plan["capability"] == "difficulty.transform/v1":
             import torch  # noqa: PLC0415
@@ -839,6 +1079,13 @@ def run_chart_request(request_path: Path) -> dict[str, object]:
                 "notes_midi": {"name": midi_path.name, "sha256": _sha256(midi_path)},
             }
             stages = {"difficulty_transform": {"status": "succeeded", "event_count": len(events)}}
+            _complete_chart_stage(
+                instrument_results,
+                difficulty,
+                instrument=instrument,
+                stage_name="difficulty_transform",
+                artifact_ids=("events", "notes_midi"),
+            )
             response = {
                 "output_name": midi_path.name,
                 "event_count": len(events),
@@ -848,7 +1095,7 @@ def run_chart_request(request_path: Path) -> dict[str, object]:
             raise WorkerRequestError("profile has no worker chart execution handler")
         run_manifest = {
             "schema_version": 1,
-            "format": "strum-chart-run/v1",
+            "format": CHART_RUN_FORMAT,
             "status": "completed",
             "model_id": plan["model_id"],
             "profile_id": plan["profile_id"],
@@ -858,6 +1105,8 @@ def run_chart_request(request_path: Path) -> dict[str, object]:
             "profile_configuration_sha256": plan["profile_configuration_sha256"],
             "profile_configuration_byte_length": plan["profile_configuration_byte_length"],
             "artifacts": artifacts,
+            "instrument_results": instrument_results,
+            "difficulty": difficulty,
             "stages": stages,
         }
         (output_dir / "run.json").write_text(
@@ -868,9 +1117,16 @@ def run_chart_request(request_path: Path) -> dict[str, object]:
     except (BundleValidationError, OSError, RuntimeError, ValueError) as error:
         raise WorkerRequestError("profile chart execution failed") from error
     return {
+        "schema_version": 1,
+        "format": CHART_RUN_FORMAT,
         "status": "completed",
         "profile_id": plan["profile_id"],
         "run_manifest_name": "run.json",
+        "instrument_results": instrument_results,
+        "chart_result": {
+            "instrument_results": instrument_results,
+            "difficulty": difficulty,
+        },
         **response,
     }
 

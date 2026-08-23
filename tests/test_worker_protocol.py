@@ -15,6 +15,7 @@ from src.models.chart_transform import EventTransformMLP
 from src.worker import (
     PIPELINES,
     PROTOCOL_VERSION,
+    _chart_result_contract,
     _run_without_legacy_output,
     _runtime_payload,
     _write_expert_guitar_midi,
@@ -60,8 +61,13 @@ def test_probe_declares_versioned_runtime_and_available_pipelines() -> None:
     assert "guitar.onset-fret/v1" in payload["pipelines"]
     assert "dataset_prepare" in payload["capabilities"]
     assert "chart_run" in payload["capabilities"]
+    assert "typed_chart_results" in payload["capabilities"]
     assert isinstance(payload["optional_dependencies"]["basic_pitch"]["available"], bool)
     assert "model_bundle_preflight" in payload["capabilities"]
+    assert payload["chart_result_formats"] == [
+        "strum-chart-preflight/v1",
+        "strum-chart-run/v1",
+    ]
 
 
 def test_chart_transform_schema_exposes_opaque_parent_artifact_selection() -> None:
@@ -724,8 +730,82 @@ def test_chart_preflight_returns_an_explicit_non_execution_plan(tmp_path: Path) 
     plan = preflight_chart_request(request)
 
     assert plan["status"] == "ready"
+    assert plan["format"] == "strum-chart-preflight/v1"
     assert plan["execution"] == "not_available"
     assert plan["components"][0]["id"] == "guitar.onset"
+    assert plan["instrument_results"] == {
+        "guitar": {
+            "status": "not_available",
+            "stages": {
+                "expert_chart": {
+                    "status": "unavailable",
+                    "required": True,
+                    "component_ids": ["guitar.onset"],
+                    "difficulty": "Expert",
+                    "reason": "execution_handler_not_declared",
+                },
+                "difficulty_transform": {
+                    "status": "not_requested",
+                    "required": False,
+                    "component_ids": [],
+                    "difficulty": "Expert",
+                    "reason": "difficulty_policy_expert_only",
+                },
+            },
+        }
+    }
+    assert plan["difficulty"] == {
+        "policy": "expert_only",
+        "status": "expert_only",
+        "source_difficulty": None,
+        "target_difficulty": "Expert",
+    }
+
+
+@pytest.mark.parametrize(
+    ("capability", "instrument", "component_id"),
+    [
+        ("guitar.hybrid-v2-rule/v1", "guitar", "guitar.onset"),
+        ("drums.v14-expert/v1", "drums", "drums.onset_classifier"),
+    ],
+)
+def test_direct_chart_profiles_declare_the_omitted_difficulty_stage(
+    capability: str, instrument: str, component_id: str
+) -> None:
+    instrument_results, difficulty = _chart_result_contract(
+        {
+            "capability": capability,
+            "difficulty_policy": "expert_only",
+            "instruments": [instrument],
+            "components": [{"id": component_id}],
+        },
+        execution="available",
+    )
+
+    assert instrument_results[instrument] == {
+        "status": "ready",
+        "stages": {
+            "expert_chart": {
+                "status": "ready",
+                "required": True,
+                "component_ids": [component_id],
+                "difficulty": "Expert",
+            },
+            "difficulty_transform": {
+                "status": "not_requested",
+                "required": False,
+                "component_ids": [],
+                "difficulty": "Expert",
+                "reason": "difficulty_policy_expert_only",
+            },
+        },
+    }
+    assert difficulty == {
+        "policy": "expert_only",
+        "status": "expert_only",
+        "source_difficulty": None,
+        "target_difficulty": "Expert",
+    }
 
 
 def test_chart_transform_profile_runs_from_expert_midi_without_path_leaks(tmp_path: Path) -> None:
@@ -813,9 +893,43 @@ def test_chart_transform_profile_runs_from_expert_midi_without_path_leaks(tmp_pa
     result = run_chart_request(request)
 
     assert result["status"] == "completed"
+    assert result["format"] == "strum-chart-run/v1"
     assert result["difficulty"] == "Hard"
-    manifest = (output / "run.json").read_text()
-    assert str(tmp_path) not in manifest
+    assert result["chart_result"]["difficulty"] == {
+        "policy": f"learned:{component_id}",
+        "status": "succeeded",
+        "source_difficulty": "Expert",
+        "target_difficulty": "Hard",
+    }
+    manifest = json.loads((output / "run.json").read_text())
+    assert str(tmp_path) not in json.dumps(manifest)
+    assert manifest["instrument_results"] == {
+        "guitar": {
+            "status": "succeeded",
+            "stages": {
+                "expert_chart": {
+                    "status": "provided",
+                    "required": True,
+                    "component_ids": [],
+                    "difficulty": "Expert",
+                    "reason": "source_midi_required",
+                },
+                "difficulty_transform": {
+                    "status": "succeeded",
+                    "required": True,
+                    "component_ids": [component_id],
+                    "difficulty": "Hard",
+                    "artifact_ids": ["events", "notes_midi"],
+                },
+            },
+        }
+    }
+    assert manifest["difficulty"] == {
+        "policy": f"learned:{component_id}",
+        "status": "succeeded",
+        "source_difficulty": "Expert",
+        "target_difficulty": "Hard",
+    }
     note_ons = {
         message.note
         for track in mido.MidiFile(output / "notes.mid").tracks

@@ -37,6 +37,10 @@ presented as a successful OCTAVE auto-chart result.
 - ✅ Bundle-validated Expert Guitar hybrid profile and Expert Drums direct V14
   profile. Both fail closed rather than invoking legacy companion/fallback
   behavior.
+- ✅ Typed, path-free chart preflight and result manifests for the executable
+  Guitar, Drums, and learned difficulty-transform profiles. Per-instrument
+  component stages state `ready`, `provided`, `succeeded`, `not_requested`,
+  or `unavailable`; the selected difficulty policy is always explicit.
 - ✅ Catalog-backed, worker-trainable learned five-lane chart transforms for
   Guitar, Bass, Keys, and Drums, including explicit Expert → lower-difficulty
   provenance.
@@ -54,8 +58,9 @@ presented as a successful OCTAVE auto-chart result.
    companion-model compatibility checks; it must not promote an experiment
    solely because its checkpoint file exists.
 2. Replace the remaining legacy auto-chart assembly behavior with declared,
-   component-level bundle requirements and typed result manifests. A partial
-   run must state its actual stage status and fallback policy.
+   component-level bundle requirements and typed stage graphs. The current
+   typed manifests cover each executable single-profile run; the full
+   multi-instrument graph still needs the same partial-run/fallback reporting.
 3. Add dedicated learned trainers and event schemas for Bass, Keys, Vocals,
    Pro instruments, fret mapping, and section routing. Their existing catalog
    views are the input boundary, not implementation completion.

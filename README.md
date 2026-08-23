@@ -637,6 +637,32 @@ downgrade. A transform request is private to the supervising process:
 audio-conditioned. The output contains `events.json`, one target-difficulty
 `notes.mid`, and a hash-recorded `run.json`; none contain input locations.
 
+### Typed chart preflight and result contract
+
+`chart preflight` returns `strum-chart-preflight/v1`; a completed chart run
+writes `strum-chart-run/v1` to `run.json`. Both contain `instrument_results`
+and an explicit `difficulty` object. The command response carries the same
+pair under `chart_result`, preserving its pre-existing top-level `difficulty`
+target string for older callers. Every requested instrument has typed stage
+records with a status, required flag, declared component IDs, and an output
+difficulty where one is known. Artifact references are stable output names and
+hashes only.
+
+The currently executable Expert Guitar and Expert Drums profiles report an
+`expert_chart` stage and a `difficulty_transform` stage marked
+`not_requested` with the `expert_only` policy. A learned transform reports
+the Expert stage as `provided` (it consumes the caller-provided Expert MIDI)
+and its own `difficulty_transform` stage as `ready` at preflight and
+`succeeded` after execution. A profile without a matching worker handler is
+reported as `not_available`/`unavailable`, rather than being silently routed
+through a legacy fallback. This lets OCTAVE distinguish a deliberately
+partial result from a complete multi-stage auto-chart graph.
+
+The contract never includes catalog, audio, MIDI, model-root, request, or
+output-directory paths. It is intentionally a contract for the existing
+single-profile executions, not a claim that STRUM's legacy multi-instrument
+batch assembly is already a declared worker graph.
+
 The first chart execution capability is intentionally narrow:
 `guitar.hybrid-v2-rule/v1`. It requires a bundle-verified onset checkpoint and
 model-config fingerprint, a typed profile configuration, and an installed
