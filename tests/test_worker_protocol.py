@@ -291,6 +291,19 @@ def test_runtime_revision_redacts_unsafe_configured_identity(
     assert revision not in json.dumps(result)
 
 
+def test_runtime_revision_redacts_explicitly_empty_configured_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("STRUM_SOURCE_REVISION", "")
+    monkeypatch.setenv("STRUM_SOURCE_DIRTY", "0")
+
+    result = _runtime_payload()
+
+    assert _revision() == (None, None)
+    assert result["runtime"]["source_revision"] is None
+    assert result["runtime"]["source_dirty"] is None
+
+
 def test_runtime_revision_marks_status_failure_unknown(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

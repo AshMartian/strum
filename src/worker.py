@@ -1396,11 +1396,13 @@ def _revision() -> tuple[str | None, bool | None]:
     check produces ``None`` rather than claiming a clean source tree.
     """
     configured_raw = os.environ.get("STRUM_SOURCE_REVISION")
-    if configured_raw is not None and configured_raw:
+    if configured_raw is not None:
         configured = source_revision_identity(configured_raw)
         if configured is None:
-            # Do not return hostile configuration in a portable runtime or
-            # bundle payload.  Its source state is unknown too.
+            # Do not return hostile or incomplete configuration in a portable
+            # runtime or bundle payload.  An explicitly empty value is an
+            # invalid attestation too: falling back to Git would make it
+            # inconsistent with ModelBundle's fail-closed pin validation.
             return None, None
         configured_dirty = os.environ.get("STRUM_SOURCE_DIRTY")
         if configured_dirty == "1":

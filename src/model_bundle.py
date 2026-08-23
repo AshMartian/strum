@@ -535,11 +535,11 @@ def _runtime_revision_configuration() -> tuple[str | None, bool]:
     """Return the safe configured revision and whether configuration is invalid.
 
     ``None`` has two externally redacted meanings: an unset runtime revision
-    and an unsafe value that cannot leave the host.  Bundle compatibility must
+    and an invalid value that cannot leave the host.  Bundle compatibility must
     distinguish them internally: an unset value leaves a manifest-pinned
-    revision unverified, whereas an unsafe configured value is an explicit
-    failed attestation.  The boolean carries only that fact and never exposes
-    the original environment value.
+    revision unverified, whereas any explicitly configured invalid value
+    (including an empty string) is a failed attestation.  The boolean carries
+    only that fact and never exposes the original environment value.
     """
     configured = os.environ.get("STRUM_SOURCE_REVISION")
     if configured is None:
