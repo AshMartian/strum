@@ -587,6 +587,22 @@ model, composition, held-out evaluation, packaging, and execution requirements
 in a machine-readable non-executable contract. No Vocal worker path may invent
 those outputs from a raw component.
 
+The descriptor's `strum-vocal-chart-composition-contract/v1` additionally
+defines the only valid future assembly boundary. All lead components must have
+the same catalog-control lineage and source-ID partition and consume the same
+catalog audio identity or a pinned same-master-timeline alignment. `PART
+VOCALS` is assembled from separate pitch/activity, phrase, timestamped
+lyric/text, and note-96 talky components; HARM tracks remain distinct and need
+a future `vocals.harmony_model` trained only through the isolated-source
+policy. A `strum-vocal-held-out-chart-evaluation-contract/v1` requires
+source-disjoint test songs and STRUM-recomputed note, phrase, lyric/alignment,
+talky, per-HARM-track, and assembled-MIDI evidence before a
+`strum-vocal-profile-package-contract/v1` can bind components into a
+`strum-profile-composition/v1` graph. Until the named
+`vocal_chart_profile_handler/v1` exists, execution is unavailable and fallback
+to the legacy charter, shared Harmony audio, external lyrics, or raw component
+outputs is forbidden.
+
 ## 11. Hardware
 
 Developed on NVIDIA DGX Spark (GB10 GPU, CUDA 12.8). Inference runs in

@@ -690,6 +690,19 @@ remaining machine-readable stages and rejects chart execution until a composed
 Vocal profile has passed held-out chart evaluation and packaging. OCTAVE must
 never offer either raw component as an auto-chart model.
 
+Its `training_contract` now makes the future boundary explicit. A composed
+profile must bind all lead components to the same catalog control identity and
+source-ID split, use either the same catalog audio identity or a pinned
+same-master alignment, and keep the four lead event languages distinct. It
+must emit `PART VOCALS` pitched notes (36--84), note-96 talkies, phrase
+markers, and observed lyric/text events; `HARM1`/`HARM2`/`HARM3` may be emitted
+only by a future Harmony component trained from the policy-approved isolated
+sources. Evaluation must use source-disjoint `test` songs and STRUM-recompute
+note, phrase, lyric/alignment, talky, Harmony, and assembled-MIDI evidence.
+The descriptor names the still-unimplemented Harmony component, composition,
+evaluation, package, and `vocal_chart_profile_handler/v1` stages explicitly;
+it forbids a legacy charter, external lyrics, or a raw component fallback.
+
 Bass invokes the same five-lane CRNN implementation only after STRUM has
 revalidated the dedicated `bass_onset_fret` task view and its `PART BASS`
 labels. It emits distinct `bass.onset` and `bass.fret` components plus a

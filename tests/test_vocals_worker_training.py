@@ -223,7 +223,12 @@ def test_vocals_pipeline_exposes_strict_private_catalog_training_contract() -> N
     assert planned.private_request_fields == ("catalog_root",)
     contract = planned.as_json()["training_contract"]
     assert contract["format"] == "strum-planned-training-contract/v1"
-    assert contract["execution"] == {"status": "not_available", "inference_capability": None}
+    assert contract["execution"] == {
+        "status": "not_available",
+        "inference_capability": None,
+        "required_handler": "vocal_chart_profile_handler/v1",
+        "fallback": "forbidden",
+    }
     assert contract["label_source"]["tracks"] == ["PART VOCALS"]
     assert contract["label_source"]["excluded_source_tracks"] == ["HARM1", "HARM2", "HARM3"]
     assert set(contract["available_experiment_components"]) == {
@@ -237,6 +242,80 @@ def test_vocals_pipeline_exposes_strict_private_catalog_training_contract() -> N
         "task_format": "strum-vocal-harmony-source-task/v1",
         "status": "prepare_only",
         "shared_vocal_or_mix_fallback": False,
+    }
+    assert contract["catalog_admission"]["partition"] == {
+        "unit": "source_id",
+        "required_splits": ["train", "val", "test"],
+        "cross_component_split_assignment": "identical-by-source-id/v1",
+        "test_source_ids_forbidden_in_training_or_calibration": True,
+    }
+    assert contract["catalog_admission"]["harmony"] == {
+        "tracks": ["HARM1", "HARM2", "HARM3"],
+        "selection": "exact-declared-harmony-track/v1",
+        "source_task_format": "strum-vocal-harmony-source-task/v1",
+        "required_audio_policy": "isolated-harmony-stem-only/v1",
+        "forbidden_audio_roles": ["vocals", "mix"],
+        "required_provenance": [
+            "isolated_source_stem/v1",
+            "isolated_separation_output/v1",
+        ],
+    }
+    composition = contract["composition_contract"]
+    assert composition["format"] == "strum-vocal-chart-composition-contract/v1"
+    assert composition["status"] == "not_available"
+    assert composition["profile_graph_format"] == "strum-profile-composition/v1"
+    assert [component["id"] for component in composition["required_components"]] == [
+        "vocals.frame_activity_pitch",
+        "vocals.phrase_boundaries",
+        "vocals.lyric_alignment",
+        "vocals.talky_activity",
+        "vocals.harmony_model",
+    ]
+    assert composition["required_components"][-1] == {
+        "id": "vocals.harmony_model",
+        "producer_pipeline": "not_implemented",
+        "required_outputs": ["HARM1", "HARM2", "HARM3"],
+        "source_policy": "vocals.harmony-source-policy/v1",
+    }
+    assert composition["compatibility"] == {
+        "component_task_lineage": "same-catalog-control-and-source-partition/v1",
+        "audio_binding": "same-catalog-audio-identity-or-pinned-alignment/v1",
+        "clock": "same-master-timeline/v1",
+        "lead_track": "PART VOCALS",
+        "harmony_tracks_must_remain_distinct": True,
+        "no_implicit_lyrics_or_harmony": True,
+    }
+    assert composition["forbidden_shortcuts"] == [
+        "raw_component_as_profile",
+        "shared_vocals_or_mix_as_harmony_supervision",
+        "external_lyrics_as_chart_labels",
+        "legacy_vocals_charter_fallback",
+    ]
+    evaluation = contract["held_out_evaluation_contract"]
+    assert evaluation["format"] == "strum-vocal-held-out-chart-evaluation-contract/v1"
+    assert evaluation["status"] == "not_available"
+    assert evaluation["split"] == "test"
+    assert evaluation["source_partition"] == "source-id-disjoint-from-train-and-val/v1"
+    assert evaluation["evidence"]["recomputed_by"] == "strum"
+    assert evaluation["evidence"]["quality_thresholds"] == (
+        "explicit-profile-policy-not-yet-defined"
+    )
+    assert contract["packaging_contract"] == {
+        "format": "strum-vocal-profile-package-contract/v1",
+        "status": "not_available",
+        "requires": [
+            "completed-strum-recomputed-held-out-report",
+            "hash-verified-required-components-and-configurations",
+            "validated-strum-profile-composition-v1-graph",
+            "registered-vocal-chart-execution-handler",
+        ],
+        "raw_component_bundle_deployment_status": "not_deployable",
+    }
+    assert contract["execution"] == {
+        "status": "not_available",
+        "inference_capability": None,
+        "required_handler": "vocal_chart_profile_handler/v1",
+        "fallback": "forbidden",
     }
 
 

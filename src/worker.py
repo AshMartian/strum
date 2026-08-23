@@ -412,8 +412,163 @@ VOCALS_TRAINING_CONTRACT: dict[str, object] = {
             "shared_vocal_or_mix_fallback": False,
         }
     },
+    # These are requirements for a future composed profile, not a description
+    # of any current raw experiment.  Keeping source/event semantics here is
+    # intentional: OCTAVE must not invent a Vocal graph from four arbitrary
+    # checkpoints just because their component names happen to look related.
+    "catalog_admission": {
+        "lead": {
+            "track": "PART VOCALS",
+            "difficulty": "expert",
+            "required_labels": [
+                "pitched_note_timing_duration_midi_36_84",
+                "phrase_boundary_markers_midi_105_106_or_105_span",
+                "lyric_and_text_meta_events",
+                "pitchless_talky_marker_midi_96",
+            ],
+            "audio": {
+                "selection": "catalog-recorded-vocal-or-mix-identity/v1",
+                "preferred_role": "vocals",
+                "fallback_role": "mix",
+                "required_timeline": "same-master-timeline/v1",
+            },
+        },
+        "harmony": {
+            "tracks": ["HARM1", "HARM2", "HARM3"],
+            "selection": "exact-declared-harmony-track/v1",
+            "source_task_format": "strum-vocal-harmony-source-task/v1",
+            "required_audio_policy": "isolated-harmony-stem-only/v1",
+            "forbidden_audio_roles": ["vocals", "mix"],
+            "required_provenance": [
+                "isolated_source_stem/v1",
+                "isolated_separation_output/v1",
+            ],
+        },
+        "partition": {
+            "unit": "source_id",
+            "required_splits": ["train", "val", "test"],
+            "cross_component_split_assignment": "identical-by-source-id/v1",
+            "test_source_ids_forbidden_in_training_or_calibration": True,
+        },
+    },
+    "composition_contract": {
+        "format": "strum-vocal-chart-composition-contract/v1",
+        "status": "not_available",
+        "profile_graph_format": "strum-profile-composition/v1",
+        "required_components": [
+            {
+                "id": "vocals.frame_activity_pitch",
+                "producer_pipeline": "vocals.note-activity/v1",
+                "required_outputs": ["pitched_vocal_activity", "midi_pitch_36_84"],
+            },
+            {
+                "id": "vocals.phrase_boundaries",
+                "producer_pipeline": "vocals.phrase-boundaries/v1",
+                "required_outputs": ["lead_phrase_start", "lead_phrase_end"],
+            },
+            {
+                "id": "vocals.lyric_alignment",
+                "producer_pipeline": "vocals.lyric-alignment/v1",
+                "required_outputs": [
+                    "observed_lyric_character_tokens",
+                    "observed_lyric_event_alignment",
+                ],
+            },
+            {
+                "id": "vocals.talky_activity",
+                "producer_pipeline": "vocals.talky-activity/v1",
+                "required_outputs": ["pitchless_talky_activity"],
+            },
+            {
+                "id": "vocals.harmony_model",
+                "producer_pipeline": "not_implemented",
+                "required_outputs": ["HARM1", "HARM2", "HARM3"],
+                "source_policy": "vocals.harmony-source-policy/v1",
+            },
+        ],
+        "compatibility": {
+            "component_task_lineage": "same-catalog-control-and-source-partition/v1",
+            "audio_binding": "same-catalog-audio-identity-or-pinned-alignment/v1",
+            "clock": "same-master-timeline/v1",
+            "lead_track": "PART VOCALS",
+            "harmony_tracks_must_remain_distinct": True,
+            "no_implicit_lyrics_or_harmony": True,
+        },
+        "chart_outputs": {
+            "lead": {
+                "track": "PART VOCALS",
+                "events": [
+                    "pitched_notes_midi_36_84",
+                    "pitchless_talky_note_96",
+                    "phrase_markers_105_106_or_105_span",
+                    "lyrics_or_text_meta_events",
+                ],
+            },
+            "harmony": {
+                "tracks": ["HARM1", "HARM2", "HARM3"],
+                "only_from_provenance_approved_harmony_components": True,
+            },
+        },
+        "forbidden_shortcuts": [
+            "raw_component_as_profile",
+            "shared_vocals_or_mix_as_harmony_supervision",
+            "external_lyrics_as_chart_labels",
+            "legacy_vocals_charter_fallback",
+        ],
+    },
+    "held_out_evaluation_contract": {
+        "format": "strum-vocal-held-out-chart-evaluation-contract/v1",
+        "status": "not_available",
+        "split": "test",
+        "source_partition": "source-id-disjoint-from-train-and-val/v1",
+        "required_reference_labels": {
+            "lead": [
+                "pitched_notes_midi_36_84",
+                "phrase_boundaries",
+                "lyrics_or_text_meta_events",
+                "pitchless_talky_note_96",
+            ],
+            "harmony": ["exact-HARM1-HARM2-HARM3-tracks-with-approved-source-policy"],
+        },
+        "required_metrics": {
+            "pitched_notes": ["onset_f1", "offset_f1", "pitch_accuracy"],
+            "phrases": ["start_f1", "end_f1"],
+            "lyrics": ["token_error_rate", "timestamp_alignment_error_ms"],
+            "talkies": ["span_f1"],
+            "harmony": ["track_specific_note_f1"],
+            "assembled_chart": ["valid_midi", "per_track_event_coverage"],
+        },
+        "evidence": {
+            "recomputed_by": "strum",
+            "binds": [
+                "component_hashes",
+                "component_configuration_hashes",
+                "catalog_control_sha256",
+                "task_view_hashes",
+                "test_source_ids",
+                "harmony_source_policy_sha256",
+            ],
+            "quality_thresholds": "explicit-profile-policy-not-yet-defined",
+        },
+    },
+    "packaging_contract": {
+        "format": "strum-vocal-profile-package-contract/v1",
+        "status": "not_available",
+        "requires": [
+            "completed-strum-recomputed-held-out-report",
+            "hash-verified-required-components-and-configurations",
+            "validated-strum-profile-composition-v1-graph",
+            "registered-vocal-chart-execution-handler",
+        ],
+        "raw_component_bundle_deployment_status": "not_deployable",
+    },
     "required_stages": list(PLANNED_TRAINING_REQUIREMENTS["vocals"]),
-    "execution": {"status": "not_available", "inference_capability": None},
+    "execution": {
+        "status": "not_available",
+        "inference_capability": None,
+        "required_handler": "vocal_chart_profile_handler/v1",
+        "fallback": "forbidden",
+    },
 }
 
 
