@@ -9,10 +9,12 @@ import mido
 import pytest
 
 from src.catalog_task_manifest import (
+    LEGACY_SPLIT_ALGORITHM,
     MANIFEST_FORMAT,
     PIPELINE_IDS,
     available_task_kinds,
     build_catalog_task_manifest,
+    deterministic_split,
     resolve_catalog_task_manifest_songs,
 )
 from src.song_source_catalog import CatalogValidationError
@@ -145,6 +147,38 @@ def test_rejects_task_label_schema_or_track_tampering(tmp_path: Path) -> None:
     manifest["songs"][0]["label_tracks"] = ["PART GUITAR"]
     with pytest.raises(CatalogValidationError, match="valid approved catalog task input"):
         resolve_catalog_task_manifest_songs(manifest, tmp_path)
+
+
+def test_split_seed_changes_new_task_assignment_and_legacy_views_still_resolve(
+    tmp_path: Path,
+) -> None:
+    source_ids = [f"octave-src-{index:08x}" for index in range(1000)]
+    chosen = next(
+        source_id
+        for source_id in source_ids
+        if deterministic_split(source_id, seed="seed-a")
+        != deterministic_split(source_id, seed="seed-b")
+    )
+    _catalog(tmp_path, [_record(tmp_path, chosen)])
+
+    first = build_catalog_task_manifest(tmp_path, "section_guitar", split_seed="seed-a")
+    second = build_catalog_task_manifest(tmp_path, "section_guitar", split_seed="seed-b")
+
+    assert first["task"]["split_algorithm"] != LEGACY_SPLIT_ALGORITHM
+    assert first["songs"][0]["split"] != second["songs"][0]["split"]
+    assert (
+        resolve_catalog_task_manifest_songs(first, tmp_path)[0]["split"]
+        == first["songs"][0]["split"]
+    )
+
+    legacy = build_catalog_task_manifest(tmp_path, "section_guitar", split_seed="ignored-by-v1")
+    legacy["task"]["split_algorithm"] = LEGACY_SPLIT_ALGORITHM
+    legacy["songs"][0]["split"] = deterministic_split(chosen)
+
+    assert (
+        resolve_catalog_task_manifest_songs(legacy, tmp_path)[0]["split"]
+        == legacy["songs"][0]["split"]
+    )
 
 
 @pytest.mark.parametrize("task_kind", ("section_guitar", "section_bass"))

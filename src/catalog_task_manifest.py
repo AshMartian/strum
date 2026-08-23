@@ -30,7 +30,11 @@ from src.song_source_catalog import (
 
 MANIFEST_FORMAT = "strum-catalog-task-manifest/v1"
 MANIFEST_VERSION = 1
-SPLIT_ALGORITHM = "sha256-source-id-mod-100/v1"
+# v1 recorded a split seed but accidentally omitted it from the digest.  Keep
+# resolving v1 views exactly as written, but publish v2 for every new task
+# view so the declared seed is an actual immutable part of split assignment.
+LEGACY_SPLIT_ALGORITHM = "sha256-source-id-mod-100/v1"
+SPLIT_ALGORITHM = "sha256-source-id-seed-mod-100/v2"
 DEFAULT_SPLIT_RATIOS = (80, 10, 10)
 
 # The catalog's instrument coverage is the ground-truth label source.  These
@@ -218,11 +222,24 @@ TASK_LABEL_SCHEMAS: dict[str, dict[str, object]] = {
 }
 
 
-def deterministic_split(source_id: str, ratios: tuple[int, int, int] = DEFAULT_SPLIT_RATIOS) -> str:
-    """Assign a stable split based solely on a catalog source ID."""
+def deterministic_split(
+    source_id: str,
+    ratios: tuple[int, int, int] = DEFAULT_SPLIT_RATIOS,
+    *,
+    seed: str | None = None,
+) -> str:
+    """Assign a stable song-disjoint split, optionally keyed by a declared seed.
+
+    ``seed=None`` is the legacy v1 algorithm and exists only to resolve task
+    views created before the seed was honored.  New task views use v2 and pass
+    their immutable ``split_seed`` explicitly.
+    """
     if len(ratios) != 3 or any(ratio < 0 for ratio in ratios) or sum(ratios) != 100:
         raise CatalogValidationError("split ratios must be three non-negative values totaling 100")
-    bucket = int(hashlib.sha256(source_id.encode("utf-8")).hexdigest()[:8], 16) % 100
+    if seed is not None and (not isinstance(seed, str) or not seed):
+        raise CatalogValidationError("split seed must be a non-empty string")
+    identity = source_id if seed is None else f"{seed}\x00{source_id}"
+    bucket = int(hashlib.sha256(identity.encode("utf-8")).hexdigest()[:8], 16) % 100
     if bucket < ratios[0]:
         return "train"
     if bucket < ratios[0] + ratios[1]:
@@ -378,7 +395,7 @@ def build_catalog_task_manifest(
                 "source_id": source_id,
                 "instrument": instrument,
                 "required_difficulty": required_difficulty,
-                "split": deterministic_split(source_id, split_ratios),
+                "split": deterministic_split(source_id, split_ratios, seed=split_seed),
                 "audio_role": role,
                 "label_tracks": _label_tracks(task_kind, coverage.track_names),
                 "audio": _relative_asset_reference(catalog, record.audio[role]),
@@ -463,7 +480,7 @@ def resolve_catalog_task_manifest_songs(
         or preferred not in AUDIO_ROLES
         or (fallback is not None and fallback not in AUDIO_ROLES)
         or not isinstance(split_seed, str)
-        or task.get("split_algorithm") != SPLIT_ALGORITHM
+        or task.get("split_algorithm") not in {LEGACY_SPLIT_ALGORITHM, SPLIT_ALGORITHM}
     ):
         raise CatalogValidationError("manifest task settings are invalid")
     settings = _require_safe_preprocessing(
@@ -474,7 +491,8 @@ def resolve_catalog_task_manifest_songs(
     if task.get("label_schema") != TASK_LABEL_SCHEMAS[task_kind]:
         raise CatalogValidationError("manifest label schema is invalid")
     ratios = tuple(raw_ratios)
-    deterministic_split("octave-src-00000000", ratios)
+    use_seed = split_seed if task.get("split_algorithm") == SPLIT_ALGORITHM else None
+    deterministic_split("octave-src-00000000", ratios, seed=use_seed)
     catalog = load_catalog(catalog_root)
     if lineage.get("catalog_id") != catalog.catalog_id or lineage.get(
         "catalog_control_sha256"
@@ -509,7 +527,7 @@ def resolve_catalog_task_manifest_songs(
             or role not in record.audio
             or raw_song.get("instrument") != TASK_INSTRUMENTS[task_kind]
             or raw_song.get("required_difficulty") != required_difficulty
-            or raw_song.get("split") != deterministic_split(source_id, ratios)
+            or raw_song.get("split") != deterministic_split(source_id, ratios, seed=use_seed)
             or label_tracks != _label_tracks(task_kind, coverage.track_names)
             or not _asset_matches(raw_song.get("audio"), record.audio[role], catalog)
             or not _asset_matches(raw_song.get("notes_midi"), record.notes_midi, catalog)
