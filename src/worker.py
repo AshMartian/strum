@@ -91,9 +91,7 @@ class PipelineDescriptor:
         data = asdict(self)
         data["checkpoint_outputs"] = list(self.checkpoint_outputs)
         data["private_request_fields"] = list(self.private_request_fields)
-        data["catalog_inspection_option_keys"] = list(
-            self.catalog_inspection_option_keys
-        )
+        data["catalog_inspection_option_keys"] = list(self.catalog_inspection_option_keys)
         data["training_requirements"] = list(self.training_requirements)
         return data
 
