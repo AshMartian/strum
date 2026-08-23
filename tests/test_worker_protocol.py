@@ -65,7 +65,7 @@ def test_probe_declares_versioned_runtime_and_available_pipelines() -> None:
     assert "model_bundle_preflight" in payload["capabilities"]
 
 
-def test_chart_transform_schema_exposes_private_verified_parent_selection() -> None:
+def test_chart_transform_schema_exposes_opaque_parent_artifact_selection() -> None:
     descriptor = next(item for item in PIPELINES if item.id == "chart_transform.five_lane/v1")
     assert descriptor.train_schema is not None
     properties = descriptor.train_schema["properties"]
@@ -74,12 +74,11 @@ def test_chart_transform_schema_exposes_private_verified_parent_selection() -> N
         "enum": ["fresh", "fine_tune"],
         "default": "fresh",
     }
-    assert properties["parent_bundle"] == {
+    assert properties["parent_artifact_id"] == {
         "type": "string",
-        "format": "strum-model-bundle-root",
-        "writeOnly": True,
-        "x-strum-scope": "main-process",
+        "format": "strum-model-bundle-artifact-id",
     }
+    assert "parent_bundle" not in properties
 
 
 def test_legacy_inference_output_is_not_exposed_to_worker_clients(
@@ -323,7 +322,7 @@ def _chart_transform_train_request(
         "device": "cpu",
     }
     if parent_bundle is not None:
-        options["parent_bundle"] = str(parent_bundle)
+        options["parent_artifact_id"] = f"artifact:{parent_bundle.name}"
     request = root / f"{model_id}-request.json"
     request.write_text(
         json.dumps(
@@ -332,6 +331,7 @@ def _chart_transform_train_request(
                 "task_view": str(task_view),
                 "output": str(output),
                 "options": options,
+                **({"parent_bundle": str(parent_bundle)} if parent_bundle is not None else {}),
             }
         )
     )

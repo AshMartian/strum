@@ -574,13 +574,16 @@ The chart-transform training request names a catalog-generated
 `dataset-manifest.json`, an output folder, and bounded configuration such as
 `model_id`, `epochs`, `device`, and `hidden_dim`. `checkpoint_mode` is either
 `fresh` (the default) or `fine_tune`; `resume` is intentionally rejected until
-STRUM has a portable optimizer/scheduler state contract. A `fine_tune` request
-must include a main-process-only `parent_bundle` option. STRUM verifies the
-bundle manifest, component hashes and byte lengths, its exact five-lane
-architecture/preprocessing, compatible task settings, and expected inference
-profile before opening its tensor-only checkpoint. The parent path is never
-placed in the result, `training-metadata.json`, or `experiment.json`; those
-artifacts retain only parent model/component and manifest/checkpoint hashes.
+STRUM has a portable optimizer/scheduler state contract. The renderer exposes
+an opaque `parent_artifact_id`, which OCTAVE resolves in its main process. A
+`fine_tune` request then supplies the resolved `parent_bundle` as a private
+top-level request field, parallel to `catalog_root`; it is not a schema option
+and is never renderer-visible. STRUM verifies the bundle manifest, component
+hashes and byte lengths, its exact five-lane architecture/preprocessing,
+compatible task settings, and expected inference profile before opening its
+tensor-only checkpoint. The parent path is never placed in the result,
+`training-metadata.json`, or `experiment.json`; those artifacts retain only
+parent model/component and manifest/checkpoint hashes.
 It does not accept arbitrary checkpoint paths or audio locations. Its
 resulting bundle includes a verified component hash/byte length, architecture
 and preprocessing IDs, plus a profile that can be checked with

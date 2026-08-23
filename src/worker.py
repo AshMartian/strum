@@ -100,15 +100,12 @@ CHART_TRANSFORM_TRAIN_SCHEMA = _object_schema(
             "enum": ["fresh", "fine_tune"],
             "default": "fresh",
         },
-        # The parent location is supplied by OCTAVE's main process after its
-        # bundle picker has selected a directory.  It is deliberately an
-        # option rather than a renderer-visible output: worker responses and
-        # all portable artifacts retain only its verified identity below.
-        "parent_bundle": {
+        # OCTAVE renders an opaque artifact selector, then resolves it in its
+        # main process to the private top-level ``parent_bundle`` request
+        # field. The renderer never receives a filesystem location.
+        "parent_artifact_id": {
             "type": "string",
-            "format": "strum-model-bundle-root",
-            "writeOnly": True,
-            "x-strum-scope": "main-process",
+            "format": "strum-model-bundle-artifact-id",
         },
         "seed": {"type": "integer", "default": 20260813},
         "validation_fraction": {"type": "number", "minimum": 0, "maximum": 1, "default": 0.2},
@@ -1063,7 +1060,8 @@ def _read_train_request(request_path: Path) -> dict[str, Any]:
     except (OSError, json.JSONDecodeError) as error:
         raise WorkerRequestError("request is unreadable or not valid JSON") from error
     base_fields = {"pipeline_id", "task_view", "output", "options"}
-    if not isinstance(raw, dict) or not base_fields.issubset(raw):
+    permitted = base_fields | {"catalog_root", "parent_bundle"}
+    if not isinstance(raw, dict) or set(raw) - permitted or not base_fields <= set(raw):
         raise WorkerRequestError("training request has unsupported fields")
     if not all(
         isinstance(raw[key], str) and raw[key] for key in ("pipeline_id", "task_view", "output")
@@ -1078,8 +1076,15 @@ def _read_train_request(request_path: Path) -> dict[str, Any]:
             raise WorkerRequestError("catalog-backed training request has unsupported fields")
         if not isinstance(raw["catalog_root"], str) or not raw["catalog_root"]:
             raise WorkerRequestError("catalog-backed training requires worker-local catalog_root")
+    elif raw["pipeline_id"] == "chart_transform.five_lane/v1":
+        if set(raw) not in {base_fields, base_fields | {"parent_bundle"}}:
+            raise WorkerRequestError("chart-transform training request has unsupported fields")
     elif set(raw) != base_fields:
         raise WorkerRequestError("training request has unsupported fields")
+    if "parent_bundle" in raw and (
+        not isinstance(raw["parent_bundle"], str) or not raw["parent_bundle"]
+    ):
+        raise WorkerRequestError("training parent_bundle must be a non-empty string")
     return raw
 
 
@@ -1195,6 +1200,8 @@ def run_training_request(request_path: Path) -> dict[str, object]:
             run_catalog_guitar_training,
         )
 
+        if "parent_bundle" in request:
+            raise WorkerRequestError("Guitar training does not accept parent_bundle")
         catalog_root = request.get("catalog_root")
         if not isinstance(catalog_root, str) or not catalog_root:
             raise WorkerRequestError("Guitar training requires worker-local catalog_root")
@@ -1257,7 +1264,7 @@ def run_training_request(request_path: Path) -> dict[str, object]:
     permitted = {
         "model_id",
         "checkpoint_mode",
-        "parent_bundle",
+        "parent_artifact_id",
         "seed",
         "validation_fraction",
         "lane_count",
@@ -1281,13 +1288,20 @@ def run_training_request(request_path: Path) -> dict[str, object]:
         )
     if checkpoint_mode not in {"fresh", "fine_tune"}:
         raise WorkerRequestError("chart-transform checkpoint_mode must be fresh or fine_tune")
-    parent_bundle = options.get("parent_bundle")
-    if parent_bundle is not None and (not isinstance(parent_bundle, str) or not parent_bundle):
-        raise WorkerRequestError("chart-transform parent_bundle must be a non-empty string")
-    if checkpoint_mode == "fresh" and parent_bundle is not None:
-        raise WorkerRequestError("fresh chart-transform training must not select a parent_bundle")
-    if checkpoint_mode == "fine_tune" and parent_bundle is None:
-        raise WorkerRequestError("fine_tune chart-transform training requires a parent_bundle")
+    parent_artifact_id = options.get("parent_artifact_id")
+    if parent_artifact_id is not None and (
+        not isinstance(parent_artifact_id, str) or not parent_artifact_id
+    ):
+        raise WorkerRequestError("chart-transform parent_artifact_id must be a non-empty string")
+    parent_bundle = request.get("parent_bundle")
+    if checkpoint_mode == "fresh" and (parent_bundle is not None or parent_artifact_id is not None):
+        raise WorkerRequestError("fresh chart-transform training must not select a parent artifact")
+    if checkpoint_mode == "fine_tune" and (
+        parent_bundle is None or parent_artifact_id is None
+    ):
+        raise WorkerRequestError(
+            "fine_tune chart-transform training requires a parent_artifact_id and private parent_bundle"
+        )
     try:
         dataset = json.loads(Path(request["task_view"]).read_text(encoding="utf-8"))
         config_values: dict[str, Any] = {
@@ -1300,7 +1314,7 @@ def run_training_request(request_path: Path) -> dict[str, object]:
             **{
                 key: value
                 for key, value in options.items()
-                if key not in {"model_id", "checkpoint_mode", "parent_bundle"}
+                if key not in {"model_id", "checkpoint_mode", "parent_artifact_id"}
             },
         }
         # Build a typed compatibility target before a parent checkpoint has
