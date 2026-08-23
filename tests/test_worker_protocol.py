@@ -15,7 +15,6 @@ from src.models.chart_transform import EventTransformMLP
 from src.worker import (
     PIPELINES,
     PROTOCOL_VERSION,
-    WorkerRequestError,
     _run_without_legacy_output,
     _runtime_payload,
     _write_expert_guitar_midi,

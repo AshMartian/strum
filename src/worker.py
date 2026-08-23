@@ -1077,7 +1077,7 @@ def _read_train_request(request_path: Path) -> dict[str, Any]:
         if not isinstance(raw["catalog_root"], str) or not raw["catalog_root"]:
             raise WorkerRequestError("catalog-backed training requires worker-local catalog_root")
     elif raw["pipeline_id"] == "chart_transform.five_lane/v1":
-        if set(raw) not in {base_fields, base_fields | {"parent_bundle"}}:
+        if set(raw) != base_fields and set(raw) != base_fields | {"parent_bundle"}:
             raise WorkerRequestError("chart-transform training request has unsupported fields")
     elif set(raw) != base_fields:
         raise WorkerRequestError("training request has unsupported fields")
