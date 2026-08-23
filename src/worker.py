@@ -172,6 +172,16 @@ BASS_TRAIN_SCHEMA = _object_schema(
     },
     required=("model_id",),
 )
+KEYS_TRAIN_SCHEMA = _object_schema(
+    {
+        "model_id": {"type": "string"},
+        "epochs": {"type": "integer", "minimum": 1, "default": 25},
+        "batch_size": {"type": "integer", "minimum": 1, "default": 128},
+        "device": {"type": "string", "enum": ["auto", "cuda", "mps", "cpu"], "default": "auto"},
+        "limit_songs": {"type": "integer", "minimum": 0, "default": 0},
+    },
+    required=("model_id",),
+)
 DRUMS_ONSET_TRAIN_SCHEMA = _object_schema(
     {
         "model_id": {"type": "string"},
@@ -245,6 +255,28 @@ PIPELINES = (
             "fallback_audio_role",
             "required_difficulty",
         ),
+    ),
+    PipelineDescriptor(
+        id="keys.onset-fret/v1",
+        display_name="Keys onset + fret",
+        kind="audio_to_chart",
+        version=1,
+        catalog_requirements={
+            "instrument": "keys",
+            "difficulties": ["expert"],
+            "audio_roles": ["keys", "mix"],
+            "audio_policy": "prefer:keys,fallback:mix",
+            "label_tracks": ["PART KEYS"],
+        },
+        prepare_schema=_object_schema(CATALOG_AUDIO_OPTIONS),
+        train_schema=KEYS_TRAIN_SCHEMA,
+        checkpoint_outputs=("keys.onset", "keys.fret"),
+        # The experiment must be independently evaluated and packaged before
+        # a Keys chart handler can select it.
+        inference_capability=None,
+        status="catalog_ready",
+        preparation_status="available",
+        training_status="available",
     ),
     PipelineDescriptor(
         id="chart_transform.five_lane/v1",
@@ -1545,6 +1577,17 @@ def _inspect_pipeline_catalog(
             fallback_role=options.get("fallback_audio_role", "mix"),
             required_difficulty=options.get("required_difficulty", "expert"),
         )
+    if pipeline_id == "keys.onset-fret/v1":
+        permitted = {"audio_role", "fallback_audio_role", "required_difficulty"}
+        if set(options) - permitted:
+            raise WorkerRequestError("unsupported Keys catalog inspection option")
+        return _audio_task_inspection(
+            catalog,
+            instrument="keys",
+            preferred_role=options.get("audio_role", "keys"),
+            fallback_role=options.get("fallback_audio_role", "mix"),
+            required_difficulty=options.get("required_difficulty", "expert"),
+        )
     if pipeline_id == "drums.onset-classifier/v1":
         permitted = {"audio_role", "fallback_audio_role", "required_difficulty"}
         if set(options) - permitted:
@@ -1692,6 +1735,14 @@ def prepare_dataset_request(request_path: Path) -> dict[str, object]:
         written = write_catalog_task_manifest(output, manifest)
         record_count = manifest["summary"]["record_count"]
         task_view_id = _task_view_digest(manifest)
+    elif pipeline_id == "keys.onset-fret/v1":
+        permitted = {"audio_role", "fallback_audio_role", "required_difficulty"}
+        if set(options) - permitted:
+            raise WorkerRequestError("unsupported Keys preparation option")
+        manifest = build_catalog_task_manifest(catalog_root, "keys_onset_fret", **options)
+        written = write_catalog_task_manifest(output, manifest)
+        record_count = manifest["summary"]["record_count"]
+        task_view_id = _task_view_digest(manifest)
     elif pipeline_id == "drums.onset-classifier/v1":
         permitted = {"audio_role", "fallback_audio_role", "required_difficulty"}
         if set(options) - permitted:
@@ -1775,6 +1826,7 @@ def _read_train_request(request_path: Path) -> dict[str, Any]:
     if raw["pipeline_id"] in {
         "guitar.onset-fret/v1",
         "bass.onset-fret/v1",
+        "keys.onset-fret/v1",
         "drums.onset-classifier/v1",
     }:
         if set(raw) != base_fields | {"catalog_root"}:
@@ -1973,6 +2025,47 @@ def run_training_request(request_path: Path) -> dict[str, object]:
         except (BassTrainingError, OSError, TypeError, ValueError) as error:
             raise WorkerRequestError(
                 "Bass training request failed validation or execution"
+            ) from error
+        return {
+            "status": "completed",
+            "pipeline_id": pipeline_id,
+            "model_id": preflight["model_id"],
+            "bundle_name": Path(result["bundle_dir"]).name,
+            "manifest_sha256": preflight["manifest_sha256"],
+            "components": preflight["components"],
+            "metrics": result["metrics"],
+            "deployment_status": result["deployment_status"],
+        }
+    if pipeline_id == "keys.onset-fret/v1":
+        from src.keys_worker_training import (  # noqa: PLC0415
+            KeysTrainingError,
+            KeysTrainingOptions,
+            run_catalog_keys_training,
+        )
+
+        if "parent_bundle" in request:
+            raise WorkerRequestError("Keys training does not accept parent_bundle")
+        catalog_root = request.get("catalog_root")
+        if not isinstance(catalog_root, str) or not catalog_root:
+            raise WorkerRequestError("Keys training requires worker-local catalog_root")
+        try:
+            options = KeysTrainingOptions.from_mapping(request["options"])
+            revision, _dirty = _revision()
+            result = run_catalog_keys_training(
+                task_view_path=Path(request["task_view"]),
+                output_dir=Path(request["output"]),
+                catalog_root=Path(catalog_root),
+                options=options,
+                strum_revision=revision,
+            )
+            preflight = preflight_bundle(
+                result["bundle_dir"], required_components=descriptor.checkpoint_outputs
+            )
+        except (BundleValidationError, CatalogValidationError):
+            raise
+        except (KeysTrainingError, OSError, TypeError, ValueError) as error:
+            raise WorkerRequestError(
+                "Keys training request failed validation or execution"
             ) from error
         return {
             "status": "completed",

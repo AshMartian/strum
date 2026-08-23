@@ -29,7 +29,7 @@ Usage:
 
 For a catalog-backed five-lane task view, add `--catalog-root` so STRUM can
 re-validate catalog assets and resolve managed paths only at runtime.  The
-worker uses this same feature extractor for Guitar and Bass, but the manifest
+worker uses this same feature extractor for Guitar, Bass, and five-lane Keys, but the manifest
 and ``--instrument`` must agree so labels can never silently come from the
 wrong MIDI track.
 """
@@ -148,9 +148,10 @@ def parse_onsets_from_manifest(
 ) -> list[tuple[float, set[int]]]:
     """Parse Expert five-lane onsets from one validated MIDI label track.
 
-    ``PART GUITAR`` and ``PART BASS`` share the 96--100 Expert lane encoding
-    (and optional open note 95).  Callers must provide the track selected by a
-    revalidated task view rather than relying on a Guitar-only default.
+    ``PART GUITAR``, ``PART BASS``, and ``PART KEYS`` share the 96--100 Expert
+    lane encoding (and optional open note 95).  Callers must provide the track
+    selected by a revalidated task view rather than relying on a Guitar-only
+    default.
     """
     import mido
 
@@ -505,7 +506,7 @@ def main() -> int:
     )
     ap.add_argument(
         "--instrument",
-        choices=["guitar", "bass"],
+        choices=["guitar", "bass", "keys"],
         default="guitar",
         help="five-lane label instrument; must agree with a catalog task view",
     )
@@ -523,7 +524,11 @@ def main() -> int:
         return 2
 
     manifest = json.loads(Path(args.manifest).read_text())
-    expected_track = {"guitar": "PART GUITAR", "bass": "PART BASS"}[args.instrument]
+    expected_track = {
+        "guitar": "PART GUITAR",
+        "bass": "PART BASS",
+        "keys": "PART KEYS",
+    }[args.instrument]
     if manifest.get("format") == GUITAR_MANIFEST_FORMAT:
         if args.catalog_root is None:
             ap.error("--catalog-root is required for a catalog-backed manifest")
@@ -534,10 +539,12 @@ def main() -> int:
         if args.catalog_root is None:
             ap.error("--catalog-root is required for a catalog-backed manifest")
         task = manifest.get("task")
-        if not isinstance(task, dict) or task.get("kind") != "bass_onset_fret":
-            ap.error("this preprocessor only accepts the Bass onset/fret catalog task view")
-        if args.instrument != "bass":
-            ap.error("a Bass onset/fret task manifest requires --instrument bass")
+        expected_kind = {
+            "bass": "bass_onset_fret",
+            "keys": "keys_onset_fret",
+        }.get(args.instrument)
+        if expected_kind is None or not isinstance(task, dict) or task.get("kind") != expected_kind:
+            ap.error("this preprocessor only accepts its matching five-lane catalog task view")
         all_songs = resolve_catalog_task_manifest_songs(manifest, args.catalog_root)
     else:
         all_songs = manifest["songs"]

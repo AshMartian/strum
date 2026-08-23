@@ -557,12 +557,12 @@ For example, a Guitar task-view request is:
 }
 ```
 
-`guitar.onset-fret/v1`, `bass.onset-fret/v1`,
+`guitar.onset-fret/v1`, `bass.onset-fret/v1`, `keys.onset-fret/v1`,
 `drums.onset-classifier/v1`, and `chart_transform.five_lane/v1` are
 worker-trainable. Their renderer-visible
 schemas contain only bounded model/training knobs. The private top-level
 `catalog_root` request field is worker-local configuration for Guitar, Bass,
-and Drums task-view revalidation, never a pipeline option or renderer control.
+Keys, and Drums task-view revalidation, never a pipeline option or renderer control.
 
 Guitar invokes the established window-preprocessing and two-stage onset/fret
 trainers, then packages verified `guitar.onset` and `guitar.fret` bundle
@@ -585,6 +585,15 @@ labels. It emits distinct `bass.onset` and `bass.fret` components plus a
 `requires_bass_profile_evaluation_and_packaging`: no Bass runtime profile or
 `inference_capability` exists yet, so this artifact cannot be selected for
 auto-charting or substituted for Guitar.
+
+Keys has the same narrow experiment boundary: `keys.onset-fret/v1` revalidates
+the dedicated `keys_onset_fret` task view, whose label schema selects only
+`PART KEYS` Expert five-lane labels. It emits distinct `keys.onset` and
+`keys.fret` components plus a `strum-keys-neural-model-config/v1`
+configuration. Its `deployment_status` is
+`requires_keys_profile_evaluation_and_packaging`; no Keys runtime profile or
+`inference_capability` exists, so it cannot be selected for auto-charting or
+substituted for Guitar or Bass.
 
 ```bash
 strum-worker train start --request /path/to/owned-train-request.json --json-events

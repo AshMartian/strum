@@ -374,6 +374,7 @@ strum-worker probe --json
 strum-worker pipeline list --json
 strum-worker catalog inspect --catalog-root /private/catalog --pipeline guitar.onset-fret/v1 --json
 strum-worker catalog inspect --catalog-root /private/catalog --pipeline bass.onset-fret/v1 --json
+strum-worker catalog inspect --catalog-root /private/catalog --pipeline keys.onset-fret/v1 --json
 ```
 
 OCTAVE renders only the selected descriptor's `prepare_schema` and
@@ -428,6 +429,21 @@ The resulting experiment has
 `inference_capability`. It cannot be selected by `chart run`, cannot be
 packaged as `guitar.neural-v1-expert/v1`, and must receive a Bass-specific
 held-out evaluator plus a compatible runtime profile before deployment.
+
+### Keys V1 experiment gate
+
+`keys.onset-fret/v1` likewise reuses only the five-lane CRNN implementation,
+not a Guitar or Bass task/profile contract. Its `keys_onset_fret` task view
+revalidates the catalog, selects only `PART KEYS`, and uses the standard Expert
+five-lane encoding (96--100). The worker invokes the shared feature extractor
+with `--instrument keys`, then emits only `keys.onset` and `keys.fret`
+components with `strum-keys-neural-model-config/v1` configuration.
+
+The experiment remains
+`deployment_status: requires_keys_profile_evaluation_and_packaging` and has no
+`inference_capability`. It is not a replacement for the legacy Keys charter;
+it needs Keys-specific held-out evaluation and a runtime/profile contract
+before a chart handler may select it.
 
 ## 11. Hardware
 
