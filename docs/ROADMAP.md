@@ -10,8 +10,8 @@ auto-chart handler.
 
 | Family | Catalog task view | Worker training | Executable worker profile |
 | --- | --- | --- | --- |
-| Guitar onset + fret | Available | Script-only | `guitar.hybrid-v2-rule/v1`, Expert only |
-| Drums onset + classifier | Available | Script-only | `drums.v14-expert/v1`, Expert only direct V14 |
+| Guitar onset + fret | Available | Available; experiment-only | `guitar.hybrid-v2-rule/v1`, Expert only |
+| Drums onset + classifier | Available | Available; experiment-only | `drums.v14-expert/v1`, Expert only direct V14 |
 | Five-lane difficulty transform (Guitar/Bass/Keys/Drums) | Available | Available | `difficulty.transform/v1` |
 | Bass / Keys / Vocals / Pro Guitar / Pro Bass / Pro Keys | Available | Planned | Planned |
 | Guitar/Bass fret mapper and section classifier | Available | Planned worker handler | Planned |
@@ -38,14 +38,19 @@ presented as a successful OCTAVE auto-chart result.
 - ✅ Catalog-backed, worker-trainable learned five-lane chart transforms for
   Guitar, Bass, Keys, and Drums, including explicit Expert → lower-difficulty
   provenance.
+- ✅ Catalog-backed, worker-trainable Guitar onset/fret and Drums onset
+  classifier experiments. Both reuse their established preprocessing/trainers,
+  record path-free provenance, and remain non-deployable until a compatible
+  auto-chart profile is explicitly packaged and validated.
 - ✅ Legacy model/training research assets: two-stage drums, Guitar onset,
   mapper, section, vocals, keys, tempo/grid, MIDI export, and batch assembly.
 
 ## Next worker milestones
 
-1. Make Guitar and Drums catalog trainers worker-runable: typed training
-   schemas, cache/preprocessing jobs, experiment manifests, compatible
-   resume/fine-tune checks, evaluation output, and deployable bundle profiles.
+1. Package and evaluate compatible Guitar and Drums auto-chart profiles from
+   worker-produced experiments. This requires architecture/preprocessing and
+   companion-model compatibility checks; it must not promote an experiment
+   solely because its checkpoint file exists.
 2. Replace the remaining legacy auto-chart assembly behavior with declared,
    component-level bundle requirements and typed result manifests. A partial
    run must state its actual stage status and fallback policy.

@@ -16,7 +16,7 @@ fails closed to the profiles declared by a validated model bundle:
 | `guitar.hybrid-v2-rule/v1` | Executable | Expert Guitar only |
 | `drums.v14-expert/v1` | Executable | Expert Drums only, direct V14 (no legacy ensemble/fallbacks) |
 | `difficulty.transform/v1` | Executable | Learned five-lane Expert → Hard/Medium/Easy transform for Guitar, Bass, Keys, or Drums |
-| Guitar / Drums catalog task views | Catalog-ready, script-only training | Safe task views; their legacy trainers are not worker handlers yet |
+| Guitar onset/fret / Drums onset classifier | Worker-trainable, experiment-only | Safe task views plus path-free experiment bundles; profile packaging remains required |
 | Bass, Keys, Vocals, Pro instruments, mapper, section | Catalog-ready task views, training planned | No worker trainer or deployable profile |
 | Legacy batch pipeline | Research / compatibility scripts | Not a worker execution handler |
 
