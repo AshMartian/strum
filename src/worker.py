@@ -1230,6 +1230,7 @@ def run_training_request(request_path: Path) -> dict[str, object]:
             "manifest_sha256": preflight["manifest_sha256"],
             "components": preflight["components"],
             "metrics": result["metrics"],
+            "deployment_status": result["deployment_status"],
         }
     if pipeline_id == "drums.onset-classifier/v1":
         from src.drums_onset_training import (  # noqa: PLC0415

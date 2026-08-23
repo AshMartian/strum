@@ -363,6 +363,7 @@ def run_catalog_guitar_training(
             "device": device,
         },
         "metrics": histories,
+        "deployment_status": "requires_profile_packaging",
         "model_bundle": {"model_id": options.model_id, "manifest_sha256": _sha256(manifest_path)},
     }
     (output_dir / "experiment.json").write_text(
@@ -372,4 +373,5 @@ def run_catalog_guitar_training(
         "bundle_dir": bundle_dir,
         "manifest_sha256": _sha256(manifest_path),
         "metrics": histories,
+        "deployment_status": "requires_profile_packaging",
     }

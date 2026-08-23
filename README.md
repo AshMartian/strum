@@ -539,7 +539,10 @@ Drums task-view revalidation, never a pipeline option or renderer control.
 
 Guitar invokes the established window-preprocessing and two-stage onset/fret
 trainers, then packages verified `guitar.onset` and `guitar.fret` bundle
-components with task-view lineage. Drums derives its eight-lane labels,
+components with task-view lineage. Like the Drums path, its output is an
+experiment artifact (`deployment_status: requires_profile_packaging`): it
+cannot replace a production auto-chart profile until a compatible profile is
+explicitly packaged and validated. Drums derives its eight-lane labels,
 builds the maintained onset-window cache, and invokes the onset-classifier
 trainer. Its output remains an experiment artifact
 (`deployment_status: requires_profile_packaging`), not a claim that it can

@@ -124,6 +124,7 @@ def test_guitar_worker_trains_from_catalog_task_view_and_packages_provenance(
     assert result["status"] == "completed"
     assert result["pipeline_id"] == "guitar.onset-fret/v1"
     assert result["model_id"] == "catalog-guitar-v1"
+    assert result["deployment_status"] == "requires_profile_packaging"
     assert [component["id"] for component in result["components"]] == [
         "guitar.onset",
         "guitar.fret",
@@ -137,7 +138,9 @@ def test_guitar_worker_trains_from_catalog_task_view_and_packages_provenance(
     experiment = (output / "experiment.json").read_text()
     assert str(tmp_path) not in manifest
     assert str(tmp_path) not in experiment
-    assert json.loads(experiment)["task_view"]["catalog_id"] == "guitar-training-fixture"
+    experiment_data = json.loads(experiment)
+    assert experiment_data["task_view"]["catalog_id"] == "guitar-training-fixture"
+    assert experiment_data["deployment_status"] == "requires_profile_packaging"
 
 
 def test_guitar_pipeline_advertises_a_strict_worker_training_schema() -> None:
