@@ -242,8 +242,10 @@ class ModelBundle:
             if source_revision_identity(required_revision) is None:
                 errors.append("bundle strum_revision must be a safe Git revision identity")
             else:
-                runtime_revision = get_runtime_revision()
-                if runtime_revision is not None and runtime_revision != required_revision:
+                runtime_revision, runtime_revision_invalid = _runtime_revision_configuration()
+                if runtime_revision_invalid:
+                    errors.append("STRUM source revision configuration is invalid")
+                elif runtime_revision is not None and runtime_revision != required_revision:
                     errors.append(
                         f"bundle requires STRUM source revision {required_revision}; "
                         f"running {runtime_revision}"
@@ -465,7 +467,13 @@ class ModelBundle:
         required_revision = self.compatibility.get("strum_revision")
         if not isinstance(required_revision, str) or not required_revision.strip():
             return source_dirty_status
-        runtime_revision = get_runtime_revision()
+        runtime_revision, runtime_revision_invalid = _runtime_revision_configuration()
+        if runtime_revision_invalid:
+            return [
+                *source_dirty_status,
+                "STRUM source revision configuration is invalid; "
+                "declared revision cannot be verified",
+            ]
         if runtime_revision is None:
             return [
                 *source_dirty_status,
@@ -515,8 +523,29 @@ def get_runtime_revision() -> str | None:
     caller that pins STRUM (for example, an editor integration) can therefore
     set ``STRUM_SOURCE_REVISION`` to make a bundle's revision requirement
     enforceable.  Absence means "declared but unverified", not incompatibility.
+    Invalid configured values intentionally remain indistinguishable from
+    absence to callers that only need a safe display identity; validation uses
+    :func:`_runtime_revision_configuration` to fail closed for that case.
     """
-    return source_revision_identity(os.environ.get("STRUM_SOURCE_REVISION"))
+    revision, _invalid = _runtime_revision_configuration()
+    return revision
+
+
+def _runtime_revision_configuration() -> tuple[str | None, bool]:
+    """Return the safe configured revision and whether configuration is invalid.
+
+    ``None`` has two externally redacted meanings: an unset runtime revision
+    and an unsafe value that cannot leave the host.  Bundle compatibility must
+    distinguish them internally: an unset value leaves a manifest-pinned
+    revision unverified, whereas an unsafe configured value is an explicit
+    failed attestation.  The boolean carries only that fact and never exposes
+    the original environment value.
+    """
+    configured = os.environ.get("STRUM_SOURCE_REVISION")
+    if configured is None:
+        return None, False
+    revision = source_revision_identity(configured)
+    return revision, revision is None
 
 
 def _version_tuple(value: str) -> tuple[int, ...]:

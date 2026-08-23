@@ -1124,6 +1124,38 @@ def test_preflight_requires_hash_and_length_for_deployable_components(tmp_path: 
     assert result["manifest_sha256"]
 
 
+def test_preflight_and_profile_validation_reject_invalid_pinned_runtime_revision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    unsafe_revision = "/private/host/build"
+    root = _bundle(tmp_path, {"architecture": "GuitarOnsetCRNN/v1"})
+    manifest_path = root / MANIFEST_FILENAME
+    manifest = json.loads(manifest_path.read_text())
+    manifest["compatibility"]["strum_revision"] = "abc1234"
+    manifest["profiles"] = {
+        "guitar-default": {
+            "capability": "guitar.audio_to_chart/v1",
+            "instruments": ["guitar"],
+            "required_components": ["guitar.onset"],
+            "difficulty_policies": ["expert_only"],
+        }
+    }
+    manifest_path.write_text(json.dumps(manifest))
+    monkeypatch.setenv("STRUM_SOURCE_REVISION", unsafe_revision)
+
+    for validate in (
+        lambda: preflight_bundle(root, required_components=["guitar.onset"]),
+        lambda: validate_inference_profile(
+            root, profile_id="guitar-default", difficulty_policy="expert_only"
+        ),
+    ):
+        with pytest.raises(
+            BundleValidationError, match="source revision configuration is invalid"
+        ) as error:
+            validate()
+        assert unsafe_revision not in str(error.value)
+
+
 def test_preflight_requires_config_fingerprint_when_component_declares_config(
     tmp_path: Path,
 ) -> None:

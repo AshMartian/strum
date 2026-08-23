@@ -177,6 +177,35 @@ def test_source_revision_mismatch_is_rejected_when_runtime_revision_is_set(
         load_model_bundle(tmp_path)
 
 
+def test_invalid_runtime_revision_rejects_pinned_bundle_without_leaking_value(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    unsafe_revision = "/private/host/build"
+    write_manifest(
+        tmp_path,
+        {"guitar.onset": {"checkpoint": "weights/best.pt"}},
+        compatibility={
+            "manifest_schema": 1,
+            "strum_version": ">=0.1.0",
+            "strum_revision": "abc1234",
+        },
+    )
+    monkeypatch.delenv("STRUM_SOURCE_REVISION", raising=False)
+    bundle = load_model_bundle(tmp_path)
+
+    monkeypatch.setenv("STRUM_SOURCE_REVISION", unsafe_revision)
+
+    assert bundle.validate() == ["STRUM source revision configuration is invalid"]
+    assert bundle.compatibility_status() == [
+        "STRUM source revision configuration is invalid; declared revision cannot be verified"
+    ]
+    with pytest.raises(
+        BundleValidationError, match="source revision configuration is invalid"
+    ) as error:
+        load_model_bundle(tmp_path)
+    assert unsafe_revision not in str(error.value)
+
+
 @pytest.mark.parametrize("revision", ["/private/host/build", "untrusted-build", "A" * 40])
 def test_manifest_rejects_unsafe_source_revision_identity(tmp_path: Path, revision: str) -> None:
     write_manifest(
