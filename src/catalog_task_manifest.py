@@ -37,6 +37,11 @@ DEFAULT_SPLIT_RATIOS = (80, 10, 10)
 # windows, MIDI targets, and feature labels in STRUM.
 PIPELINE_IDS = {
     "bass": "strum.instrument-chart/bass/v1",
+    # This is deliberately separate from the generic Bass chart task.  The
+    # latter remains useful for future training families, whereas this task
+    # view is the exact, five-lane Expert label contract consumed by the
+    # catalog-backed onset/fret worker.
+    "bass_onset_fret": "bass.onset-fret/v1",
     "keys": "strum.instrument-chart/keys/v1",
     "vocals": "strum.instrument-chart/vocals/v1",
     "pro_guitar": "strum.instrument-chart/pro-guitar/v1",
@@ -50,6 +55,7 @@ PIPELINE_IDS = {
 
 DEFAULT_AUDIO_ROLES = {
     "bass": ("bass", "mix"),
+    "bass_onset_fret": ("bass", "mix"),
     "keys": ("keys", "mix"),
     "vocals": ("vocals", "mix"),
     "pro_guitar": ("guitar", "mix"),
@@ -63,6 +69,7 @@ DEFAULT_AUDIO_ROLES = {
 
 TASK_INSTRUMENTS = {
     "bass": "bass",
+    "bass_onset_fret": "bass",
     "keys": "keys",
     "vocals": "vocals",
     "pro_guitar": "pro_guitar",
@@ -82,6 +89,11 @@ TASK_INSTRUMENTS = {
 # they deliberately do not claim that a trainer/profile exists yet.
 TASK_LABEL_SCHEMAS: dict[str, dict[str, object]] = {
     "bass": {
+        "id": "five-lane-midi/v1",
+        "track_prefixes": ["PART BASS"],
+        "difficulty_encoding": "five-lane-note-ranges/v1",
+    },
+    "bass_onset_fret": {
         "id": "five-lane-midi/v1",
         "track_prefixes": ["PART BASS"],
         "difficulty_encoding": "five-lane-note-ranges/v1",

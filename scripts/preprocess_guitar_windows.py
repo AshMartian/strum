@@ -27,8 +27,11 @@ Usage:
         [--no-onset-cache | --no-fret-cache]
         [--workers N]
 
-For a `strum-guitar-catalog-manifest/v1`, add `--catalog-root` so STRUM can
-re-validate catalog assets and resolve managed paths only at runtime.
+For a catalog-backed five-lane task view, add `--catalog-root` so STRUM can
+re-validate catalog assets and resolve managed paths only at runtime.  The
+worker uses this same feature extractor for Guitar and Bass, but the manifest
+and ``--instrument`` must agree so labels can never silently come from the
+wrong MIDI track.
 """
 
 from __future__ import annotations
@@ -50,7 +53,10 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
-from src.catalog_guitar_manifest import MANIFEST_FORMAT, resolve_guitar_manifest_songs  # noqa: E402
+from src.catalog_guitar_manifest import MANIFEST_FORMAT as GUITAR_MANIFEST_FORMAT  # noqa: E402
+from src.catalog_guitar_manifest import resolve_guitar_manifest_songs  # noqa: E402
+from src.catalog_task_manifest import MANIFEST_FORMAT as CATALOG_TASK_MANIFEST_FORMAT  # noqa: E402
+from src.catalog_task_manifest import resolve_catalog_task_manifest_songs  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
 log = logging.getLogger("guitar_preprocess")
@@ -137,9 +143,15 @@ def compute_log_mel(audio: np.ndarray) -> torch.Tensor:
     return m
 
 
-def parse_onsets_from_manifest(midi_path: Path) -> list[tuple[float, set[int]]]:
-    """Re-parse Expert PART GUITAR onsets from notes.mid (cheaper than
-    re-running build_guitar_manifest, but uses identical logic)."""
+def parse_onsets_from_manifest(
+    midi_path: Path, *, label_track: str = "PART GUITAR"
+) -> list[tuple[float, set[int]]]:
+    """Parse Expert five-lane onsets from one validated MIDI label track.
+
+    ``PART GUITAR`` and ``PART BASS`` share the 96--100 Expert lane encoding
+    (and optional open note 95).  Callers must provide the track selected by a
+    revalidated task view rather than relying on a Guitar-only default.
+    """
     import mido
 
     EXPERT = {96: 0, 97: 1, 98: 2, 99: 3, 100: 4}
@@ -152,7 +164,7 @@ def parse_onsets_from_manifest(midi_path: Path) -> list[tuple[float, set[int]]]:
 
     track = None
     for tr in mid.tracks:
-        if tr.name == "PART GUITAR":
+        if tr.name == label_track:
             track = tr
             break
     if track is None:
@@ -231,7 +243,7 @@ def count_valid_windows(onsets: list[tuple[float, set[int]]], audio_len: int) ->
 
 
 # ─────────────────────────── Pre-flight (Phase 1) ───────────────────────────
-def phase1(songs: list[dict]) -> tuple[list[dict], int, int]:
+def phase1(songs: list[dict], *, label_track: str) -> tuple[list[dict], int, int]:
     """Cheap header-only pass to size memmaps."""
     info = []
     total_segs = 0
@@ -250,7 +262,7 @@ def phase1(songs: list[dict]) -> tuple[list[dict], int, int]:
         except Exception:
             skipped += 1
             continue
-        onsets = parse_onsets_from_manifest(midi_path)
+        onsets = parse_onsets_from_manifest(midi_path, label_track=label_track)
         if not onsets:
             skipped += 1
             continue
@@ -489,7 +501,13 @@ def main() -> int:
     ap.add_argument(
         "--catalog-root",
         type=Path,
-        help="required for an OCTAVE catalog-backed Guitar task manifest",
+        help="required for an OCTAVE catalog-backed five-lane task manifest",
+    )
+    ap.add_argument(
+        "--instrument",
+        choices=["guitar", "bass"],
+        default="guitar",
+        help="five-lane label instrument; must agree with a catalog task view",
     )
     ap.add_argument("--cache-dir", default="/mnt/ml-data/guitar_v1_cache")
     ap.add_argument("--splits", nargs="+", default=["train", "val", "test"])
@@ -505,10 +523,22 @@ def main() -> int:
         return 2
 
     manifest = json.loads(Path(args.manifest).read_text())
-    if manifest.get("format") == MANIFEST_FORMAT:
+    expected_track = {"guitar": "PART GUITAR", "bass": "PART BASS"}[args.instrument]
+    if manifest.get("format") == GUITAR_MANIFEST_FORMAT:
         if args.catalog_root is None:
             ap.error("--catalog-root is required for a catalog-backed manifest")
+        if args.instrument != "guitar":
+            ap.error("a Guitar catalog task manifest requires --instrument guitar")
         all_songs = resolve_guitar_manifest_songs(manifest, args.catalog_root)
+    elif manifest.get("format") == CATALOG_TASK_MANIFEST_FORMAT:
+        if args.catalog_root is None:
+            ap.error("--catalog-root is required for a catalog-backed manifest")
+        task = manifest.get("task")
+        if not isinstance(task, dict) or task.get("kind") != "bass_onset_fret":
+            ap.error("this preprocessor only accepts the Bass onset/fret catalog task view")
+        if args.instrument != "bass":
+            ap.error("a Bass onset/fret task manifest requires --instrument bass")
+        all_songs = resolve_catalog_task_manifest_songs(manifest, args.catalog_root)
     else:
         all_songs = manifest["songs"]
     cache_dir = Path(args.cache_dir)
@@ -524,7 +554,7 @@ def main() -> int:
         if not songs:
             continue
         t0 = time.time()
-        info, total_segs, total_wins = phase1(songs)
+        info, total_segs, total_wins = phase1(songs, label_track=expected_track)
         if not do_onset:
             total_segs = 0
         if not do_fret:

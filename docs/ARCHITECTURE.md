@@ -17,8 +17,9 @@ fails closed to the profiles declared by a validated model bundle:
 | `drums.v14-expert/v1` | Executable | Expert Drums only, direct V14 (no legacy ensemble/fallbacks) |
 | `difficulty.transform/v1` | Executable | Learned five-lane Expert → Hard/Medium/Easy transform for Guitar, Bass, Keys, or Drums |
 | Guitar onset/fret | Worker-trainable, experiment-only | Safe task views plus path-free experiment bundles; auto-chart profile packaging remains required |
+| Bass onset/fret | Worker-trainable, experiment-only | Revalidated `PART BASS` task views and distinct `bass.onset`/`bass.fret` components; a Bass evaluator/profile is required before auto-charting |
 | `drums.onset-classifier-evaluation/v1` | Executable evaluator only | Prepared V2 onset windows → eight class probabilities; explicitly not a chart handler |
-| Bass, Keys, Vocals, Pro instruments, mapper, section | Catalog-ready task views, training planned | No worker trainer or deployable profile |
+| Keys, Vocals, Pro instruments, mapper, section | Catalog-ready task views, training planned | No worker trainer or deployable profile |
 | Legacy batch pipeline | Research / compatibility scripts | Not a worker execution handler |
 
 OCTAVE owns source import, rights decisions, curation, runtime selection, and
@@ -349,7 +350,7 @@ src/
 | Drum onset CRNN (V14) | `train_onset_classifier.py` | `preprocess_onset_windows.py` | `drums_v14.yaml` |
 | Drum classifier ensemble | `train_onset_classifier.py` | `preprocess_onset_windows.py` | `onset_classifier_*.yaml` |
 | Tom-refinement CNN | `train_tom_refinement.py` | (uses Demucs drum stem) | inline |
-| Guitar onset CRNN (V1/V2) | `train_guitar_v1.py` | `build_guitar_manifest.py` → `preprocess_guitar_windows.py` | `guitar_v1.yaml`, `guitar_v2.yaml` |
+| Five-lane Guitar/Bass onset + fret CRNN (V1) | `train_guitar_v1.py` | revalidated Guitar/Bass catalog task view → `preprocess_guitar_windows.py` | `guitar_v1.yaml` |
 | Pitch→fret mapper (V4) | `train_fret_mapper.py` | `build_mapper_dataset.py` | inline |
 | Section classifier | `train_section_classifier.py` | `build_section_labels.py` → `preprocess_section_windows.py` | inline |
 
@@ -372,6 +373,7 @@ Discovery is dynamic rather than hard-coded in OCTAVE:
 strum-worker probe --json
 strum-worker pipeline list --json
 strum-worker catalog inspect --catalog-root /private/catalog --pipeline guitar.onset-fret/v1 --json
+strum-worker catalog inspect --catalog-root /private/catalog --pipeline bass.onset-fret/v1 --json
 ```
 
 OCTAVE renders only the selected descriptor's `prepare_schema` and
@@ -411,6 +413,21 @@ Expert Guitar. `chart run` loads only tensor state dictionaries whose component
 and evaluation hashes were preflighted. Older Guitar experiments without the
 portable `strum-guitar-neural-model-config/v1` component configuration are
 intentionally not packageable and should be retrained.
+
+### Bass V1 experiment gate
+
+`bass.onset-fret/v1` deliberately reuses only the five-lane CRNN *implementation*,
+not the Guitar task or profile contract. Its preparation task kind is
+`bass_onset_fret`, whose catalog-validated label schema selects `PART BASS` and
+the standard Expert lanes 96--100. The worker invokes the shared feature
+extractor with `--instrument bass`, then produces only `bass.onset` and
+`bass.fret` components with a `strum-bass-neural-model-config/v1` configuration.
+
+The resulting experiment has
+`deployment_status: requires_bass_profile_evaluation_and_packaging` and no
+`inference_capability`. It cannot be selected by `chart run`, cannot be
+packaged as `guitar.neural-v1-expert/v1`, and must receive a Bass-specific
+held-out evaluator plus a compatible runtime profile before deployment.
 
 ## 11. Hardware
 

@@ -11,9 +11,10 @@ auto-chart handler.
 | Family | Catalog task view | Worker training | Executable worker profile |
 | --- | --- | --- | --- |
 | Guitar onset + fret | Available | Available; experiment-only | `guitar.hybrid-v2-rule/v1`, or evaluated `guitar.neural-v1-expert/v1`; Expert only |
+| Bass onset + fret | Available | Available; experiment-only | Planned; requires a separate Bass evaluator and runtime profile |
 | Drums onset + classifier | Available | Available; V2 evaluation package | `drums.v14-expert/v1` direct Expert charts; V2 is evaluation-only |
 | Five-lane difficulty transform (Guitar/Bass/Keys/Drums) | Available | Available | `difficulty.transform/v1` |
-| Bass / Keys / Vocals / Pro Guitar / Pro Bass / Pro Keys | Available | Planned | Planned |
+| Keys / Vocals / Pro Guitar / Pro Bass / Pro Keys | Available | Planned | Planned |
 | Guitar/Bass fret mapper and section classifier | Available | Planned worker handler | Planned |
 
 The legacy all-instrument batch scripts remain research/compatibility tools;
@@ -44,11 +45,13 @@ presented as a successful OCTAVE auto-chart result.
 - ✅ Catalog-backed, worker-trainable learned five-lane chart transforms for
   Guitar, Bass, Keys, and Drums, including explicit Expert → lower-difficulty
   provenance.
-- ✅ Catalog-backed, worker-trainable Guitar onset/fret and Drums onset
-  classifier experiments. Both reuse their established preprocessing/trainers
-  and record path-free provenance. Guitar V1 has an explicit validation and
-  packaging path; its raw experiment remains non-deployable until a separate
-  Expert-only profile bundle passes that path.
+- ✅ Catalog-backed, worker-trainable Guitar/Bass onset/fret and Drums onset
+  classifier experiments. Guitar and Bass reuse the same five-lane feature
+  extractor only through instrument-specific, revalidated `PART GUITAR` and
+  `PART BASS` task views; their components and experiment configuration IDs
+  remain distinct. All raw experiments are non-deployable. Guitar V1 has an
+  explicit validation/packaging path; Bass requires its own evaluator and
+  profile contract before it can be promoted.
 - ✅ A catalog-worker Drums V2 experiment can be integrity-packaged as
   `drums.onset-classifier-evaluation/v1`. Its hash-verified runtime accepts
   only STRUM's prepared onset windows and returns eight class probabilities;
@@ -59,19 +62,19 @@ presented as a successful OCTAVE auto-chart result.
 
 ## Next worker milestones
 
-1. Calibrate/evaluate Guitar V1 on a useful held-out catalog and establish a
-   complete evaluated Drums onset-plus-classifier profile if one is trained as
-   a single execution contract. Guitar's packaging path verifies architecture,
-   preprocessing, component hashes, tensor-only state dictionaries, and a
-   revalidated validation report. The current V2 Drums package is intentionally
-   Stage-2 evaluation only; neither artifact is promoted solely because its
-   checkpoint exists.
+1. Calibrate/evaluate Guitar and Bass V1 on useful held-out catalogs and
+   establish complete instrument-specific profiles. Guitar's packaging path
+   verifies architecture, preprocessing, component hashes, tensor-only state
+   dictionaries, and a revalidated validation report. Bass must add equivalent
+   evaluation and packaging without reusing a Guitar profile. The current V2
+   Drums package is intentionally Stage-2 evaluation only; no artifact is
+   promoted solely because its checkpoint exists.
 2. Replace the remaining legacy auto-chart assembly behavior with declared,
    component-level bundle requirements and typed stage graphs. The current
    typed manifests cover each executable single-profile run; the full
    multi-instrument graph still needs the same partial-run/fallback reporting.
-3. Add dedicated learned trainers and event schemas for Bass, Keys, Vocals,
-   Pro instruments, fret mapping, and section routing. Their existing catalog
+3. Add dedicated learned trainers and event schemas for Keys, Vocals, Pro
+   instruments, fret mapping, and section routing. Their existing catalog
    views are the input boundary, not implementation completion.
 4. Improve the learned difficulty model from the current event baseline to
    audio/stem-aware sequence modeling with song-disjoint evaluation. Difficulty

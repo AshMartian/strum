@@ -557,11 +557,12 @@ For example, a Guitar task-view request is:
 }
 ```
 
-`guitar.onset-fret/v1`, `drums.onset-classifier/v1`, and
-`chart_transform.five_lane/v1` are worker-trainable. Their renderer-visible
+`guitar.onset-fret/v1`, `bass.onset-fret/v1`,
+`drums.onset-classifier/v1`, and `chart_transform.five_lane/v1` are
+worker-trainable. Their renderer-visible
 schemas contain only bounded model/training knobs. The private top-level
-`catalog_root` request field is worker-local configuration for Guitar and
-Drums task-view revalidation, never a pipeline option or renderer control.
+`catalog_root` request field is worker-local configuration for Guitar, Bass,
+and Drums task-view revalidation, never a pipeline option or renderer control.
 
 Guitar invokes the established window-preprocessing and two-stage onset/fret
 trainers, then packages verified `guitar.onset` and `guitar.fret` bundle
@@ -576,6 +577,14 @@ replace the verified `drums.v14-expert/v1` auto-chart profile. The five-lane
 transform creates a verified learned lower-difficulty component. OCTAVE must
 surface these distinct deployment states rather than selecting a checkpoint
 implicitly.
+
+Bass invokes the same five-lane CRNN implementation only after STRUM has
+revalidated the dedicated `bass_onset_fret` task view and its `PART BASS`
+labels. It emits distinct `bass.onset` and `bass.fret` components plus a
+`strum-bass-neural-model-config/v1` configuration. Its experiment status is
+`requires_bass_profile_evaluation_and_packaging`: no Bass runtime profile or
+`inference_capability` exists yet, so this artifact cannot be selected for
+auto-charting or substituted for Guitar.
 
 ```bash
 strum-worker train start --request /path/to/owned-train-request.json --json-events

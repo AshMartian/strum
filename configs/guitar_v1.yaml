@@ -3,9 +3,11 @@
 # Stage 1: GuitarOnsetCRNN — frame-level binary onset detection
 # Stage 2: GuitarFretClassifier — per-onset 5-bit multi-label fret head
 #
-# Replaces the rule-based librosa pipeline (src/inference/guitar_bass.py)
-# for the *guitar* path. Bass keeps the rule-based pipeline until we
-# train a guitar checkpoint and validate the architecture.
+# The worker uses this file as the default implementation configuration for
+# Guitar and Bass five-lane experiments. Instrument identity comes from the
+# catalog task view and is written into a separate portable model config; a
+# Bass experiment never becomes a Guitar profile merely because the CRNN
+# topology is shared.
 #
 # Training data: configs/guitar_v1_manifest.json (1500 songs, 1.27M onsets)
 # Cache:        /mnt/ml-data/guitar_v1_cache/{onset,fret}/{split}_*.npy
