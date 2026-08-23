@@ -61,6 +61,64 @@ def test_manifest_rejects_path_escape(tmp_path: Path) -> None:
         load_model_bundle(tmp_path)
 
 
+@pytest.mark.parametrize(
+    ("field", "value", "match"),
+    [
+        (
+            "model_id",
+            "/run/media/ash/private-model",
+            "model_id must be a lowercase stable identifier",
+        ),
+        (
+            "component_id",
+            "../../source-path",
+            "components key must be a lowercase stable identifier",
+        ),
+        ("profile_id", "/home/ash/profile", "profiles key must be a lowercase stable identifier"),
+    ],
+)
+def test_manifest_rejects_path_like_public_identifiers(
+    tmp_path: Path, field: str, value: str, match: str
+) -> None:
+    components = {"guitar.onset": {"checkpoint": "weights/best.pt"}}
+    overrides: dict[str, object] = {}
+    if field == "model_id":
+        overrides["model_id"] = value
+    elif field == "component_id":
+        components = {value: {"checkpoint": "weights/best.pt"}}
+    else:
+        overrides["profiles"] = {
+            value: {
+                "capability": "guitar.neural-v1-expert/v1",
+                "instruments": ["guitar"],
+                "required_components": ["guitar.onset"],
+                "difficulty_policies": ["expert_only"],
+            }
+        }
+    write_manifest(tmp_path, components, **overrides)
+
+    with pytest.raises(BundleValidationError, match=match):
+        load_model_bundle(tmp_path)
+
+
+def test_manifest_rejects_path_like_profile_metadata(tmp_path: Path) -> None:
+    write_manifest(
+        tmp_path,
+        {"guitar.onset": {"checkpoint": "weights/best.pt"}},
+        profiles={
+            "guitar-profile": {
+                "capability": "/run/media/ash/guitar/v1",
+                "instruments": ["guitar"],
+                "required_components": ["guitar.onset"],
+                "difficulty_policies": ["expert_only"],
+            }
+        },
+    )
+
+    with pytest.raises(BundleValidationError, match="versioned capability identifier"):
+        load_model_bundle(tmp_path)
+
+
 def test_manifest_rejects_checksum_without_checkpoint(tmp_path: Path) -> None:
     write_manifest(tmp_path, {"guitar.onset": {"sha256": "a" * 64}})
 

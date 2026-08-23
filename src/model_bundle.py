@@ -557,6 +557,22 @@ def _parse_identifier_list(
     return values
 
 
+def _parse_capability(value: object, field: str) -> str:
+    """Parse a public capability identity without accepting a filesystem path.
+
+    Capabilities intentionally have one or more namespace/version segments
+    (for example ``guitar.neural-v1-expert/v1``), unlike opaque local paths.
+    Keep every segment in the same stable identifier alphabet used by bundle
+    IDs, components, and profiles before it can reach a host renderer.
+    """
+    if not isinstance(value, str) or not value:
+        raise BundleValidationError(f"{field} must be a versioned capability identifier")
+    segments = value.split("/")
+    if len(segments) < 2 or any(not _IDENTIFIER_PATTERN.fullmatch(segment) for segment in segments):
+        raise BundleValidationError(f"{field} must be a versioned capability identifier")
+    return value
+
+
 def _parse_companion(name: str, value: object) -> RuntimeCompanion:
     if not isinstance(value, dict):
         raise BundleValidationError(f"companions.{name} must be an object")
@@ -838,18 +854,12 @@ def _parse_profile(root: Path, name: str, value: object) -> InferenceProfile:
         raise BundleValidationError(
             f"profiles.{name} missing field(s): {', '.join(sorted(missing))}"
         )
-    capability = value["capability"]
+    capability = _parse_capability(value["capability"], f"profiles.{name}.capability")
     instruments = value["instruments"]
     required_components = value["required_components"]
     difficulty_policies = value["difficulty_policies"]
     required_companions = value.get("required_companions", [])
-    if not isinstance(capability, str) or not capability.strip():
-        raise BundleValidationError(f"profiles.{name}.capability must be a non-empty string")
-    for field, candidate in (
-        ("instruments", instruments),
-        ("required_components", required_components),
-        ("difficulty_policies", difficulty_policies),
-    ):
+    for field, candidate in (("difficulty_policies", difficulty_policies),):
         if (
             not isinstance(candidate, list)
             or not candidate
@@ -867,6 +877,12 @@ def _parse_profile(root: Path, name: str, value: object) -> InferenceProfile:
         raise BundleValidationError(
             f"profiles.{name}.difficulty_policies must use expert_only, deterministic-v1, or learned:<id>"
         )
+    instrument_ids = _parse_identifier_list(
+        instruments, f"profiles.{name}.instruments", allow_empty=False
+    )
+    required_component_ids = _parse_identifier_list(
+        required_components, f"profiles.{name}.required_components", allow_empty=False
+    )
     required_companion_ids = _parse_identifier_list(
         required_companions, f"profiles.{name}.required_companions"
     )
@@ -895,8 +911,8 @@ def _parse_profile(root: Path, name: str, value: object) -> InferenceProfile:
     return InferenceProfile(
         profile_id=name,
         capability=capability,
-        instruments=tuple(instruments),
-        required_components=tuple(required_components),
+        instruments=instrument_ids,
+        required_components=required_component_ids,
         required_companions=required_companion_ids,
         difficulty_policies=tuple(difficulty_policies),
         configuration=configuration,
@@ -939,8 +955,7 @@ def load_model_bundle(path: str | Path, *, check_files: bool = False) -> ModelBu
         )
     if not isinstance(raw["schema_version"], int):
         raise BundleValidationError("schema_version must be an integer")
-    if not isinstance(raw["model_id"], str) or not raw["model_id"].strip():
-        raise BundleValidationError("model_id must be a non-empty string")
+    model_id = _parse_identifier(raw["model_id"], "model_id")
     if not isinstance(raw["compatibility"], dict):
         raise BundleValidationError("compatibility must be an object")
     if not isinstance(raw["components"], dict) or not raw["components"]:
@@ -952,7 +967,10 @@ def load_model_bundle(path: str | Path, *, check_files: bool = False) -> ModelBu
 
     root = manifest_path.parent.resolve()
     components = {
-        name: _parse_component(root, name, value) for name, value in raw["components"].items()
+        _parse_identifier(name, "components key"): _parse_component(
+            root, _parse_identifier(name, "components key"), value
+        )
+        for name, value in raw["components"].items()
     }
     companions = {
         _parse_identifier(name, "companions key"): _parse_companion(
@@ -961,11 +979,14 @@ def load_model_bundle(path: str | Path, *, check_files: bool = False) -> ModelBu
         for name, value in raw.get("companions", {}).items()
     }
     profiles = {
-        name: _parse_profile(root, name, value) for name, value in raw.get("profiles", {}).items()
+        _parse_identifier(name, "profiles key"): _parse_profile(
+            root, _parse_identifier(name, "profiles key"), value
+        )
+        for name, value in raw.get("profiles", {}).items()
     }
     bundle = ModelBundle(
         root=root,
-        model_id=raw["model_id"],
+        model_id=model_id,
         schema_version=raw["schema_version"],
         compatibility=raw["compatibility"],
         components=components,
