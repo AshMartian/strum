@@ -163,14 +163,18 @@ def test_keys_worker_rejects_generic_keys_or_bass_task_views(tmp_path: Path) -> 
         _read_task_view(exact_path, tmp_path)
 
 
-def test_keys_pipeline_advertises_strict_training_without_inference() -> None:
+def test_keys_pipeline_advertises_strict_training_with_gated_profile_capability() -> None:
     descriptor = next(item for item in PIPELINES if item.id == "keys.onset-fret/v1")
     assert descriptor.training_status == "available"
     assert descriptor.train_schema is not None
     assert descriptor.train_schema["required"] == ["model_id"]
     assert "catalog_root" not in descriptor.train_schema["properties"]
     assert descriptor.checkpoint_outputs == ("keys.onset", "keys.fret")
-    assert descriptor.inference_capability is None
+    assert descriptor.inference_capability == "keys.neural-v1-expert/v1"
+    assert descriptor.training_requirements == (
+        "keys_profile_evaluation",
+        "keys_profile_packaging",
+    )
 
 
 def test_five_lane_preprocessor_reads_part_keys_not_guitar(tmp_path: Path) -> None:

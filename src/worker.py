@@ -447,9 +447,9 @@ PIPELINES = (
         prepare_schema=_object_schema(CATALOG_AUDIO_OPTIONS),
         train_schema=KEYS_TRAIN_SCHEMA,
         checkpoint_outputs=("keys.onset", "keys.fret"),
-        # The experiment must be independently evaluated and packaged before
-        # a Keys chart handler can select it.
-        inference_capability=None,
+        # This names only an evaluated, immutable Keys profile.  It does not
+        # promote arbitrary training checkpoints to an auto-chart runtime.
+        inference_capability="keys.neural-v1-expert/v1",
         status="catalog_ready",
         preparation_status="available",
         training_status="available",
@@ -956,6 +956,7 @@ def _chart_execution_available(
         "guitar.hybrid-v2-rule/v1": ("guitar", "expert_only"),
         "guitar.neural-v1-expert/v1": ("guitar", "expert_only"),
         "bass.neural-v1-expert/v1": ("bass", "expert_only"),
+        "keys.neural-v1-expert/v1": ("keys", "expert_only"),
         "drums.v14-expert/v1": ("drums", "expert_only"),
     }
     if capability == "difficulty.transform/v1":
@@ -1057,6 +1058,14 @@ def preflight_chart_request(request_path: Path) -> dict[str, object]:
         bundle = load_model_bundle(raw["model_root"], check_files=True)
         typed = load_bass_neural_expert_profile(bundle, raw["profile_id"])
         profile_configuration_sha256 = typed.configuration_sha256
+    elif plan["capability"] == "keys.neural-v1-expert/v1":
+        from src.inference.keys_neural_profile import (  # noqa: PLC0415
+            load_keys_neural_expert_profile,
+        )
+
+        bundle = load_model_bundle(raw["model_root"], check_files=True)
+        typed = load_keys_neural_expert_profile(bundle, raw["profile_id"])
+        profile_configuration_sha256 = typed.configuration_sha256
     elif plan["capability"] == "drums.v14-expert/v1":
         from src.inference.drums_v14_profile import (  # noqa: PLC0415
             load_drums_v14_expert_profile,
@@ -1129,6 +1138,7 @@ def _read_chart_run_request(request_path: Path, capability: str) -> dict[str, An
             "guitar.hybrid-v2-rule/v1",
             "guitar.neural-v1-expert/v1",
             "bass.neural-v1-expert/v1",
+            "keys.neural-v1-expert/v1",
             "drums.v14-expert/v1",
         }
         else {"preflight_request", "source_midi_path", "song_path", "output_dir", "threshold"}
@@ -1213,6 +1223,11 @@ def _write_expert_guitar_midi(chart: Any, output_path: Path) -> None:
 def _write_expert_bass_midi(chart: Any, output_path: Path) -> None:
     """Write only Expert Bass—lower difficulties need an explicit STRUM policy."""
     _write_expert_five_lane_midi(chart, output_path, track_name="PART BASS")
+
+
+def _write_expert_keys_midi(chart: Any, output_path: Path) -> None:
+    """Write only Expert Keys—lower difficulties require a STRUM policy."""
+    _write_expert_five_lane_midi(chart, output_path, track_name="PART KEYS")
 
 
 def _write_five_lane_midi(
@@ -1516,6 +1531,71 @@ def run_chart_request(request_path: Path) -> dict[str, object]:
                 instrument_results,
                 difficulty,
                 instrument="bass",
+                stage_name="expert_chart",
+                artifact_ids=("notes_midi",),
+            )
+            response = {"output_name": midi_path.name, "expert_event_count": len(events)}
+        elif plan["capability"] == "keys.neural-v1-expert/v1":
+            audio_path = Path(request["audio_path"])
+            if not audio_path.is_file():
+                raise WorkerRequestError("chart input audio is unavailable")
+            from scripts.preprocess_guitar_windows import load_audio_mono_22050  # noqa: PLC0415
+            from src.inference.guitar_bass import (  # noqa: PLC0415
+                GuitarChart,
+                GuitarChord,
+                GuitarNote,
+            )
+            from src.inference.keys_neural_profile import (  # noqa: PLC0415
+                KeysNeuralCharter,
+                load_keys_neural_expert_profile,
+            )
+
+            audio = load_audio_mono_22050(audio_path)
+            if audio is None:
+                raise WorkerRequestError("chart input audio is unreadable")
+            profile = load_keys_neural_expert_profile(bundle, preflight_raw["profile_id"])
+            events = _run_without_legacy_output(
+                lambda: KeysNeuralCharter.from_bundle_profile(
+                    bundle, profile, device=plan["device"]
+                ).transcribe(
+                    audio,
+                    onset_threshold=profile.onset_threshold,
+                    min_distance_frames=profile.peak_min_distance_frames,
+                    fret_thresholds_per_bit=profile.fret_thresholds,
+                )
+            )
+            chart = GuitarChart(tempo_bpm=120.0, instrument="keys")
+            for event in events:
+                if len(event.frets) >= 2:
+                    chart.chords.append(
+                        GuitarChord(
+                            time_ms=event.time_sec * 1000.0,
+                            frets=list(event.frets),
+                            duration_ms=profile.note_duration_ms,
+                        )
+                    )
+                elif event.frets:
+                    chart.notes.append(
+                        GuitarNote(
+                            time_ms=event.time_sec * 1000.0,
+                            fret=event.frets[0],
+                            duration_ms=profile.note_duration_ms,
+                        )
+                    )
+            midi_path = output_dir / "notes.mid"
+            _write_expert_keys_midi(chart, midi_path)
+            artifacts = {"notes_midi": {"name": midi_path.name, "sha256": _sha256(midi_path)}}
+            stages = {
+                "keys_neural": {
+                    "status": "succeeded",
+                    "expert_event_count": len(events),
+                    "evaluation_sha256": profile.evaluation_sha256,
+                }
+            }
+            _complete_chart_stage(
+                instrument_results,
+                difficulty,
+                instrument="keys",
                 stage_name="expert_chart",
                 artifact_ids=("notes_midi",),
             )
@@ -2830,6 +2910,34 @@ def _parse_args() -> argparse.Namespace:
     bass_package.add_argument("--fret-thresholds", help="JSON array of exactly five values")
     bass_package.add_argument("--note-duration-ms", type=float, default=100.0)
     bass_package.add_argument("--json", action="store_true")
+    keys = commands.add_parser("keys", help="evaluate and package Keys V1 profiles")
+    keys_commands = keys.add_subparsers(dest="keys_command", required=True)
+    keys_profile = keys_commands.add_parser("profile", help="manage Keys neural profiles")
+    keys_profile_commands = keys_profile.add_subparsers(dest="keys_profile_command", required=True)
+    keys_evaluate = keys_profile_commands.add_parser(
+        "evaluate", help="evaluate an un-packaged catalog-trained Keys pair"
+    )
+    keys_evaluate.add_argument("--bundle-root", type=Path, required=True)
+    keys_evaluate.add_argument("--task-view", type=Path, required=True)
+    keys_evaluate.add_argument("--catalog-root", type=Path, required=True)
+    keys_evaluate.add_argument("--output", type=Path, required=True)
+    keys_evaluate.add_argument("--device", choices=("cpu", "cuda", "mps"), default="cpu")
+    keys_evaluate.add_argument("--tolerance-ms", type=float, default=50.0)
+    keys_evaluate.add_argument("--limit-songs", type=int, default=0)
+    keys_evaluate.add_argument("--json", action="store_true")
+    keys_package = keys_profile_commands.add_parser(
+        "package", help="copy an evaluated Keys experiment into a deployable bundle"
+    )
+    keys_package.add_argument("--experiment", type=Path, required=True)
+    keys_package.add_argument("--evaluation", type=Path, required=True)
+    keys_package.add_argument("--output", type=Path, required=True)
+    keys_package.add_argument("--profile", required=True)
+    keys_package.add_argument("--minimum-onset-f1", type=float, required=True)
+    keys_package.add_argument("--minimum-fret-f1", type=float, required=True)
+    keys_package.add_argument("--onset-threshold", type=float)
+    keys_package.add_argument("--fret-thresholds", help="JSON array of exactly five values")
+    keys_package.add_argument("--note-duration-ms", type=float, default=100.0)
+    keys_package.add_argument("--json", action="store_true")
     model = commands.add_parser("model", help="inspect model bundles")
     model_commands = model.add_subparsers(dest="model_command", required=True)
     preflight = model_commands.add_parser("preflight", help="validate a deployable model bundle")
@@ -3007,6 +3115,56 @@ def main() -> int:
                 )
             except BassProfilePackagingError as error:
                 raise WorkerRequestError("Bass profile packaging request is invalid") from error
+            return 0
+        if args.command == "keys" and args.keys_command == "profile":
+            from src.keys_profile_packaging import (  # noqa: PLC0415
+                KeysProfilePackagingError,
+                evaluate_keys_candidate,
+                package_keys_profile,
+            )
+
+            if args.keys_profile_command == "evaluate":
+                try:
+                    _print_json(
+                        evaluate_keys_candidate(
+                            bundle_root=args.bundle_root,
+                            task_view_path=args.task_view,
+                            catalog_root=args.catalog_root,
+                            output_path=args.output,
+                            device=args.device,
+                            tolerance_ms=args.tolerance_ms,
+                            limit_songs=args.limit_songs,
+                        )
+                    )
+                except KeysProfilePackagingError as error:
+                    raise WorkerRequestError(
+                        "Keys profile evaluation request is invalid"
+                    ) from error
+                return 0
+            try:
+                fret_thresholds = (
+                    tuple(json.loads(args.fret_thresholds))
+                    if args.fret_thresholds is not None
+                    else None
+                )
+            except json.JSONDecodeError as error:
+                raise WorkerRequestError("Keys fret thresholds are invalid JSON") from error
+            try:
+                _print_json(
+                    package_keys_profile(
+                        experiment_dir=args.experiment,
+                        evaluation_path=args.evaluation,
+                        output_dir=args.output,
+                        profile_id=args.profile,
+                        minimum_onset_f1=args.minimum_onset_f1,
+                        minimum_fret_f1=args.minimum_fret_f1,
+                        onset_threshold=args.onset_threshold,
+                        fret_thresholds=fret_thresholds,
+                        note_duration_ms=args.note_duration_ms,
+                    )
+                )
+            except KeysProfilePackagingError as error:
+                raise WorkerRequestError("Keys profile packaging request is invalid") from error
             return 0
         if args.command == "model" and args.model_command == "preflight":
             _print_json(

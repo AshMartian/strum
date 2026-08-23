@@ -633,9 +633,13 @@ the dedicated `keys_onset_fret` task view, whose label schema selects only
 `PART KEYS` Expert five-lane labels. It emits distinct `keys.onset` and
 `keys.fret` components plus a `strum-keys-neural-model-config/v1`
 configuration. Its `deployment_status` is
-`requires_keys_profile_evaluation_and_packaging`; no Keys runtime profile or
-`inference_capability` exists, so it cannot be selected for auto-charting or
-substituted for Guitar or Bass.
+`requires_keys_profile_evaluation_and_packaging`; raw worker checkpoints cannot
+be selected for auto-charting or substituted for Guitar or Bass. A separate
+`keys profile evaluate` command revalidates held-out `PART KEYS` labels, and a
+`keys profile package` command may only then create an immutable,
+hash-verified `keys.neural-v1-expert/v1` profile. That profile writes only
+Expert `PART KEYS`; lower difficulties remain an explicit learned STRUM
+difficulty-transform decision.
 
 ```bash
 strum-worker train start --request /path/to/owned-train-request.json --json-events

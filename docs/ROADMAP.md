@@ -12,7 +12,7 @@ auto-chart handler.
 | --- | --- | --- | --- |
 | Guitar onset + fret | Available | Available; experiment-only | `guitar.hybrid-v2-rule/v1`, or evaluated `guitar.neural-v1-expert/v1`; Expert only |
 | Bass onset + fret | Available | Available; raw experiment gated | Evaluated `bass.neural-v1-expert/v1`; Expert only |
-| Keys onset + fret | Available | Available; experiment-only | Planned; requires a separate Keys evaluator and runtime profile |
+| Keys onset + fret | Available | Available; raw experiment gated | Evaluated `keys.neural-v1-expert/v1`; Expert only |
 | Vocals activity + pitch | Available | Available; experiment-only | Planned; requires phrase/lyric/talky/harmony stages and Vocal evaluation |
 | Drums onset + classifier | Available | Available; V2 evaluation package | `drums.v14-expert/v1` direct Expert charts; V2 is evaluation-only |
 | Five-lane difficulty transform (Guitar/Bass/Keys/Drums) | Available | Available | `difficulty.transform/v1` |
@@ -61,8 +61,8 @@ presented as a successful OCTAVE auto-chart result.
   components and experiment configuration IDs remain distinct. All raw
   experiments are non-deployable. Guitar V1 has an explicit
   validation/packaging path. Bass now has its own held-out `PART BASS`
-  evaluator and hash-verified Expert-only profile/runtime; Keys remains
-  profile-gated.
+  evaluator and hash-verified Expert-only profile/runtime; Keys has the same
+  distinct held-out evaluator and Expert-only runtime boundary.
 - ✅ Catalog-backed, worker-trainable Vocal frame activity + sung-pitch
   experiments. `vocals_activity` selects only `PART VOCALS`, retains
   phrase/lyric metadata, and emits no inference profile: a playable Vocal
@@ -99,7 +99,7 @@ presented as a successful OCTAVE auto-chart result.
    verifies architecture, preprocessing, component hashes, tensor-only state
    dictionaries, and a revalidated validation report. Bass now has equivalent
    instrument-specific evaluation and packaging without reusing a Guitar
-   profile; Keys must add its own. The current V2 Drums package is intentionally Stage-2
+   profile; Keys now has an equivalent Keys-only boundary. The current V2 Drums package is intentionally Stage-2
    evaluation only; no artifact is promoted solely because its checkpoint
    exists.
 2. Replace the remaining legacy auto-chart assembly behavior with declared,

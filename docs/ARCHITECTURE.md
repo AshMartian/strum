@@ -16,8 +16,9 @@ fails closed to the profiles declared by a validated model bundle:
 | `guitar.hybrid-v2-rule/v1` | Executable | Expert Guitar only |
 | `drums.v14-expert/v1` | Executable | Expert Drums only, direct V14 (no legacy ensemble/fallbacks) |
 | `difficulty.transform/v1` | Executable | Learned five-lane Expert → Hard/Medium/Easy transform for Guitar, Bass, Keys, or Drums |
-| Guitar onset/fret | Worker-trainable, experiment-only | Safe task views plus path-free experiment bundles; auto-chart profile packaging remains required |
-| Bass onset/fret | Worker-trainable, experiment-only | Revalidated `PART BASS` task views and distinct `bass.onset`/`bass.fret` components; a Bass evaluator/profile is required before auto-charting |
+| Guitar onset/fret | Worker-trainable; evaluated profile executable | Safe task views plus path-free experiment bundles; only an evaluated `guitar.neural-v1-expert/v1` profile writes Expert Guitar |
+| Bass onset/fret | Worker-trainable; evaluated profile executable | Revalidated `PART BASS` task views and distinct `bass.onset`/`bass.fret` components; only an evaluated `bass.neural-v1-expert/v1` profile writes Expert Bass |
+| Keys onset/fret | Worker-trainable; evaluated profile executable | Revalidated `PART KEYS` task views and distinct `keys.onset`/`keys.fret` components; only an evaluated `keys.neural-v1-expert/v1` profile writes Expert Keys |
 | `drums.onset-classifier-evaluation/v1` | Executable evaluator only | Prepared V2 onset windows → eight class probabilities; explicitly not a chart handler |
 | Pro Guitar, Pro Bass, Pro Keys | Catalog-ready task views, training planned | No worker trainer or deployable profile; exact REAL_* labels and structured missing stages are declared |
 | Vocals, Guitar/Bass mapper, Guitar/Bass section | Worker-trainable experiments | No deployable profile without their dedicated evaluation/package/runtime gates |
@@ -476,10 +477,12 @@ with `--instrument keys`, then emits only `keys.onset` and `keys.fret`
 components with `strum-keys-neural-model-config/v1` configuration.
 
 The experiment remains
-`deployment_status: requires_keys_profile_evaluation_and_packaging` and has no
-`inference_capability`. It is not a replacement for the legacy Keys charter;
-it needs Keys-specific held-out evaluation and a runtime/profile contract
-before a chart handler may select it.
+`deployment_status: requires_keys_profile_evaluation_and_packaging` until
+`strum-worker keys profile evaluate` has revalidated its held-out `PART KEYS`
+view and `strum-worker keys profile package` has copied it into an immutable
+`keys.neural-v1-expert/v1` bundle. The typed runtime consumes only
+`keys.onset`/`keys.fret`, writes one Expert `PART KEYS` track, and cannot
+select or substitute Guitar/Bass profiles.
 
 ### Vocal activity/pitch experiment gate
 
