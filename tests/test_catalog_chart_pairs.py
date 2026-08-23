@@ -2,6 +2,7 @@ import hashlib
 import io
 import json
 import struct
+import sys
 import wave
 from pathlib import Path
 
@@ -16,7 +17,8 @@ from src.catalog_chart_pairs import (
     pipeline_descriptor,
     prepare_catalog_chart_pairs,
 )
-from src.worker import run_training_request
+from src.model_bundle import MANIFEST_FILENAME
+from src.worker import WorkerRequestError, main, preflight_bundle, run_training_request
 
 
 def _midi_bytes(track_name: str, variation: int) -> bytes:
@@ -261,6 +263,193 @@ def test_worker_trains_audio_conditioned_transform_from_private_catalog_assets(
     assert model_config["audio_manifest"] is None
     assert str(tmp_path) not in json.dumps({"metadata": metadata, "experiment": experiment})
     assert not list(tmp_path.glob(".strum-chart-audio-*"))
+
+
+def test_worker_promotes_audio_transform_from_private_catalog_assets(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    request: pytest.FixtureRequest,
+) -> None:
+    """Audio candidates can be admitted without retaining their train scratch manifest."""
+    records = [
+        _record(tmp_path, "octave-src-11111111", "PART GUITAR", 0),
+        _record(tmp_path, "octave-src-22222222", "PART GUITAR", 1),
+    ]
+    for record in records:
+        record["audio"] = {"guitar": _asset(tmp_path, _wav_bytes(), "guitar.wav")}
+    _catalog(tmp_path, records)
+    prepared = prepare_catalog_chart_pairs(
+        tmp_path,
+        tmp_path / "task-view",
+        CatalogChartPairOptions(
+            instrument="guitar",
+            target_difficulty="Hard",
+            split_seed=11,
+            audio_feature_mode="rms_onset_v1",
+        ),
+    )
+    manifest_path = prepared["manifest_path"]
+    assert isinstance(manifest_path, Path)
+    monkeypatch.setattr(
+        "scripts.train_chart_transform.event_audio_features",
+        lambda _path, events, **_kwargs: [[0.0, 0.0] for _ in events],
+    )
+    training_request = tmp_path / "audio-conditioned-request.json"
+    candidate_parent = tmp_path / "candidate-store"
+    candidate = candidate_parent / "audio-conditioned-experiment"
+    training_request.write_text(
+        json.dumps(
+            {
+                "pipeline_id": "chart_transform.five_lane/v1",
+                "task_view": str(manifest_path),
+                "output": str(candidate),
+                "catalog_root": str(tmp_path),
+                "options": {
+                    "model_id": "audio-conditioned-catalog-transform",
+                    "epochs": 1,
+                    "hidden_dim": 4,
+                    "validation_fraction": 0.5,
+                    "seed": 11,
+                    "device": "cpu",
+                },
+            }
+        )
+    )
+    run_training_request(training_request)
+    assert not list(tmp_path.glob(".strum-chart-audio-*"))
+    original_mode = candidate_parent.stat().st_mode
+    candidate_parent.chmod(original_mode & ~0o222)
+    request.addfinalizer(lambda: candidate_parent.chmod(original_mode))
+
+    evaluation = tmp_path / "held-out.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "strum-worker",
+            "transform",
+            "profile",
+            "evaluate",
+            "--bundle-root",
+            str(candidate),
+            "--dataset-manifest",
+            str(manifest_path),
+            "--catalog-root",
+            str(tmp_path),
+            "--output",
+            str(evaluation),
+        ],
+    )
+    assert main() == 0
+    evaluation_result = json.loads(capsys.readouterr().out)
+    report = json.loads(evaluation.read_text())
+    assert evaluation_result["split"] == "validation"
+    assert report["audio_manifest_sha256"]
+    assert str(tmp_path) not in json.dumps(report)
+    assert not list(tmp_path.glob(".strum-chart-audio-*"))
+
+    profile = tmp_path / "promoted"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "strum-worker",
+            "transform",
+            "profile",
+            "package",
+            "--experiment",
+            str(candidate),
+            "--evaluation",
+            str(evaluation),
+            "--dataset-manifest",
+            str(manifest_path),
+            "--catalog-root",
+            str(tmp_path),
+            "--output",
+            str(profile),
+            "--profile",
+            "audio-transform-guitar",
+        ],
+    )
+    assert main() == 0
+    package_result = json.loads(capsys.readouterr().out)
+    assert package_result["status"] == "promoted"
+    assert preflight_bundle(profile)["status"] == "ready"
+    assert str(tmp_path) not in (profile / MANIFEST_FILENAME).read_text()
+    assert not list(tmp_path.glob(".strum-chart-audio-*"))
+
+
+def test_worker_catalog_audio_promotion_rejects_tampered_candidate_or_catalog(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    records = [
+        _record(tmp_path, "octave-src-11111111", "PART GUITAR", 0),
+        _record(tmp_path, "octave-src-22222222", "PART GUITAR", 1),
+    ]
+    for record in records:
+        record["audio"] = {"guitar": _asset(tmp_path, _wav_bytes(), "guitar.wav")}
+    _catalog(tmp_path, records)
+    prepared = prepare_catalog_chart_pairs(
+        tmp_path,
+        tmp_path / "task-view",
+        CatalogChartPairOptions(
+            instrument="guitar",
+            target_difficulty="Hard",
+            audio_feature_mode="rms_onset_v1",
+        ),
+    )
+    manifest_path = prepared["manifest_path"]
+    assert isinstance(manifest_path, Path)
+    monkeypatch.setattr(
+        "scripts.train_chart_transform.event_audio_features",
+        lambda _path, events, **_kwargs: [[0.0, 0.0] for _ in events],
+    )
+    request = tmp_path / "request.json"
+    candidate = tmp_path / "candidate"
+    request.write_text(
+        json.dumps(
+            {
+                "pipeline_id": "chart_transform.five_lane/v1",
+                "task_view": str(manifest_path),
+                "output": str(candidate),
+                "catalog_root": str(tmp_path),
+                "options": {
+                    "model_id": "audio-conditioned-catalog-transform",
+                    "epochs": 1,
+                    "hidden_dim": 4,
+                    "validation_fraction": 0.5,
+                    "device": "cpu",
+                },
+            }
+        )
+    )
+    run_training_request(request)
+
+    config = candidate / "configs" / "training-config.json"
+    original_config = config.read_bytes()
+    config.write_text("{}\n")
+    from src.worker import evaluate_catalog_chart_transform_candidate
+
+    with pytest.raises(WorkerRequestError, match="candidate failed verification"):
+        evaluate_catalog_chart_transform_candidate(
+            bundle_root=candidate,
+            dataset_manifest=manifest_path,
+            catalog_root=tmp_path,
+            output_path=tmp_path / "held-out.json",
+        )
+    config.write_bytes(original_config)
+
+    relative_audio = records[0]["audio"]["guitar"]["relative_path"]
+    assert isinstance(relative_audio, str)
+    (tmp_path / relative_audio).write_bytes(b"tampered")
+    with pytest.raises(WorkerRequestError, match="catalog failed verification"):
+        evaluate_catalog_chart_transform_candidate(
+            bundle_root=candidate,
+            dataset_manifest=manifest_path,
+            catalog_root=tmp_path,
+            output_path=tmp_path / "held-out.json",
+        )
 
 
 def test_pipeline_descriptor_declares_catalog_and_preprocessing_contract() -> None:

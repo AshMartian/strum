@@ -20,7 +20,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -3359,6 +3359,126 @@ def _write_chart_transform_catalog_audio_provenance(
         path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def _chart_transform_catalog_profile_call(
+    *,
+    catalog_root: str | Path,
+    dataset_manifest: str | Path,
+    candidate_root: str | Path,
+    scratch_output: str | Path,
+    call: Callable[[Path], dict[str, object]],
+) -> dict[str, object]:
+    """Run one audio-conditioned promotion operation with private catalog audio.
+
+    Candidates deliberately retain the hash of their transient training audio
+    manifest, never that manifest or any host asset path.  Promotion must
+    therefore reconstruct the *same* manifest from the immutable task view
+    and approved catalog, rather than asking OCTAVE to retain a private
+    training scratch directory.  ``call`` only receives the temporary manifest
+    path; it must return a portable result before this function removes it.
+    """
+    try:
+        dataset = json.loads(Path(dataset_manifest).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise WorkerRequestError("chart-transform dataset manifest is unreadable") from error
+    if not isinstance(dataset, dict):
+        raise WorkerRequestError("chart-transform dataset manifest must be an object")
+
+    # Check the candidate before reopening private catalog assets.  Besides
+    # rejecting non-candidates, this guarantees catalog re-materialization is
+    # used only for an audio-conditioned transform candidate.
+    from src.chart_transform_profile import (  # noqa: PLC0415
+        ChartTransformPromotionError,
+        _candidate,
+    )
+
+    try:
+        _bundle, _component_id, config = _candidate(candidate_root)
+    except ChartTransformPromotionError as error:
+        raise WorkerRequestError("chart-transform candidate failed verification") from error
+    if config.get("audio_feature_mode") != "rms_onset_v1":
+        raise WorkerRequestError(
+            "catalog audio re-materialization requires an audio-conditioned transform candidate"
+        )
+
+    private_audio_dir: tempfile.TemporaryDirectory[str] | None = None
+    try:
+        try:
+            private_audio_dir, audio_manifest, _provenance = (
+                _chart_transform_catalog_audio_manifest(
+                    dataset=dataset,
+                    catalog_root=str(catalog_root),
+                    output_dir=Path(scratch_output),
+                )
+            )
+        except CatalogValidationError as error:
+            raise WorkerRequestError("chart-transform catalog failed verification") from error
+        return call(audio_manifest)
+    finally:
+        if private_audio_dir is not None:
+            private_audio_dir.cleanup()
+
+
+def evaluate_catalog_chart_transform_candidate(
+    *,
+    bundle_root: str | Path,
+    dataset_manifest: str | Path,
+    catalog_root: str | Path,
+    output_path: str | Path,
+    device: str = "cpu",
+) -> dict[str, object]:
+    """Evaluate an audio candidate from its task view and private catalog.
+
+    This is intentionally a worker-local route.  It accepts catalog and
+    candidate identities but never serializes an audio manifest or catalog
+    location into its held-out report.
+    """
+    from src.chart_transform_profile import evaluate_chart_transform_candidate  # noqa: PLC0415
+
+    return _chart_transform_catalog_profile_call(
+        catalog_root=catalog_root,
+        dataset_manifest=dataset_manifest,
+        candidate_root=bundle_root,
+        scratch_output=output_path,
+        call=lambda audio_manifest: evaluate_chart_transform_candidate(
+            bundle_root=bundle_root,
+            dataset_manifest=dataset_manifest,
+            output_path=output_path,
+            device=device,
+            audio_manifest=audio_manifest,
+        ),
+    )
+
+
+def package_catalog_chart_transform_profile(
+    *,
+    experiment_dir: str | Path,
+    evaluation_path: str | Path,
+    dataset_manifest: str | Path,
+    catalog_root: str | Path,
+    output_dir: str | Path,
+    profile_id: str,
+    device: str = "cpu",
+) -> dict[str, object]:
+    """Package an audio candidate after worker-local independent evaluation."""
+    from src.chart_transform_profile import package_chart_transform_profile  # noqa: PLC0415
+
+    return _chart_transform_catalog_profile_call(
+        catalog_root=catalog_root,
+        dataset_manifest=dataset_manifest,
+        candidate_root=experiment_dir,
+        scratch_output=output_dir,
+        call=lambda audio_manifest: package_chart_transform_profile(
+            experiment_dir=experiment_dir,
+            evaluation_path=evaluation_path,
+            dataset_manifest=dataset_manifest,
+            output_dir=output_dir,
+            profile_id=profile_id,
+            device=device,
+            audio_manifest=audio_manifest,
+        ),
+    )
+
+
 def _validated_chart_transform_parent(
     parent_bundle: str,
     config: Any,
@@ -4185,7 +4305,9 @@ def _parse_args() -> argparse.Namespace:
     transform_evaluate.add_argument("--dataset-manifest", type=Path, required=True)
     transform_evaluate.add_argument("--output", type=Path, required=True)
     transform_evaluate.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
-    transform_evaluate.add_argument("--audio-manifest", type=Path)
+    transform_evaluate_audio = transform_evaluate.add_mutually_exclusive_group()
+    transform_evaluate_audio.add_argument("--audio-manifest", type=Path)
+    transform_evaluate_audio.add_argument("--catalog-root", type=Path)
     transform_evaluate.add_argument("--json", action="store_true")
     transform_package = transform_profile_commands.add_parser(
         "package", help="copy one evaluated transform candidate into an executable profile"
@@ -4196,7 +4318,9 @@ def _parse_args() -> argparse.Namespace:
     transform_package.add_argument("--output", type=Path, required=True)
     transform_package.add_argument("--profile", required=True)
     transform_package.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
-    transform_package.add_argument("--audio-manifest", type=Path)
+    transform_package_audio = transform_package.add_mutually_exclusive_group()
+    transform_package_audio.add_argument("--audio-manifest", type=Path)
+    transform_package_audio.add_argument("--catalog-root", type=Path)
     transform_package.add_argument("--json", action="store_true")
     model = commands.add_parser("model", help="inspect model bundles")
     model_commands = model.add_subparsers(dest="model_command", required=True)
@@ -4476,27 +4600,51 @@ def main() -> int:
 
             try:
                 if args.transform_profile_command == "evaluate":
-                    _print_json(
-                        evaluate_chart_transform_candidate(
-                            bundle_root=args.bundle_root,
-                            dataset_manifest=args.dataset_manifest,
-                            output_path=args.output,
-                            device=args.device,
-                            audio_manifest=args.audio_manifest,
+                    if args.catalog_root is not None:
+                        _print_json(
+                            evaluate_catalog_chart_transform_candidate(
+                                bundle_root=args.bundle_root,
+                                dataset_manifest=args.dataset_manifest,
+                                catalog_root=args.catalog_root,
+                                output_path=args.output,
+                                device=args.device,
+                            )
                         )
-                    )
+                    else:
+                        _print_json(
+                            evaluate_chart_transform_candidate(
+                                bundle_root=args.bundle_root,
+                                dataset_manifest=args.dataset_manifest,
+                                output_path=args.output,
+                                device=args.device,
+                                audio_manifest=args.audio_manifest,
+                            )
+                        )
                 else:
-                    _print_json(
-                        package_chart_transform_profile(
-                            experiment_dir=args.experiment,
-                            evaluation_path=args.evaluation,
-                            dataset_manifest=args.dataset_manifest,
-                            output_dir=args.output,
-                            profile_id=args.profile,
-                            device=args.device,
-                            audio_manifest=args.audio_manifest,
+                    if args.catalog_root is not None:
+                        _print_json(
+                            package_catalog_chart_transform_profile(
+                                experiment_dir=args.experiment,
+                                evaluation_path=args.evaluation,
+                                dataset_manifest=args.dataset_manifest,
+                                catalog_root=args.catalog_root,
+                                output_dir=args.output,
+                                profile_id=args.profile,
+                                device=args.device,
+                            )
                         )
-                    )
+                    else:
+                        _print_json(
+                            package_chart_transform_profile(
+                                experiment_dir=args.experiment,
+                                evaluation_path=args.evaluation,
+                                dataset_manifest=args.dataset_manifest,
+                                output_dir=args.output,
+                                profile_id=args.profile,
+                                device=args.device,
+                                audio_manifest=args.audio_manifest,
+                            )
+                        )
             except ChartTransformPromotionError as error:
                 raise WorkerRequestError("Transform profile request is invalid") from error
             return 0
