@@ -1035,11 +1035,14 @@ than a shape match. STRUM still will not package a worker checkpoint into that
 router or let it replace the router's checkpoint by path. `strum-worker section
 profile evaluate` now verifies tensor-only weights, chooses a temperature only
 on validation windows, and reports a separate test split. `section profile
-package` can preserve that evidence as a hash-verified `evaluation_only`
-profile, not an auto-chart profile. Before a section component can affect a
-chart, it still needs a held-out router-on/off chart-impact ablation, a composed
-executable instrument-specific chart profile, and a registered execution
-handler. Guitar and Bass require separate composition contracts.
+package` binds the candidate config, source experiment, and test report to the
+same immutable task-view digest; it also recomputes report metrics from its
+confusion and aggregate calibration evidence before preserving a hash-verified
+`evaluation_only` profile, not an auto-chart profile. Before a section
+component can affect a chart, it still needs a held-out router-on/off
+chart-impact ablation, a composed executable instrument-specific chart profile,
+and a registered execution handler. Guitar and Bass require separate
+composition contracts.
 When a catalog task has a deterministic test split, the trainer evaluates the
 best validation checkpoint against it and records that result in
 `experiment.json`. This is held-out component evidence only; it does not

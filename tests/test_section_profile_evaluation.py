@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -22,7 +23,11 @@ from src.section_profile_evaluation import (
     evaluate_section_candidate,
     package_section_evaluation_profile,
 )
-from src.worker import _chart_execution_available, validate_inference_profile
+from src.worker import _chart_execution_available, main, validate_inference_profile
+
+
+class _UnsafeCheckpointValue:
+    pass
 
 
 def _sha256(path: Path) -> str:
@@ -55,6 +60,7 @@ def _task_view(root: Path) -> Path:
 def _candidate_experiment(root: Path) -> tuple[Path, Path]:
     experiment = root / "experiment"
     bundle = experiment / "bundle"
+    task = _task_view(root)
     config = {
         "schema_version": 1,
         "format": "strum-section-classifier-model-config/v1",
@@ -67,6 +73,7 @@ def _candidate_experiment(root: Path) -> tuple[Path, Path]:
         "hop_seconds": 1.0,
         "mel_shape": [128, 87],
         "feature_extractor": ROUTER_FEATURE_EXTRACTOR,
+        "task_view_sha256": _sha256(task),
         "runtime_profile": {
             "format": "strum-section-router-deployment-requirements/v1",
             "status": "not_packageable",
@@ -113,6 +120,10 @@ def _candidate_experiment(root: Path) -> tuple[Path, Path]:
                 "format": "strum-experiment/v1",
                 "lifecycle": "completed",
                 "pipeline": {"id": "strum.section-classifier/guitar", "version": 1},
+                "task_view": {
+                    "format": "strum-catalog-task-manifest/v1",
+                    "sha256": _sha256(task),
+                },
                 "deployment_status": "requires_section_profile_evaluation",
             }
         )
@@ -208,6 +219,52 @@ def test_section_loader_rejects_pickle_like_or_incompatible_state(tmp_path: Path
         load_section_classifier_candidate(load_model_bundle(bundle, check_files=True), "guitar")
 
 
+def test_section_loader_and_cli_fail_closed_for_unsafe_checkpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _experiment, bundle = _candidate_experiment(tmp_path)
+    checkpoint = bundle / "weights" / "guitar-section.pt"
+    torch.save(
+        {"state_dict": SectionClassifier().state_dict(), "unsafe": _UnsafeCheckpointValue()},
+        checkpoint,
+    )
+    manifest = json.loads((bundle / MANIFEST_FILENAME).read_text())
+    component = manifest["components"]["section_classifier.guitar"]
+    component["sha256"] = _sha256(checkpoint)
+    component["byte_length"] = checkpoint.stat().st_size
+    (bundle / MANIFEST_FILENAME).write_text(json.dumps(manifest))
+    with pytest.raises(BundleValidationError, match="not tensor-only"):
+        load_section_classifier_candidate(load_model_bundle(bundle, check_files=True), "guitar")
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "strum-worker",
+            "section",
+            "profile",
+            "evaluate",
+            "--bundle-root",
+            str(bundle),
+            "--task-view",
+            str(_task_view(tmp_path)),
+            "--catalog-root",
+            str(tmp_path / "catalog"),
+            "--output",
+            str(tmp_path / "held-out.json"),
+            "--instrument",
+            "guitar",
+            "--json",
+        ],
+    )
+    assert main() == 2
+    assert json.loads(capsys.readouterr().out) == {
+        "status": "invalid",
+        "code": "request_invalid",
+        "message": "worker request is invalid",
+    }
+
+
 def test_section_package_rejects_non_held_out_report(tmp_path: Path) -> None:
     experiment, bundle = _candidate_experiment(tmp_path)
     report = {
@@ -233,3 +290,68 @@ def test_section_package_rejects_non_held_out_report(tmp_path: Path) -> None:
             minimum_accuracy=0.5,
             maximum_expected_calibration_error=0.2,
         )
+
+
+def test_section_package_rejects_mismatched_valid_task_lineage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    experiment, bundle = _candidate_experiment(tmp_path)
+    monkeypatch.setattr("src.section_profile_evaluation._materialize_held_out_cache", _cache)
+    report_path = tmp_path / "held-out.json"
+    evaluate_section_candidate(
+        bundle_root=bundle,
+        task_view_path=_task_view(tmp_path),
+        catalog_root=tmp_path / "private-catalog",
+        output_path=report_path,
+        instrument="guitar",
+    )
+    unrelated_task = json.loads(_task_view(tmp_path).read_text())
+    unrelated_task["lineage"] = {"catalog_id": "different-but-valid-task-view"}
+    unrelated_path = tmp_path / "unrelated-valid-task.json"
+    unrelated_path.write_text(json.dumps(unrelated_task))
+    report = json.loads(report_path.read_text())
+    report["task_view_sha256"] = _sha256(unrelated_path)
+    report_path.write_text(json.dumps(report))
+
+    with pytest.raises(SectionProfileEvaluationError, match="verified held-out report"):
+        package_section_evaluation_profile(
+            experiment_dir=experiment,
+            evaluation_path=report_path,
+            output_dir=tmp_path / "output",
+            profile_id="section-guitar-held-out",
+            instrument="guitar",
+            minimum_accuracy=0.001,
+            maximum_expected_calibration_error=1.0,
+        )
+    assert not (tmp_path / "output").exists()
+
+
+def test_section_package_rejects_inconsistent_metric_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    experiment, bundle = _candidate_experiment(tmp_path)
+    monkeypatch.setattr("src.section_profile_evaluation._materialize_held_out_cache", _cache)
+    report_path = tmp_path / "held-out.json"
+    evaluate_section_candidate(
+        bundle_root=bundle,
+        task_view_path=_task_view(tmp_path),
+        catalog_root=tmp_path / "private-catalog",
+        output_path=report_path,
+        instrument="guitar",
+    )
+    report = json.loads(report_path.read_text())
+    report["per_class"]["silence"]["support"] += 1
+    report["metrics"]["nll"] += 1.0
+    report_path.write_text(json.dumps(report))
+
+    with pytest.raises(SectionProfileEvaluationError, match="verified held-out report"):
+        package_section_evaluation_profile(
+            experiment_dir=experiment,
+            evaluation_path=report_path,
+            output_dir=tmp_path / "output",
+            profile_id="section-guitar-held-out",
+            instrument="guitar",
+            minimum_accuracy=0.001,
+            maximum_expected_calibration_error=1.0,
+        )
+    assert not (tmp_path / "output").exists()

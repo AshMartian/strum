@@ -235,6 +235,8 @@ def test_section_worker_packages_a_revalidated_catalog_experiment_without_profil
     assert config["format"] == "strum-section-classifier-model-config/v1"
     assert config["preprocessing"] == "section-logmel-librosa-router-windows/v1"
     assert config["feature_extractor"]["backend"] == "librosa"
+    assert config["task_view_sha256"] == hashlib.sha256(task_view.read_bytes()).hexdigest()
+    assert packaged_experiment["task_view"]["sha256"] == config["task_view_sha256"]
     assert config["runtime_profile"] == {
         "format": "strum-section-router-deployment-requirements/v1",
         "status": "not_packageable",

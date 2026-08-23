@@ -195,7 +195,12 @@ def _select_temperature(logits: np.ndarray, labels: np.ndarray) -> tuple[float, 
 
 def _metrics(
     probs: np.ndarray, labels: np.ndarray
-) -> tuple[dict[str, float], dict[str, dict[str, float | int]], list[list[int]]]:
+) -> tuple[
+    dict[str, float],
+    dict[str, dict[str, float | int]],
+    list[list[int]],
+    dict[str, object],
+]:
     predictions = probs.argmax(axis=1)
     matrix = np.zeros((len(LABELS), len(LABELS)), dtype=np.int64)
     for expected, predicted in zip(labels, predictions, strict=True):
@@ -218,25 +223,45 @@ def _metrics(
         f1_values.append(f1)
     confidence = probs.max(axis=1)
     correct = predictions == labels
-    ece = 0.0
+    confidence_bins: list[dict[str, float | int]] = []
     for lower in np.linspace(0.0, 0.9, 10):
         upper = lower + 0.1
         mask = (confidence >= lower) & (
             (confidence < upper) if upper < 1 else (confidence <= upper)
         )
-        if np.any(mask):
-            ece += float(mask.mean()) * abs(
-                float(correct[mask].mean()) - float(confidence[mask].mean())
-            )
+        confidence_bins.append(
+            {
+                "count": int(mask.sum()),
+                "confidence_sum": float(confidence[mask].sum()),
+                "correct_count": int(correct[mask].sum()),
+            }
+        )
+    ece = sum(
+        (item["count"] / len(labels))
+        * abs(item["correct_count"] / item["count"] - item["confidence_sum"] / item["count"])
+        for item in confidence_bins
+        if item["count"]
+    )
     one_hot = np.eye(len(LABELS), dtype=np.float64)[labels]
+    nll_sum = float(-np.log(np.clip(probs[np.arange(len(labels)), labels], 1e-12, 1.0)).sum())
+    brier_sum = float(np.square(probs - one_hot).sum())
     summary = {
         "accuracy": float(correct.mean()),
         "macro_f1": float(np.mean(f1_values)),
-        "nll": _nll(probs, labels),
-        "brier": float(np.square(probs - one_hot).sum(axis=1).mean()),
+        "nll": nll_sum / len(labels),
+        "brier": brier_sum / len(labels),
         "expected_calibration_error": float(ece),
     }
-    return summary, per_class, matrix.tolist()
+    return (
+        summary,
+        per_class,
+        matrix.tolist(),
+        {
+            "nll_sum": nll_sum,
+            "brier_sum": brier_sum,
+            "confidence_bins": confidence_bins,
+        },
+    )
 
 
 def evaluate_section_candidate(
@@ -267,6 +292,11 @@ def evaluate_section_candidate(
         ) from error
     if bundle.manifest_path is None:
         raise SectionProfileEvaluationError("Section candidate bundle has no manifest")
+    task_view_sha256 = _sha256(task_view_path)
+    if task_view_sha256 != candidate.task_view_sha256:
+        raise SectionProfileEvaluationError(
+            "Section task view does not match the candidate training lineage"
+        )
     with tempfile.TemporaryDirectory(prefix="strum-section-held-out-") as temporary:
         cache_dir = Path(temporary) / "cache"
         counts = _materialize_held_out_cache(
@@ -283,7 +313,7 @@ def evaluate_section_candidate(
         temperature, selection_nll = _select_temperature(
             _logits(candidate, val_features, device=device), val_labels
         )
-        metrics, per_class, matrix = _metrics(
+        metrics, per_class, matrix, metric_evidence = _metrics(
             _softmax(_logits(candidate, test_features, device=device), temperature), test_labels
         )
     report = {
@@ -291,7 +321,7 @@ def evaluate_section_candidate(
         "format": EVALUATION_FORMAT,
         "model_id": bundle.model_id,
         "bundle_manifest_sha256": _sha256(bundle.manifest_path),
-        "task_view_sha256": _sha256(task_view_path),
+        "task_view_sha256": task_view_sha256,
         "instrument": instrument,
         "component_id": candidate.component_id,
         "split": "test",
@@ -306,6 +336,7 @@ def evaluate_section_candidate(
         "metrics": metrics,
         "per_class": per_class,
         "confusion_matrix": matrix,
+        "metric_evidence": metric_evidence,
     }
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -314,7 +345,7 @@ def evaluate_section_candidate(
 
 def _require_candidate_experiment(
     experiment_dir: Path, instrument: str
-) -> tuple[Path, dict[str, Any]]:
+) -> tuple[Path, dict[str, Any], str]:
     experiment = _read_json(experiment_dir / "experiment.json", "Section experiment")
     expected_pipeline = {"id": f"strum.section-classifier/{instrument}", "version": 1}
     if (
@@ -331,12 +362,21 @@ def _require_candidate_experiment(
     if bundle.manifest_path is None or bundle.validate(check_files=True, verify_hashes=True):
         raise SectionProfileEvaluationError("Section experiment bundle failed verification")
     try:
-        load_section_classifier_candidate(bundle, instrument)
+        candidate = load_section_classifier_candidate(bundle, instrument)
     except BundleValidationError as error:
         raise SectionProfileEvaluationError(
             "Section experiment has no compatible tensor candidate"
         ) from error
-    return bundle_root, experiment
+    task_view = experiment.get("task_view")
+    if (
+        not isinstance(task_view, dict)
+        or task_view.get("format") != MANIFEST_FORMAT
+        or not isinstance(task_view.get("sha256"), str)
+        or len(task_view["sha256"]) != 64
+        or task_view["sha256"] != candidate.task_view_sha256
+    ):
+        raise SectionProfileEvaluationError("Section experiment task view lineage is invalid")
+    return bundle_root, experiment, candidate.task_view_sha256
 
 
 def package_section_evaluation_profile(
@@ -365,13 +405,20 @@ def package_section_evaluation_profile(
         and 0 <= maximum_expected_calibration_error <= 1
     ):
         raise SectionProfileEvaluationError("Section maximum_expected_calibration_error is invalid")
-    bundle_root, _experiment = _require_candidate_experiment(experiment_dir, instrument)
+    bundle_root, _experiment, task_view_sha256 = _require_candidate_experiment(
+        experiment_dir, instrument
+    )
     bundle = load_model_bundle(bundle_root, check_files=True)
     if bundle.manifest_path is None:
         raise SectionProfileEvaluationError("Section experiment bundle has no manifest")
     report = _read_json(evaluation_path, "Section evaluation")
     try:
-        validated = _require_evaluation_report(report, bundle=bundle, instrument=instrument)
+        validated = _require_evaluation_report(
+            report,
+            bundle=bundle,
+            instrument=instrument,
+            expected_task_view_sha256=task_view_sha256,
+        )
     except BundleValidationError as error:
         raise SectionProfileEvaluationError(
             "Section evaluation is not a verified held-out report"

@@ -385,12 +385,14 @@ the established `SectionRouter` now import one exact librosa frontend contract
 per-window normalization). `strum-worker section profile evaluate` validates
 the declared `SectionClassifier/v1` state with `torch.load(weights_only=True)`,
 selects a temperature on validation windows, and writes only test-split
-metrics. The corresponding `section.classifier-evaluation/v1` package has
-`evaluation_only` difficulty scope and no chart handler. The runtime must
-still not substitute it into the router by filename. A future composed chart
-profile must pass a held-out router-on/off chart-impact ablation and bind a
-registered instrument-specific execution handler before it can change chart
-output.
+metrics. Candidate config, experiment, and report must share one immutable
+task-view digest; package validation also recomputes report metrics from the
+confusion matrix and aggregate calibration evidence. The corresponding
+`section.classifier-evaluation/v1` package has `evaluation_only` difficulty
+scope and no chart handler. The runtime must still not substitute it into the
+router by filename. A future composed chart profile must pass a held-out
+router-on/off chart-impact ablation and bind a registered instrument-specific
+execution handler before it can change chart output.
 If a catalog task contains a test split, the trainer reports best-validation
 checkpoint test metrics in the experiment. That report is not a profile
 promotion decision or a substitute for the router-on/off chart-impact gate.

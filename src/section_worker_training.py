@@ -460,6 +460,9 @@ def run_catalog_section_training(
         # non-deployable gap is profile loading and measured chart utility,
         # not Mel-feature compatibility.
         "feature_extractor": dict(SECTION_FEATURE_EXTRACTOR),
+        # Bind the raw candidate to one immutable catalog task view.  The
+        # held-out evaluator and package gate must use this exact digest.
+        "task_view_sha256": _sha256(task_view_path),
         "runtime_profile": {
             "format": "strum-section-router-deployment-requirements/v1",
             "status": "not_packageable",
