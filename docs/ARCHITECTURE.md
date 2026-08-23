@@ -21,7 +21,7 @@ fails closed to the profiles declared by a validated model bundle:
 | Keys onset/fret | Worker-trainable; evaluated profile executable | Revalidated `PART KEYS` task views and distinct `keys.onset`/`keys.fret` components; only an evaluated `keys.neural-v1-expert/v1` profile writes Expert Keys |
 | `drums.onset-classifier-evaluation/v1` | Executable evaluator only | Prepared V2 onset windows → eight class probabilities; explicitly not a chart handler |
 | Pro Guitar, Pro Bass, Pro Keys | Catalog-ready task views, training planned | No worker trainer or deployable profile; exact REAL_* labels and structured missing stages are declared |
-| Vocals, Guitar/Bass mapper, Guitar/Bass section | Worker-trainable experiments | No deployable profile without their dedicated evaluation/package/runtime gates |
+| Vocals, Guitar/Bass mapper, Guitar/Bass section | Worker-trainable experiments | Vocal activity/pitch and lead phrase-boundary components are distinct and non-deployable; no profile without remaining composition/evaluation/runtime gates |
 | Legacy batch pipeline | Research / compatibility scripts | Not a worker execution handler |
 
 OCTAVE owns source import, rights decisions, curation, runtime selection, and
@@ -501,20 +501,26 @@ view and `strum-worker keys profile package` has copied it into an immutable
 `keys.onset`/`keys.fret`, writes one Expert `PART KEYS` track, and cannot
 select or substitute Guitar/Bass profiles.
 
-### Vocal activity/pitch experiment gate
+### Vocal activity/pitch and phrase-boundary experiment gates
 
 `vocals.note-activity/v1` is a catalog worker experiment, not a conversion of
 vocal charts into five-lane data. Its `vocals_activity` task view is
-revalidated against the selected catalog and may derive labels only from
-`PART VOCALS`. The preprocessor produces 22.05 kHz / 128-mel windows with two
-frame targets: pitched lead-vocal activity and MIDI pitch 36--84. It retains
-observed phrase-marker and lyric-event counts only as metadata.
+revalidated against the selected catalog and may derive labels only from the
+exact `PART VOCALS` track. The preprocessor produces 22.05 kHz / 128-mel
+windows with two frame targets: pitched lead-vocal activity and MIDI pitch
+36--84.
 
 The resulting `vocals.frame_activity_pitch` bundle has no profile and reports
 `deployment_status: requires_vocals_profile_evaluation_and_packaging`. It
-cannot be selected by `chart run` or used to invent phrase, lyric, talky, or
-harmony output; those require separately evaluated components and a complete
-Vocal-specific profile contract.
+cannot be selected by `chart run`. A separate
+`vocals.phrase-boundaries/v1` task derives start/end targets from lead-track
+MIDI 105/106 markers or a sustained 105 phrase span, then writes only the
+`vocals.phrase_boundaries` component. Its deployment status is
+`requires_vocal_chart_composition_evaluation_and_packaging`, not a chart
+handler. The planned `strum.instrument-chart/vocals/v1` descriptor preserves
+the remaining lyric/text, talky, harmony, composition, held-out evaluation,
+packaging, and execution requirements in a machine-readable non-executable
+contract. No Vocal worker path may invent those outputs from a raw component.
 
 ## 11. Hardware
 

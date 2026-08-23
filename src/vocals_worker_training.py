@@ -28,6 +28,11 @@ EXPERIMENT_FORMAT = "strum-vocals-activity-experiment/v1"
 PREPROCESSING_ID = "vocals-logmel-frame-targets/v1"
 COMPONENT_ID = "vocals.frame_activity_pitch"
 _MODEL_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
+_EXPECTED_LABEL_SCHEMA = {
+    "id": "vocals-pitch-phrase-lyrics-midi/v1",
+    "track_prefixes": ["PART VOCALS"],
+    "difficulty_encoding": "vocal-pitch-phrase-events/v1",
+}
 
 
 class VocalsTrainingError(ValueError):
@@ -137,7 +142,7 @@ def _read_task_view(
         or task.get("kind") != TASK_KIND
         or task.get("pipeline_id") != PIPELINE_ID
         or task.get("instrument") != "vocals"
-        or task.get("label_schema", {}).get("track_prefixes") != ["PART VOCALS"]
+        or task.get("label_schema") != _EXPECTED_LABEL_SCHEMA
     ):
         raise VocalsTrainingError("Vocal training requires a Vocal activity catalog task view")
     try:
@@ -189,7 +194,15 @@ def _history_metrics(path: Path) -> dict[str, object] | None:
         return None
     return {
         key: history[-1][key]
-        for key in ("epoch", "train_loss", "val_loss", "val_activity_f1", "val_pitch_accuracy")
+        for key in (
+            "epoch",
+            "train_loss",
+            "val_loss",
+            "val_activity_f1",
+            "val_pitch_accuracy",
+            "val_phrase_start_f1",
+            "val_phrase_end_f1",
+        )
         if isinstance(history[-1].get(key), (int, float)) and not isinstance(history[-1][key], bool)
     }
 

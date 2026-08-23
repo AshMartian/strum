@@ -568,6 +568,7 @@ For example, a Guitar task-view request is:
 
 `guitar.onset-fret/v1`, `bass.onset-fret/v1`, `keys.onset-fret/v1`,
 `drums.onset-classifier/v1`, `vocals.note-activity/v1`,
+`vocals.phrase-boundaries/v1`,
 `chart_transform.five_lane/v1`, and the separate
 `strum.fret-mapper/guitar/v1` / `strum.fret-mapper/bass/v1` derived-label
 pipelines are worker-trainable. Fret-mapper training builds Basic-Pitch
@@ -597,16 +598,19 @@ transform creates a verified learned lower-difficulty component. OCTAVE must
 surface these distinct deployment states rather than selecting a checkpoint
 implicitly.
 
-Vocals has a separate bounded experiment because `PART VOCALS` is not a
+Vocals has separate bounded experiments because `PART VOCALS` is not a
 five-lane chart. `vocals.note-activity/v1` revalidates a dedicated
-`vocals_activity` task view whose only declared label track is `PART VOCALS`.
-It trains frame-level pitched-vocal activity plus MIDI pitch 36--84 from a
-vocal stem (or approved mix fallback), retaining phrase-marker and lyric event
-counts as metadata. It does **not** train word recognition, phrases, talkies,
-harmonies, or a playable chart. Its sole component,
-`vocals.frame_activity_pitch`, therefore remains
-`requires_vocals_profile_evaluation_and_packaging` with no inference
-capability; OCTAVE must never offer it as an auto-chart model.
+`vocals_activity` task view whose only declared label track is the exact
+`PART VOCALS` identity. It trains frame-level pitched-vocal activity plus MIDI
+pitch 36--84 from a vocal stem (or approved mix fallback). The companion
+`vocals.phrase-boundaries/v1` task derives lead phrase starts/ends only from
+the supported MIDI 105/106 marker convention or a sustained 105 span. Its
+separate `vocals.phrase_boundaries` component is likewise experiment-only.
+Neither path trains word recognition, talkies, harmonies, or a playable chart.
+The planned `strum.instrument-chart/vocals/v1` descriptor publishes those
+remaining machine-readable stages and rejects chart execution until a composed
+Vocal profile has passed held-out chart evaluation and packaging. OCTAVE must
+never offer either raw component as an auto-chart model.
 
 Bass invokes the same five-lane CRNN implementation only after STRUM has
 revalidated the dedicated `bass_onset_fret` task view and its `PART BASS`
@@ -876,9 +880,10 @@ still supported for historical data, but must not be used for OCTAVE catalogs.
 ### Remaining instrument and derived-label task views
 
 `build_catalog_task_manifest.py` is STRUM's shared adapter for catalog-backed
-training data. It supports `bass`, `keys`, `vocals`, `pro_guitar`, `pro_bass`,
-`pro_keys`, `fret_mapper_guitar`, `fret_mapper_bass`, `section_guitar`, and
-`section_bass`. Every view records the versioned pipeline ID, catalog control
+training data. It supports `bass`, `keys`, `vocals`, `vocals_activity`,
+`vocals_phrase_boundaries`, `pro_guitar`, `pro_bass`, `pro_keys`,
+`fret_mapper_guitar`, `fret_mapper_bass`, `section_guitar`, and `section_bass`.
+Every view records the versioned pipeline ID, catalog control
 fingerprint, source IDs and input hashes, deterministic split algorithm/seed,
 and a fingerprint of portable preprocessing settings. It also declares the
 immutable label-source schema and the exact approved MIDI track names selected
@@ -927,8 +932,12 @@ needs: an exact feature-extractor contract, a tensor-only bundle/profile
 loader, held-out section calibration, a held-out router-on/off chart-impact
 ablation, and composition with an executable instrument-specific chart
 profile. Guitar and Bass require separate composition contracts.
-Keys, Vocals, and Pro-instrument generic task views remain source contracts,
-not a claim that their future models share the five-lane representation.
+Keys and Pro-instrument generic task views remain source contracts, not a
+claim that their future models share the five-lane representation. The generic
+Vocal descriptor is also explicitly planned: its structured contract names the
+exact lead track, already-trainable activity/pitch and phrase components, and
+the lyric, talky, harmony, composition, evaluation, packaging, and execution
+stages still required for a selectable profile.
 ### Catalog-backed chart-transform tasks
 
 The `chart_transform.five_lane/v1` pipeline learns Expert → Hard, Medium, or

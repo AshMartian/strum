@@ -40,6 +40,16 @@ SEGMENT_HOP_FRAMES = SEGMENT_FRAMES // 2
 VOCAL_MIN_MIDI = 36
 VOCAL_MAX_MIDI = 84
 PITCH_CLASS_COUNT = VOCAL_MAX_MIDI - VOCAL_MIN_MIDI + 2  # 0 is unvoiced.
+# A zero-length 105 marker is common in charts that pair a 105 start marker
+# with a 106 end marker.  A sustained 105 marker is the other supported chart
+# convention.  Treating the one-tick release from the first convention as an
+# end boundary would manufacture a false phrase end at the phrase start.
+MIN_SPAN_PHRASE_SECONDS = 0.05
+_EXPECTED_LABEL_SCHEMA = {
+    "id": "vocals-pitch-phrase-lyrics-midi/v1",
+    "track_prefixes": ["PART VOCALS"],
+    "difficulty_encoding": "vocal-pitch-phrase-events/v1",
+}
 
 
 class VocalsPreprocessError(ValueError):
@@ -76,7 +86,13 @@ def _seconds_at_tick(tick: int, changes: list[tuple[int, int]], ticks_per_beat: 
 
 
 def parse_vocal_events(midi_path: Path, *, label_track: str = "PART VOCALS") -> dict[str, object]:
-    """Parse lead vocal notes plus phrase/lyric metadata from exactly one track."""
+    """Parse lead notes and canonical phrase-boundary events from one track.
+
+    The catalog accepts the two phrase conventions emitted by STRUM's legacy
+    charters: a 105 marker span, or a 105 start marker paired with a 106 end
+    marker.  The return value keeps these raw source semantics available to a
+    dedicated boundary experiment without declaring lyric or chart targets.
+    """
     try:
         midi = mido.MidiFile(midi_path)
     except (OSError, ValueError, EOFError) as error:
@@ -89,6 +105,9 @@ def parse_vocal_events(midi_path: Path, *, label_track: str = "PART VOCALS") -> 
     notes: list[dict[str, float | int]] = []
     lyric_events = 0
     phrase_markers = 0
+    phrase_starts: list[float] = []
+    phrase_ends: list[float] = []
+    active_phrase_markers: list[float] = []
     tick = 0
     for message in track:
         tick += message.time
@@ -96,16 +115,27 @@ def parse_vocal_events(midi_path: Path, *, label_track: str = "PART VOCALS") -> 
         if message.type in {"lyrics", "text"} and getattr(message, "text", "").strip():
             lyric_events += 1
         if message.type == "note_on" and message.velocity > 0:
-            if message.note in {105, 106}:
+            if message.note == 105:
                 phrase_markers += 1
+                phrase_starts.append(at_seconds)
+                active_phrase_markers.append(at_seconds)
+            elif message.note == 106:
+                phrase_markers += 1
+                phrase_ends.append(at_seconds)
             elif VOCAL_MIN_MIDI <= message.note <= VOCAL_MAX_MIDI:
                 active.setdefault(message.note, []).append(at_seconds)
         elif message.type == "note_off" or (message.type == "note_on" and message.velocity == 0):
-            starts = active.get(message.note)
-            if starts:
-                start = starts.pop(0)
-                if at_seconds > start:
-                    notes.append({"start": start, "end": at_seconds, "pitch": message.note})
+            if message.note == 105:
+                if active_phrase_markers:
+                    phrase_start = active_phrase_markers.pop(0)
+                    if at_seconds - phrase_start >= MIN_SPAN_PHRASE_SECONDS:
+                        phrase_ends.append(at_seconds)
+            else:
+                starts = active.get(message.note)
+                if starts:
+                    start = starts.pop(0)
+                    if at_seconds > start:
+                        notes.append({"start": start, "end": at_seconds, "pitch": message.note})
     # Broken source charts occasionally omit note-offs.  Do not invent their
     # end times: fail them out of the target corpus rather than leaking a
     # silently broad label into training.
@@ -114,7 +144,18 @@ def parse_vocal_events(midi_path: Path, *, label_track: str = "PART VOCALS") -> 
         "notes": notes,
         "lyric_event_count": lyric_events,
         "phrase_marker_count": phrase_markers,
+        "phrase_start_events": _deduplicate_event_times(phrase_starts),
+        "phrase_end_events": _deduplicate_event_times(phrase_ends),
     }
+
+
+def _deduplicate_event_times(events: list[float]) -> list[float]:
+    """Return sorted marker times while collapsing MIDI-tick duplicates."""
+    result: list[float] = []
+    for event in sorted(events):
+        if not result or event - result[-1] > 0.001:
+            result.append(event)
+    return result
 
 
 def _load_audio(path: Path) -> np.ndarray:
@@ -203,7 +244,7 @@ def prepare_vocals_frames(
         or task.get("kind") != "vocals_activity"
         or task.get("pipeline_id") != "vocals.note-activity/v1"
         or task.get("instrument") != "vocals"
-        or task.get("label_schema", {}).get("track_prefixes") != ["PART VOCALS"]
+        or task.get("label_schema") != _EXPECTED_LABEL_SCHEMA
     ):
         raise VocalsPreprocessError(
             "Vocal preprocessing requires the Vocal activity catalog task view"

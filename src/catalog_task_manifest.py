@@ -51,6 +51,11 @@ PIPELINE_IDS = {
     # This narrow vocal-note view feeds only the bounded activity/pitch
     # experiment; it is not a complete phrase/lyric chart profile.
     "vocals_activity": "vocals.note-activity/v1",
+    # Phrase boundaries have an independently observable event language in
+    # ``PART VOCALS`` (marker 105/106 or a standard 105 marker span).  Keep
+    # that experiment distinct from the activity/pitch task so neither task
+    # can accidentally claim the other's component or future profile role.
+    "vocals_phrase_boundaries": "vocals.phrase-boundaries/v1",
     "keys": "strum.instrument-chart/keys/v1",
     "vocals": "strum.instrument-chart/vocals/v1",
     "pro_guitar": "strum.instrument-chart/pro-guitar/v1",
@@ -67,6 +72,7 @@ DEFAULT_AUDIO_ROLES = {
     "bass_onset_fret": ("bass", "mix"),
     "keys_onset_fret": ("keys", "mix"),
     "vocals_activity": ("vocals", "mix"),
+    "vocals_phrase_boundaries": ("vocals", "mix"),
     "keys": ("keys", "mix"),
     "vocals": ("vocals", "mix"),
     "pro_guitar": ("guitar", "mix"),
@@ -83,6 +89,7 @@ TASK_INSTRUMENTS = {
     "bass_onset_fret": "bass",
     "keys_onset_fret": "keys",
     "vocals_activity": "vocals",
+    "vocals_phrase_boundaries": "vocals",
     "keys": "keys",
     "vocals": "vocals",
     "pro_guitar": "pro_guitar",
@@ -118,8 +125,17 @@ TASK_LABEL_SCHEMAS: dict[str, dict[str, object]] = {
     },
     "vocals_activity": {
         "id": "vocals-pitch-phrase-lyrics-midi/v1",
+        # Keep this existing V1 activity task schema stable.  Its preprocessor
+        # still rejects any resolved selection other than exact PART VOCALS;
+        # the new phrase-boundary task below can use an exact-name schema from
+        # its first release onward.
         "track_prefixes": ["PART VOCALS"],
         "difficulty_encoding": "vocal-pitch-phrase-events/v1",
+    },
+    "vocals_phrase_boundaries": {
+        "id": "vocals-pitch-phrase-lyrics-midi/v1",
+        "track_names": ["PART VOCALS"],
+        "difficulty_encoding": "vocal-phrase-boundary-events/v1",
     },
     "keys": {
         "id": "five-lane-midi/v1",

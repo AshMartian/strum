@@ -232,10 +232,15 @@ SECTION_TRAIN_SCHEMA = _object_schema(
 )
 PLANNED_TRAINING_REQUIREMENTS: dict[str, tuple[str, ...]] = {
     "vocals": (
-        "vocal_pitch_phrase_lyrics_preprocessor",
-        "vocals_training_architecture",
-        "profile_evaluation",
-        "profile_packaging",
+        "vocal_activity_pitch_component/v1",
+        "vocal_phrase_boundary_component/v1",
+        "vocal_lyric_tokenizer_and_alignment/v1",
+        "vocal_talky_target_encoder/v1",
+        "vocal_harmony_source_policy/v1",
+        "vocal_chart_composition_contract/v1",
+        "vocal_held_out_chart_evaluation/v1",
+        "vocal_profile_package/v1",
+        "vocal_chart_execution/v1",
     ),
     "pro_guitar": (
         "pro_string_fret_target_encoder/v1",
@@ -278,6 +283,31 @@ PLANNED_TRAINING_REQUIREMENTS: dict[str, tuple[str, ...]] = {
         "held_out_chart_impact_ablation",
         "composed_bass_chart_profile_contract",
     ),
+}
+
+
+VOCALS_TRAINING_CONTRACT: dict[str, object] = {
+    "format": "strum-planned-training-contract/v1",
+    "training_status": "planned",
+    "label_source": {
+        "schema_id": "vocals-pitch-phrase-lyrics-midi/v1",
+        "selection": "exact-lead-vocal-track/v1",
+        "tracks": ["PART VOCALS"],
+        "required_difficulty": "expert",
+        "target_semantics": [
+            "pitched_note_timing_duration_midi_36_84",
+            "phrase_boundary_markers_midi_105_106_or_105_span",
+            "lyric_and_text_meta_events",
+            "pitchless_talky_marker_midi_96",
+        ],
+        "excluded_source_tracks": ["HARM1", "HARM2", "HARM3"],
+    },
+    "available_experiment_components": [
+        "vocals.frame_activity_pitch",
+        "vocals.phrase_boundaries",
+    ],
+    "required_stages": list(PLANNED_TRAINING_REQUIREMENTS["vocals"]),
+    "execution": {"status": "not_available", "inference_capability": None},
 }
 
 
@@ -524,9 +554,54 @@ PIPELINES = (
             "required_difficulty",
         ),
         training_requirements=(
-            "vocal_phrase_lyric_talky_stages",
-            "vocals_profile_evaluation",
-            "vocals_profile_packaging",
+            "vocal_phrase_boundary_component/v1",
+            "vocal_lyric_tokenizer_and_alignment/v1",
+            "vocal_talky_target_encoder/v1",
+            "vocal_harmony_source_policy/v1",
+            "vocal_chart_composition_contract/v1",
+            "vocal_held_out_chart_evaluation/v1",
+            "vocal_profile_package/v1",
+        ),
+    ),
+    PipelineDescriptor(
+        id="vocals.phrase-boundaries/v1",
+        display_name="Vocals phrase boundaries",
+        kind="audio_to_vocal_labels",
+        version=1,
+        catalog_requirements={
+            "instrument": "vocals",
+            "difficulties": ["expert"],
+            "audio_roles": ["vocals", "mix"],
+            "audio_policy": "prefer:vocals,fallback:mix",
+            "label_tracks": ["PART VOCALS"],
+            "label_outputs": ["lead_phrase_start", "lead_phrase_end"],
+            "label_conventions": [
+                "midi_105_start_marker",
+                "midi_106_end_marker",
+                "midi_105_sustained_span_end",
+            ],
+        },
+        prepare_schema=VOCALS_ACTIVITY_PREPARE_SCHEMA,
+        train_schema=VOCALS_ACTIVITY_TRAIN_SCHEMA,
+        checkpoint_outputs=("vocals.phrase_boundaries",),
+        inference_capability=None,
+        status="catalog_ready",
+        preparation_status="available",
+        training_status="available",
+        private_request_fields=("catalog_root",),
+        catalog_inspection_option_keys=(
+            "audio_role",
+            "fallback_audio_role",
+            "required_difficulty",
+        ),
+        training_requirements=(
+            "vocal_activity_pitch_component/v1",
+            "vocal_lyric_tokenizer_and_alignment/v1",
+            "vocal_talky_target_encoder/v1",
+            "vocal_harmony_source_policy/v1",
+            "vocal_chart_composition_contract/v1",
+            "vocal_held_out_chart_evaluation/v1",
+            "vocal_profile_package/v1",
         ),
     ),
     PipelineDescriptor(
@@ -575,7 +650,7 @@ PIPELINES = (
                             CATALOG_TASK_LABEL_SCHEMAS[task_kind].get("track_prefixes", []),
                         ),
                     }
-                    if task_kind in PRO_TRAINING_CONTRACTS
+                    if task_kind in {*PRO_TRAINING_CONTRACTS, "vocals"}
                     else {}
                 ),
             },
@@ -608,9 +683,10 @@ PIPELINES = (
             training_status=(
                 "available" if task_kind.startswith(("fret_mapper_", "section_")) else "planned"
             ),
-            private_request_fields=("catalog_root",)
-            if task_kind.startswith(("fret_mapper_", "section_"))
-            else (),
+            # Every catalog task view requires a private catalog root during
+            # preparation.  Training-only private fields must never be
+            # inferred from source layout by an OCTAVE renderer.
+            private_request_fields=("catalog_root",),
             catalog_inspection_option_keys=(
                 "audio_role",
                 "fallback_audio_role",
@@ -628,10 +704,15 @@ PIPELINES = (
                 if task_kind.startswith("section_")
                 else PLANNED_TRAINING_REQUIREMENTS.get(task_kind, ())
             ),
-            training_contract=PRO_TRAINING_CONTRACTS.get(task_kind),
+            training_contract=(
+                VOCALS_TRAINING_CONTRACT
+                if task_kind == "vocals"
+                else PRO_TRAINING_CONTRACTS.get(task_kind)
+            ),
         )
         for task_kind, pipeline_id in sorted(CATALOG_TASK_PIPELINES.items())
-        if task_kind not in {"bass_onset_fret", "keys_onset_fret", "vocals_activity"}
+        if task_kind
+        not in {"bass_onset_fret", "keys_onset_fret", "vocals_activity", "vocals_phrase_boundaries"}
     ),
 )
 
@@ -2195,7 +2276,7 @@ def _inspect_pipeline_catalog(
             fallback_role=options.get("fallback_audio_role", "mix"),
             required_difficulty=options.get("required_difficulty", "expert"),
         )
-    if pipeline_id == "vocals.note-activity/v1":
+    if pipeline_id in {"vocals.note-activity/v1", "vocals.phrase-boundaries/v1"}:
         permitted = {
             "audio_role",
             "fallback_audio_role",
@@ -2401,7 +2482,7 @@ def prepare_dataset_request(request_path: Path) -> dict[str, object]:
         written = write_catalog_task_manifest(output, manifest)
         record_count = manifest["summary"]["record_count"]
         task_view_id = _task_view_digest(manifest)
-    elif pipeline_id == "vocals.note-activity/v1":
+    elif pipeline_id in {"vocals.note-activity/v1", "vocals.phrase-boundaries/v1"}:
         permitted = {
             "audio_role",
             "fallback_audio_role",
@@ -2411,7 +2492,12 @@ def prepare_dataset_request(request_path: Path) -> dict[str, object]:
         }
         if set(options) - permitted:
             raise WorkerRequestError("unsupported Vocal preparation option")
-        manifest = build_catalog_task_manifest(catalog_root, "vocals_activity", **options)
+        task_kind = (
+            "vocals_activity"
+            if pipeline_id == "vocals.note-activity/v1"
+            else "vocals_phrase_boundaries"
+        )
+        manifest = build_catalog_task_manifest(catalog_root, task_kind, **options)
         written = write_catalog_task_manifest(output, manifest)
         record_count = manifest["summary"]["record_count"]
         task_view_id = _task_view_digest(manifest)
@@ -2503,6 +2589,7 @@ def _read_train_request(request_path: Path) -> dict[str, Any]:
         "bass.onset-fret/v1",
         "keys.onset-fret/v1",
         "vocals.note-activity/v1",
+        "vocals.phrase-boundaries/v1",
         "drums.onset-classifier/v1",
         "strum.fret-mapper/guitar/v1",
         "strum.fret-mapper/bass/v1",
@@ -3073,6 +3160,47 @@ def run_training_request(request_path: Path) -> dict[str, object]:
         except (VocalsTrainingError, OSError, TypeError, ValueError) as error:
             raise WorkerRequestError(
                 "Vocal training request failed validation or execution"
+            ) from error
+        return {
+            "status": "completed",
+            "pipeline_id": pipeline_id,
+            "model_id": preflight["model_id"],
+            "bundle_name": Path(result["bundle_dir"]).name,
+            "manifest_sha256": preflight["manifest_sha256"],
+            "components": preflight["components"],
+            "metrics": result["metrics"],
+            "deployment_status": result["deployment_status"],
+        }
+    if pipeline_id == "vocals.phrase-boundaries/v1":
+        from src.vocals_phrase_worker_training import (  # noqa: PLC0415
+            VocalPhraseTrainingError,
+            run_catalog_vocal_phrase_training,
+        )
+        from src.vocals_worker_training import VocalsTrainingOptions  # noqa: PLC0415
+
+        if "parent_bundle" in request:
+            raise WorkerRequestError("Vocal phrase training does not accept parent_bundle")
+        catalog_root = request.get("catalog_root")
+        if not isinstance(catalog_root, str) or not catalog_root:
+            raise WorkerRequestError("Vocal phrase training requires worker-local catalog_root")
+        try:
+            options = VocalsTrainingOptions.from_mapping(request["options"])
+            revision, _dirty = _revision()
+            result = run_catalog_vocal_phrase_training(
+                task_view_path=Path(request["task_view"]),
+                output_dir=Path(request["output"]),
+                catalog_root=Path(catalog_root),
+                options=options,
+                strum_revision=revision,
+            )
+            preflight = preflight_bundle(
+                result["bundle_dir"], required_components=descriptor.checkpoint_outputs
+            )
+        except (BundleValidationError, CatalogValidationError):
+            raise
+        except (VocalPhraseTrainingError, OSError, TypeError, ValueError) as error:
+            raise WorkerRequestError(
+                "Vocal phrase training request failed validation or execution"
             ) from error
         return {
             "status": "completed",
