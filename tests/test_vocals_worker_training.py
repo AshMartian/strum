@@ -10,6 +10,11 @@ import numpy as np
 import pytest
 import soundfile as sf
 
+from scripts.preprocess_vocal_lyric_alignment import (
+    TOKEN_TO_ID,
+    prepare_vocal_lyric_alignment,
+    tokenize_lyric,
+)
 from scripts.preprocess_vocal_phrase_boundaries import prepare_vocal_phrase_boundaries
 from scripts.preprocess_vocals_frames import (
     PITCH_CLASS_COUNT,
@@ -17,6 +22,8 @@ from scripts.preprocess_vocals_frames import (
     parse_vocal_events,
     prepare_vocals_frames,
 )
+from scripts.train_vocal_lyric_alignment import TrainingSettings as LyricTrainingSettings
+from scripts.train_vocal_lyric_alignment import train_vocal_lyric_alignment
 from src.catalog_task_manifest import build_catalog_task_manifest
 from src.model_bundle import load_model_bundle
 from src.vocals_worker_training import VocalsTrainingError, _read_task_view
@@ -217,7 +224,124 @@ def test_vocals_pipeline_exposes_strict_private_catalog_training_contract() -> N
     assert set(contract["available_experiment_components"]) == {
         "vocals.frame_activity_pitch",
         "vocals.phrase_boundaries",
+        "vocals.lyric_alignment",
     }
+
+
+def test_vocal_lyric_pipeline_packages_exact_part_vocals_experiment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _catalog(tmp_path)
+    task_view = tmp_path / "views" / "vocals-lyrics.json"
+    prepare = tmp_path / "prepare-lyrics.json"
+    prepare.write_text(
+        json.dumps(
+            {
+                "catalog_root": str(tmp_path),
+                "pipeline_id": "vocals.lyric-alignment/v1",
+                "output": str(task_view),
+                "options": {"split_ratios": [50, 50, 0]},
+            }
+        )
+    )
+    prepare_dataset_request(prepare)
+    prepared = json.loads(task_view.read_text())
+    assert prepared["task"]["kind"] == "vocals_lyric_alignment"
+    assert prepared["task"]["label_schema"]["track_names"] == ["PART VOCALS"]
+    assert str(tmp_path) not in json.dumps(prepared)
+
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str]) -> None:
+        commands.append(command)
+        if command[1].endswith("train_vocal_lyric_alignment.py"):
+            checkpoints = Path(command[command.index("--checkpoint-dir") + 1])
+            checkpoints.mkdir(parents=True, exist_ok=True)
+            (checkpoints / "best.pt").write_bytes(b"vocal-lyric-weights")
+            (checkpoints / "history.json").write_text(
+                json.dumps([{"epoch": 1, "train_ctc_loss": 0.5, "val_ctc_loss": 0.4}])
+            )
+
+    monkeypatch.setattr("src.vocals_lyric_worker_training._run_script", fake_run)
+    output = tmp_path / "experiments" / "vocal-lyrics-v1"
+    train = tmp_path / "train-lyrics.json"
+    train.write_text(
+        json.dumps(
+            {
+                "pipeline_id": "vocals.lyric-alignment/v1",
+                "task_view": str(task_view),
+                "output": str(output),
+                "catalog_root": str(tmp_path),
+                "options": {"model_id": "catalog-vocal-lyrics-v1", "epochs": 1, "device": "cpu"},
+            }
+        )
+    )
+    result = run_training_request(train)
+    assert (
+        result["deployment_status"] == "requires_vocal_chart_composition_evaluation_and_packaging"
+    )
+    assert [component["id"] for component in result["components"]] == ["vocals.lyric_alignment"]
+    assert "preprocess_vocal_lyric_alignment.py" in commands[0][1]
+    assert "train_vocal_lyric_alignment.py" in commands[1][1]
+    bundle = output / "bundle"
+    assert str(tmp_path) not in (bundle / "strum-model-bundle.json").read_text()
+    assert str(tmp_path) not in (output / "experiment.json").read_text()
+    model = load_model_bundle(bundle, check_files=True)
+    assert set(model.components) == {"vocals.lyric_alignment"}
+    assert model.profiles == {}
+    config = json.loads((bundle / "configs" / "vocals-lyric-alignment.json").read_text())
+    assert config["excluded_outputs"] == ["pitch", "phrases", "talkies", "harmonies", "chart"]
+    assert config["tokenizer"]["vocabulary"][0] == "<blank>"
+
+
+def test_vocal_lyric_preprocessor_uses_observed_part_vocals_meta_events(tmp_path: Path) -> None:
+    _catalog(tmp_path, materialize=True)
+    task_view = tmp_path / "vocals-lyrics.json"
+    task_view.write_text(
+        json.dumps(build_catalog_task_manifest(tmp_path, "vocals_lyric_alignment"))
+    )
+    summary = prepare_vocal_lyric_alignment(
+        manifest_path=task_view,
+        catalog_root=tmp_path,
+        cache_dir=tmp_path / "lyric-cache",
+        splits=("train", "val"),
+        limit_songs=1,
+    )
+    assert summary["tokenizer"]["vocabulary_size"] > 2
+    assert summary["splits"]["train"]["song_count"] == 1
+    targets = np.load(tmp_path / "lyric-cache" / "train_targets.npy")
+    assert targets[0, :5].tolist() == tokenize_lyric("hello")
+    assert TOKEN_TO_ID["<blank>"] == 0
+
+
+def test_vocal_lyric_trainer_runs_one_cpu_batch_from_catalog_targets(tmp_path: Path) -> None:
+    _catalog(tmp_path, materialize=True)
+    task_view = tmp_path / "vocals-lyrics.json"
+    task_view.write_text(
+        json.dumps(build_catalog_task_manifest(tmp_path, "vocals_lyric_alignment"))
+    )
+    prepare_vocal_lyric_alignment(
+        manifest_path=task_view,
+        catalog_root=tmp_path,
+        cache_dir=tmp_path / "lyric-cache",
+        splits=("train", "val"),
+        limit_songs=1,
+    )
+    metrics = train_vocal_lyric_alignment(
+        LyricTrainingSettings(
+            cache_dir=tmp_path / "lyric-cache",
+            checkpoint_dir=tmp_path / "lyric-checkpoints",
+            epochs=1,
+            batch_size=1,
+            learning_rate=0.0003,
+            device="cpu",
+            max_train_batches=1,
+            max_val_batches=1,
+            seed=7,
+        )
+    )
+    assert set(metrics) == {"train_ctc_loss", "val_ctc_loss"}
+    assert (tmp_path / "lyric-checkpoints" / "best.pt").is_file()
 
 
 def test_vocal_preprocessor_reads_part_vocals_not_guitar(tmp_path: Path) -> None:
@@ -226,6 +350,7 @@ def test_vocal_preprocessor_reads_part_vocals_not_guitar(tmp_path: Path) -> None
     events = parse_vocal_events(path)
     assert events["notes"] == [{"start": 0.0, "end": 0.5, "pitch": 60}]
     assert events["lyric_event_count"] == 1
+    assert events["lyric_events"] == [{"time": 0.0, "text": "hello", "message_type": "lyrics"}]
     assert events["phrase_marker_count"] == 2
     assert events["phrase_start_events"] == [0.0]
     assert events["phrase_end_events"] == [0.5]

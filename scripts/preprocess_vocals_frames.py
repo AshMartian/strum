@@ -104,6 +104,10 @@ def parse_vocal_events(midi_path: Path, *, label_track: str = "PART VOCALS") -> 
     active: dict[int, list[float]] = {}
     notes: list[dict[str, float | int]] = []
     lyric_events = 0
+    # Keep the source event times and raw strings.  Downstream components may
+    # derive their own token language, but must never look at lyrics from a
+    # different track (for example HARM1) or guess text from a note sequence.
+    lyric_meta_events: list[dict[str, object]] = []
     phrase_markers = 0
     phrase_starts: list[float] = []
     phrase_ends: list[float] = []
@@ -114,6 +118,13 @@ def parse_vocal_events(midi_path: Path, *, label_track: str = "PART VOCALS") -> 
         at_seconds = _seconds_at_tick(tick, changes, midi.ticks_per_beat)
         if message.type in {"lyrics", "text"} and getattr(message, "text", "").strip():
             lyric_events += 1
+            lyric_meta_events.append(
+                {
+                    "time": at_seconds,
+                    "text": str(message.text),
+                    "message_type": message.type,
+                }
+            )
         if message.type == "note_on" and message.velocity > 0:
             if message.note == 105:
                 phrase_markers += 1
@@ -143,6 +154,7 @@ def parse_vocal_events(midi_path: Path, *, label_track: str = "PART VOCALS") -> 
     return {
         "notes": notes,
         "lyric_event_count": lyric_events,
+        "lyric_events": lyric_meta_events,
         "phrase_marker_count": phrase_markers,
         "phrase_start_events": _deduplicate_event_times(phrase_starts),
         "phrase_end_events": _deduplicate_event_times(phrase_ends),

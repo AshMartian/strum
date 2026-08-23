@@ -526,10 +526,15 @@ cannot be selected by `chart run`. A separate
 MIDI 105/106 markers or a sustained 105 phrase span, then writes only the
 `vocals.phrase_boundaries` component. Its deployment status is
 `requires_vocal_chart_composition_evaluation_and_packaging`, not a chart
-handler. The planned `strum.instrument-chart/vocals/v1` descriptor preserves
-the remaining lyric/text, talky, harmony, composition, held-out evaluation,
-packaging, and execution requirements in a machine-readable non-executable
-contract. No Vocal worker path may invent those outputs from a raw component.
+handler. `vocals.lyric-alignment/v1` is a third bounded component: it trains a
+character CTC acoustic encoder solely from observed `lyrics`/`text` meta
+events on exact `PART VOCALS`, keeping the MIDI event timestamp alongside the
+local target window. It neither imports external lyrics nor decides talkies,
+harmonies, phrases, or chart structure. The planned
+`strum.instrument-chart/vocals/v1` descriptor preserves the remaining talky,
+harmony, composition, held-out evaluation, packaging, and execution
+requirements in a machine-readable non-executable contract. No Vocal worker
+path may invent those outputs from a raw component.
 
 ## 11. Hardware
 

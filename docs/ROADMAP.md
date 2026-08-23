@@ -74,12 +74,12 @@ presented as a successful OCTAVE auto-chart result.
   validation/packaging path. Bass now has its own held-out `PART BASS`
   evaluator and hash-verified Expert-only profile/runtime; Keys has the same
   distinct held-out evaluator and Expert-only runtime boundary.
-- ✅ Catalog-backed, worker-trainable Vocal frame activity/sung-pitch and
-  lead-phrase-boundary experiments. The exact `PART VOCALS` source task emits
-  separate `vocals.frame_activity_pitch` and `vocals.phrase_boundaries`
-  experiment components; no raw component is a profile. The planned generic
-  Vocal descriptor publishes the remaining lyric, talky, harmony, composition,
-  held-out evaluation, packaging, and execution stages.
+- ✅ Catalog-backed, worker-trainable Vocal frame activity/sung-pitch,
+  lead-phrase-boundary, and observed-lyric/alignment experiments. The exact
+  `PART VOCALS` source tasks emit separate `vocals.frame_activity_pitch`,
+  `vocals.phrase_boundaries`, and `vocals.lyric_alignment` components; no raw
+  component is a profile. The planned generic Vocal descriptor retains talky,
+  harmony, composition, held-out evaluation, packaging, and execution stages.
 - ✅ Catalog-backed, worker-trainable Guitar/Bass fret-mapper experiments.
   They require the `pitch` extra, preserve catalog train/validation splits,
   record the Basic Pitch distribution/version that generated their features,

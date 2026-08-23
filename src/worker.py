@@ -253,7 +253,7 @@ PLANNED_TRAINING_REQUIREMENTS: dict[str, tuple[str, ...]] = {
     "vocals": (
         "vocal_activity_pitch_component/v1",
         "vocal_phrase_boundary_component/v1",
-        "vocal_lyric_tokenizer_and_alignment/v1",
+        "vocal_lyric_ctc_component/v1",
         "vocal_talky_target_encoder/v1",
         "vocal_harmony_source_policy/v1",
         "vocal_chart_composition_contract/v1",
@@ -318,6 +318,7 @@ VOCALS_TRAINING_CONTRACT: dict[str, object] = {
     "available_experiment_components": [
         "vocals.frame_activity_pitch",
         "vocals.phrase_boundaries",
+        "vocals.lyric_alignment",
     ],
     "required_stages": list(PLANNED_TRAINING_REQUIREMENTS["vocals"]),
     "execution": {"status": "not_available", "inference_capability": None},
@@ -621,6 +622,43 @@ PIPELINES = (
         ),
     ),
     PipelineDescriptor(
+        id="vocals.lyric-alignment/v1",
+        display_name="Vocals lyric alignment",
+        kind="audio_to_vocal_labels",
+        version=1,
+        catalog_requirements={
+            "instrument": "vocals",
+            "difficulties": ["expert"],
+            "audio_roles": ["vocals", "mix"],
+            "audio_policy": "prefer:vocals,fallback:mix",
+            "label_tracks": ["PART VOCALS"],
+            "label_outputs": ["observed_lyric_character_tokens", "observed_lyric_event_alignment"],
+            "label_conventions": ["part-vocals-lyrics-or-text-meta-events/v1"],
+        },
+        prepare_schema=VOCALS_ACTIVITY_PREPARE_SCHEMA,
+        train_schema=VOCALS_ACTIVITY_TRAIN_SCHEMA,
+        checkpoint_outputs=("vocals.lyric_alignment",),
+        inference_capability=None,
+        status="catalog_ready",
+        preparation_status="available",
+        training_status="available",
+        private_request_fields=("catalog_root",),
+        catalog_inspection_option_keys=(
+            "audio_role",
+            "fallback_audio_role",
+            "required_difficulty",
+        ),
+        training_requirements=(
+            "vocal_activity_pitch_component/v1",
+            "vocal_phrase_boundary_component/v1",
+            "vocal_talky_target_encoder/v1",
+            "vocal_harmony_source_policy/v1",
+            "vocal_chart_composition_contract/v1",
+            "vocal_held_out_chart_evaluation/v1",
+            "vocal_profile_package/v1",
+        ),
+    ),
+    PipelineDescriptor(
         id="drums.onset-classifier/v1",
         display_name="Drums onset + velocity",
         kind="audio_to_chart",
@@ -736,7 +774,13 @@ PIPELINES = (
         )
         for task_kind, pipeline_id in sorted(CATALOG_TASK_PIPELINES.items())
         if task_kind
-        not in {"bass_onset_fret", "keys_onset_fret", "vocals_activity", "vocals_phrase_boundaries"}
+        not in {
+            "bass_onset_fret",
+            "keys_onset_fret",
+            "vocals_activity",
+            "vocals_phrase_boundaries",
+            "vocals_lyric_alignment",
+        }
     ),
 )
 
@@ -2550,7 +2594,11 @@ def _inspect_pipeline_catalog(
             fallback_role=options.get("fallback_audio_role", "mix"),
             required_difficulty=options.get("required_difficulty", "expert"),
         )
-    if pipeline_id in {"vocals.note-activity/v1", "vocals.phrase-boundaries/v1"}:
+    if pipeline_id in {
+        "vocals.note-activity/v1",
+        "vocals.phrase-boundaries/v1",
+        "vocals.lyric-alignment/v1",
+    }:
         permitted = {
             "audio_role",
             "fallback_audio_role",
@@ -2756,7 +2804,11 @@ def prepare_dataset_request(request_path: Path) -> dict[str, object]:
         written = write_catalog_task_manifest(output, manifest)
         record_count = manifest["summary"]["record_count"]
         task_view_id = _task_view_digest(manifest)
-    elif pipeline_id in {"vocals.note-activity/v1", "vocals.phrase-boundaries/v1"}:
+    elif pipeline_id in {
+        "vocals.note-activity/v1",
+        "vocals.phrase-boundaries/v1",
+        "vocals.lyric-alignment/v1",
+    }:
         permitted = {
             "audio_role",
             "fallback_audio_role",
@@ -2769,7 +2821,11 @@ def prepare_dataset_request(request_path: Path) -> dict[str, object]:
         task_kind = (
             "vocals_activity"
             if pipeline_id == "vocals.note-activity/v1"
-            else "vocals_phrase_boundaries"
+            else (
+                "vocals_phrase_boundaries"
+                if pipeline_id == "vocals.phrase-boundaries/v1"
+                else "vocals_lyric_alignment"
+            )
         )
         manifest = build_catalog_task_manifest(catalog_root, task_kind, **options)
         written = write_catalog_task_manifest(output, manifest)
@@ -2889,6 +2945,7 @@ def _read_train_request(request_path: Path) -> dict[str, Any]:
         "keys.onset-fret/v1",
         "vocals.note-activity/v1",
         "vocals.phrase-boundaries/v1",
+        "vocals.lyric-alignment/v1",
         "drums.onset-classifier/v1",
         "strum.fret-mapper/guitar/v1",
         "strum.fret-mapper/bass/v1",
@@ -3500,6 +3557,47 @@ def run_training_request(request_path: Path) -> dict[str, object]:
         except (VocalPhraseTrainingError, OSError, TypeError, ValueError) as error:
             raise WorkerRequestError(
                 "Vocal phrase training request failed validation or execution"
+            ) from error
+        return {
+            "status": "completed",
+            "pipeline_id": pipeline_id,
+            "model_id": preflight["model_id"],
+            "bundle_name": Path(result["bundle_dir"]).name,
+            "manifest_sha256": preflight["manifest_sha256"],
+            "components": preflight["components"],
+            "metrics": result["metrics"],
+            "deployment_status": result["deployment_status"],
+        }
+    if pipeline_id == "vocals.lyric-alignment/v1":
+        from src.vocals_lyric_worker_training import (  # noqa: PLC0415
+            VocalLyricTrainingError,
+            run_catalog_vocal_lyric_training,
+        )
+        from src.vocals_worker_training import VocalsTrainingOptions  # noqa: PLC0415
+
+        if "parent_bundle" in request:
+            raise WorkerRequestError("Vocal lyric training does not accept parent_bundle")
+        catalog_root = request.get("catalog_root")
+        if not isinstance(catalog_root, str) or not catalog_root:
+            raise WorkerRequestError("Vocal lyric training requires worker-local catalog_root")
+        try:
+            options = VocalsTrainingOptions.from_mapping(request["options"])
+            revision, _dirty = _revision()
+            result = run_catalog_vocal_lyric_training(
+                task_view_path=Path(request["task_view"]),
+                output_dir=Path(request["output"]),
+                catalog_root=Path(catalog_root),
+                options=options,
+                strum_revision=revision,
+            )
+            preflight = preflight_bundle(
+                result["bundle_dir"], required_components=descriptor.checkpoint_outputs
+            )
+        except (BundleValidationError, CatalogValidationError):
+            raise
+        except (VocalLyricTrainingError, OSError, TypeError, ValueError) as error:
+            raise WorkerRequestError(
+                "Vocal lyric training request failed validation or execution"
             ) from error
         return {
             "status": "completed",

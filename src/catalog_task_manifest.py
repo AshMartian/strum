@@ -56,6 +56,10 @@ PIPELINE_IDS = {
     # that experiment distinct from the activity/pitch task so neither task
     # can accidentally claim the other's component or future profile role.
     "vocals_phrase_boundaries": "vocals.phrase-boundaries/v1",
+    # Lyric text is a distinct event stream in PART VOCALS.  It must not be
+    # folded into pitched-activity or phrase-marker targets simply because all
+    # three live in the same MIDI track.
+    "vocals_lyric_alignment": "vocals.lyric-alignment/v1",
     "keys": "strum.instrument-chart/keys/v1",
     "vocals": "strum.instrument-chart/vocals/v1",
     "pro_guitar": "strum.instrument-chart/pro-guitar/v1",
@@ -73,6 +77,7 @@ DEFAULT_AUDIO_ROLES = {
     "keys_onset_fret": ("keys", "mix"),
     "vocals_activity": ("vocals", "mix"),
     "vocals_phrase_boundaries": ("vocals", "mix"),
+    "vocals_lyric_alignment": ("vocals", "mix"),
     "keys": ("keys", "mix"),
     "vocals": ("vocals", "mix"),
     "pro_guitar": ("guitar", "mix"),
@@ -90,6 +95,7 @@ TASK_INSTRUMENTS = {
     "keys_onset_fret": "keys",
     "vocals_activity": "vocals",
     "vocals_phrase_boundaries": "vocals",
+    "vocals_lyric_alignment": "vocals",
     "keys": "keys",
     "vocals": "vocals",
     "pro_guitar": "pro_guitar",
@@ -136,6 +142,11 @@ TASK_LABEL_SCHEMAS: dict[str, dict[str, object]] = {
         "id": "vocals-pitch-phrase-lyrics-midi/v1",
         "track_names": ["PART VOCALS"],
         "difficulty_encoding": "vocal-phrase-boundary-events/v1",
+    },
+    "vocals_lyric_alignment": {
+        "id": "vocals-pitch-phrase-lyrics-midi/v1",
+        "track_names": ["PART VOCALS"],
+        "difficulty_encoding": "vocal-lyric-meta-events/v1",
     },
     "keys": {
         "id": "five-lane-midi/v1",

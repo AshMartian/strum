@@ -626,7 +626,11 @@ pitch 36--84 from a vocal stem (or approved mix fallback). The companion
 `vocals.phrase-boundaries/v1` task derives lead phrase starts/ends only from
 the supported MIDI 105/106 marker convention or a sustained 105 span. Its
 separate `vocals.phrase_boundaries` component is likewise experiment-only.
-Neither path trains word recognition, talkies, harmonies, or a playable chart.
+`vocals.lyric-alignment/v1` separately derives CTC targets only from observed
+`lyrics`/`text` meta events on that same exact track, retaining their MIDI
+timestamps as local alignment supervision. It is not an external-lyrics
+lookup, a language-model correction, talky encoding, harmony source, or a
+playable chart. All three raw components remain experiment-only.
 The planned `strum.instrument-chart/vocals/v1` descriptor publishes those
 remaining machine-readable stages and rejects chart execution until a composed
 Vocal profile has passed held-out chart evaluation and packaging. OCTAVE must
