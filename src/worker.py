@@ -45,7 +45,13 @@ from src.catalog_task_manifest import (
     build_catalog_task_manifest,
     write_catalog_task_manifest,
 )
-from src.model_bundle import BundleValidationError, InferenceProfile, ModelBundle, load_model_bundle
+from src.model_bundle import (
+    MANIFEST_FILENAME,
+    BundleValidationError,
+    InferenceProfile,
+    ModelBundle,
+    load_model_bundle,
+)
 from src.song_source_catalog import (
     AUDIO_ROLES,
     CATALOG_FILENAME,
@@ -62,6 +68,15 @@ MODEL_BUNDLE_SCHEMA_VERSIONS = (1,)
 MAX_ESTIMATED_STORAGE_BYTES = (1 << 63) - 1
 CHART_PREFLIGHT_FORMAT = "strum-chart-preflight/v1"
 CHART_RUN_FORMAT = "strum-chart-run/v1"
+MODEL_BUNDLE_DISCOVERY_FORMAT = "strum-model-bundle-discovery/v1"
+MODEL_BUNDLE_INSPECTION_FORMAT = "strum-model-bundle-inspection/v1"
+# A selected model directory is an operator-controlled local location, not a
+# general-purpose filesystem index.  These bounds make discovery predictable
+# and avoid an accidental scan of a large source tree while still supporting
+# normal ``models/<release>/<bundle>`` layouts.
+MAX_MODEL_DISCOVERY_DEPTH = 8
+MAX_DISCOVERED_MODEL_MANIFESTS = 256
+MODEL_DISCOVERY_IGNORED_DIRECTORIES = frozenset({".git", ".venv", "venv", "__pycache__"})
 CATALOG_STORAGE_ESTIMATE_SEMANTICS = (
     "sum of distinct catalog input assets selected by the declared policy; "
     "excludes generated task views, preprocessing caches, checkpoints, and existing catalog storage"
@@ -761,6 +776,7 @@ def _runtime_payload() -> dict[str, object]:
         "chart_run",
         "typed_chart_results",
         "model_bundle_preflight",
+        "checkpoint_discovery",
         "checkpoint_inspect",
         "checkpoint_package",
     ]
@@ -888,6 +904,199 @@ def validate_inference_profile(
         "profile_configuration_sha256": profile.configuration_sha256,
         "profile_configuration_byte_length": profile.configuration_byte_length,
         **({"composition": profile.graph.as_json()} if profile.graph is not None else {}),
+    }
+
+
+def _model_bundle_artifact_id(bundle: ModelBundle) -> str:
+    """Return a stable opaque identity for a discovered bundle.
+
+    The manifest digest lets a host keep its local model-root lookup private.
+    A model name is useful display metadata, but it must never be used as a
+    filesystem location or as the selected-bundle authority.
+    """
+    manifest_sha256 = _manifest_sha256(bundle)
+    if manifest_sha256 is None:
+        raise BundleValidationError("model bundle has no manifest identity")
+    return f"strum-model-bundle/{manifest_sha256}"
+
+
+def _safe_compatibility_summary(bundle: ModelBundle) -> dict[str, object]:
+    """Return the compatibility keys defined by the portable bundle schema.
+
+    Manifests may contain producer-specific compatibility annotations.  They
+    remain private to the manifest: discovery exposes only the runtime gates
+    understood by STRUM, never an arbitrary value that could be a local path.
+    """
+    return {
+        key: bundle.compatibility[key]
+        for key in ("manifest_schema", "strum_version", "strum_revision")
+        if key in bundle.compatibility
+    }
+
+
+def _profile_discovery_record(
+    bundle: ModelBundle, profile: InferenceProfile
+) -> dict[str, object] | None:
+    """Return one fully hash-verified profile record, or omit an invalid one.
+
+    Discovering a bundle must not turn a declared profile into a deployment
+    candidate merely because its manifest parsed.  This validates exactly the
+    profile's companion components without loading tensor data.  A valid
+    profile may still be non-executable when STRUM has not declared a chart
+    handler for its capability; OCTAVE can show that distinction but cannot
+    select it as an auto-chart default.
+    """
+    try:
+        preflight_bundle(bundle.root, required_components=profile.required_components)
+    except BundleValidationError:
+        return None
+    executable_policies = [
+        policy
+        for policy in profile.difficulty_policies
+        if _chart_execution_available(
+            capability=profile.capability,
+            difficulty_policy=policy,
+            instruments=profile.instruments,
+        )
+    ]
+    if executable_policies and not _executable_profile_contract_is_valid(bundle, profile):
+        executable_policies = []
+    return {
+        "profile_id": profile.profile_id,
+        "capability": profile.capability,
+        "instruments": list(profile.instruments),
+        "difficulty_policies": list(profile.difficulty_policies),
+        "required_components": list(profile.required_components),
+        "profile_configuration_sha256": profile.configuration_sha256,
+        "profile_configuration_byte_length": profile.configuration_byte_length,
+        "execution": {
+            "status": "available" if executable_policies else "not_available",
+            "difficulty_policies": executable_policies,
+        },
+    }
+
+
+def inspect_model_bundle(path: str | Path) -> dict[str, object]:
+    """Inspect one selected bundle with no model-root or checkpoint paths.
+
+    Unlike the older metadata-only inspection command, this checks manifest
+    file hashes before exposing a candidate.  It deliberately keeps valid but
+    profile-less experiment bundles visible as ``not_deployable`` so a host
+    can explain why a training result cannot be selected for auto-charting.
+    """
+    bundle = load_model_bundle(path, check_files=True)
+    preflight = preflight_bundle(bundle.root)
+    profiles = [
+        record
+        for profile in sorted(bundle.profiles.values(), key=lambda item: item.profile_id)
+        if (record := _profile_discovery_record(bundle, profile)) is not None
+    ]
+    return {
+        "format": MODEL_BUNDLE_INSPECTION_FORMAT,
+        "status": "ready",
+        "artifact_id": _model_bundle_artifact_id(bundle),
+        "model_id": bundle.model_id,
+        "manifest_sha256": preflight["manifest_sha256"],
+        "schema_version": bundle.schema_version,
+        "compatibility": _safe_compatibility_summary(bundle),
+        "components": [
+            {
+                "id": component["id"],
+                "sha256": component["sha256"],
+                "byte_length": component["byte_length"],
+            }
+            for component in preflight["components"]
+            if isinstance(component, dict)
+        ],
+        "profiles": profiles,
+        "rejected_profile_count": len(bundle.profiles) - len(profiles),
+        "deployment_status": (
+            "ready"
+            if any(
+                isinstance(profile.get("execution"), dict)
+                and profile["execution"].get("status") == "available"
+                for profile in profiles
+            )
+            else "not_deployable"
+        ),
+    }
+
+
+def _discover_model_manifest_paths(path: str | Path) -> tuple[list[Path], bool]:
+    """Find bounded manifests below one host-selected private model root."""
+    root = Path(path).expanduser().resolve()
+    if root.is_file():
+        if root.name != MANIFEST_FILENAME:
+            raise BundleValidationError("model discovery requires a bundle directory or manifest")
+        return [root], False
+    if not root.is_dir():
+        raise BundleValidationError("model discovery root is not a directory")
+
+    manifests: list[Path] = []
+    seen: set[Path] = set()
+    truncated = False
+    for current, directories, files in os.walk(root, followlinks=False):
+        current_path = Path(current)
+        try:
+            relative = current_path.relative_to(root)
+        except ValueError:
+            directories[:] = []
+            continue
+        directories[:] = [
+            name
+            for name in directories
+            if name not in MODEL_DISCOVERY_IGNORED_DIRECTORIES
+            and not (current_path / name).is_symlink()
+        ]
+        if len(relative.parts) >= MAX_MODEL_DISCOVERY_DEPTH:
+            directories[:] = []
+        if MANIFEST_FILENAME not in files:
+            continue
+        manifest = (current_path / MANIFEST_FILENAME).resolve()
+        try:
+            manifest.relative_to(root)
+        except ValueError:
+            continue
+        if manifest in seen:
+            continue
+        seen.add(manifest)
+        manifests.append(manifest)
+        if len(manifests) >= MAX_DISCOVERED_MODEL_MANIFESTS:
+            truncated = True
+            break
+    return sorted(manifests), truncated
+
+
+def discover_model_bundles(path: str | Path) -> dict[str, object]:
+    """Discover local bundle candidates without revealing their locations.
+
+    The caller owns the private ``path`` to a user-selected checkpoint folder.
+    It maps returned ``artifact_id`` values back to the selected roots in its
+    main process before requesting a later preflight/chart job.  Invalid
+    manifests are counted but not described, which avoids leaking filenames,
+    parser errors, or component paths to renderer clients.
+    """
+    manifests, truncated = _discover_model_manifest_paths(path)
+    candidates: list[dict[str, object]] = []
+    rejected_bundle_count = 0
+    for manifest in manifests:
+        try:
+            candidates.append(inspect_model_bundle(manifest))
+        except (BundleValidationError, OSError):
+            rejected_bundle_count += 1
+    profile_count = sum(
+        len(candidate["profiles"])
+        for candidate in candidates
+        if isinstance(candidate.get("profiles"), list)
+    )
+    return {
+        "format": MODEL_BUNDLE_DISCOVERY_FORMAT,
+        "status": "ready",
+        "candidate_count": len(candidates),
+        "profile_count": profile_count,
+        "rejected_bundle_count": rejected_bundle_count,
+        "truncated": truncated,
+        "candidates": candidates,
     }
 
 
@@ -1196,6 +1405,66 @@ def _chart_execution_available(
         and tuple(instruments) == (required[0],)
         and difficulty_policy == required[1]
     )
+
+
+def _executable_profile_contract_is_valid(bundle: ModelBundle, profile: InferenceProfile) -> bool:
+    """Verify the capability-specific config contract without deserializing tensors.
+
+    A hash-valid generic profile is not necessarily an executable STRUM
+    profile.  The Guitar, Bass, Keys, and Drums handlers each have a stricter
+    configuration/companion contract, while a learned transform must bind its
+    lone component and declared instrument.  Discovery uses this same narrow
+    check before advertising an executable option.
+    """
+    try:
+        if profile.capability == "guitar.hybrid-v2-rule/v1":
+            from src.inference.guitar_hybrid_profile import (  # noqa: PLC0415
+                load_guitar_hybrid_rule_profile,
+            )
+
+            load_guitar_hybrid_rule_profile(bundle, profile.profile_id)
+        elif profile.capability == "guitar.neural-v1-expert/v1":
+            from src.inference.guitar_neural_profile import (  # noqa: PLC0415
+                load_guitar_neural_expert_profile,
+            )
+
+            load_guitar_neural_expert_profile(bundle, profile.profile_id)
+        elif profile.capability == "bass.neural-v1-expert/v1":
+            from src.inference.bass_neural_profile import (  # noqa: PLC0415
+                load_bass_neural_expert_profile,
+            )
+
+            load_bass_neural_expert_profile(bundle, profile.profile_id)
+        elif profile.capability == "keys.neural-v1-expert/v1":
+            from src.inference.keys_neural_profile import (  # noqa: PLC0415
+                load_keys_neural_expert_profile,
+            )
+
+            load_keys_neural_expert_profile(bundle, profile.profile_id)
+        elif profile.capability == "drums.v14-expert/v1":
+            from src.inference.drums_v14_profile import (  # noqa: PLC0415
+                load_drums_v14_expert_profile,
+            )
+
+            load_drums_v14_expert_profile(bundle, profile.profile_id)
+        elif profile.capability == "difficulty.transform/v1":
+            if len(profile.required_components) != 1:
+                return False
+            component = bundle.component(profile.required_components[0])
+            if component is None or component.architecture != "EventTransformMLP/v1":
+                return False
+            if profile.difficulty_policies != (f"learned:{component.name}",):
+                return False
+            _chart_transform_metadata(
+                bundle,
+                component.name,
+                requested_instruments=profile.instruments,
+            )
+        else:
+            return False
+    except (BundleValidationError, WorkerRequestError, OSError):
+        return False
+    return True
 
 
 def _complete_chart_stage(
@@ -3544,6 +3813,11 @@ def _parse_args() -> argparse.Namespace:
     preflight.add_argument("--json", action="store_true")
     checkpoint = commands.add_parser("checkpoint", help="inspect checkpoint bundle metadata")
     checkpoint_commands = checkpoint.add_subparsers(dest="checkpoint_command", required=True)
+    discover = checkpoint_commands.add_parser(
+        "discover", help="discover valid model bundles below one private model folder"
+    )
+    discover.add_argument("--model-root", type=Path, required=True)
+    discover.add_argument("--json", action="store_true")
     inspect = checkpoint_commands.add_parser("inspect", help="inspect a checkpoint bundle")
     inspect.add_argument("--model-root", type=Path, required=True)
     inspect.add_argument("--json", action="store_true")
@@ -3770,19 +4044,10 @@ def main() -> int:
             )
             return 0
         if args.command == "checkpoint" and args.checkpoint_command == "inspect":
-            bundle = load_model_bundle(args.model_root, check_files=False)
-            _print_json(
-                {
-                    "model_id": bundle.model_id,
-                    "manifest_sha256": _manifest_sha256(bundle),
-                    "components": sorted(bundle.components),
-                    "profiles": [
-                        bundle.profile_summary(bundle.profiles[profile_id])
-                        for profile_id in sorted(bundle.profiles)
-                    ],
-                    "compatibility": bundle.compatibility,
-                }
-            )
+            _print_json(inspect_model_bundle(args.model_root))
+            return 0
+        if args.command == "checkpoint" and args.checkpoint_command == "discover":
+            _print_json(discover_model_bundles(args.model_root))
             return 0
         if args.command == "checkpoint" and args.checkpoint_command == "package":
             if args.json_events:

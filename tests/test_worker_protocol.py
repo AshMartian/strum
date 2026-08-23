@@ -22,8 +22,10 @@ from src.worker import (
     _run_without_legacy_output,
     _runtime_payload,
     _write_expert_guitar_midi,
+    discover_model_bundles,
     inspect_catalog,
     main,
+    inspect_model_bundle,
     preflight_bundle,
     preflight_chart_request,
     prepare_dataset_request,
@@ -154,6 +156,44 @@ def _composed_profile_bundle(root: Path) -> Path:
     return root
 
 
+def _discovery_bundle(
+    root: Path,
+    *,
+    model_id: str,
+    profile_id: str,
+    capability: str,
+    instrument: str,
+) -> Path:
+    checkpoint = root / "weights" / "model.pt"
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_bytes(f"{model_id}-weights".encode())
+    (root / MANIFEST_FILENAME).write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "model_id": model_id,
+                "compatibility": {"manifest_schema": 1, "strum_version": ">=0.1.0"},
+                "components": {
+                    f"{instrument}.onset": {
+                        "checkpoint": "weights/model.pt",
+                        "sha256": hashlib.sha256(checkpoint.read_bytes()).hexdigest(),
+                        "byte_length": checkpoint.stat().st_size,
+                    }
+                },
+                "profiles": {
+                    profile_id: {
+                        "capability": capability,
+                        "instruments": [instrument],
+                        "required_components": [f"{instrument}.onset"],
+                        "difficulty_policies": ["expert_only"],
+                    }
+                },
+            }
+        )
+    )
+    return root
+
+
 def test_probe_declares_versioned_runtime_and_available_pipelines() -> None:
     payload = _runtime_payload()
 
@@ -165,6 +205,7 @@ def test_probe_declares_versioned_runtime_and_available_pipelines() -> None:
     assert "typed_chart_results" in payload["capabilities"]
     assert isinstance(payload["optional_dependencies"]["basic_pitch"]["available"], bool)
     assert "model_bundle_preflight" in payload["capabilities"]
+    assert "checkpoint_discovery" in payload["capabilities"]
     assert payload["chart_result_formats"] == [
         "strum-chart-preflight/v1",
         "strum-chart-run/v1",
@@ -925,6 +966,163 @@ def test_profile_validation_requires_declared_companions_and_difficulty_policy(
         validate_inference_profile(
             root, profile_id="guitar-default", difficulty_policy="learned:bad"
         )
+
+
+def test_checkpoint_discovery_returns_path_free_dynamic_profile_candidates(tmp_path: Path) -> None:
+    model_root = tmp_path / "user-selected-checkpoints"
+    _discovery_bundle(
+        model_root / "guitar",
+        model_id="guitar-candidate",
+        profile_id="guitar-profile",
+        capability="guitar.neural-v1-expert/v1",
+        instrument="guitar",
+    )
+    _discovery_bundle(
+        model_root / "bass",
+        model_id="bass-candidate",
+        profile_id="bass-profile",
+        capability="bass.neural-v1-expert/v1",
+        instrument="bass",
+    )
+    _discovery_bundle(
+        model_root / "nested" / "keys",
+        model_id="keys-candidate",
+        profile_id="keys-profile",
+        capability="keys.neural-v1-expert/v1",
+        instrument="keys",
+    )
+    _discovery_bundle(
+        model_root / "drums",
+        model_id="drums-candidate",
+        profile_id="drums-profile",
+        capability="drums.v14-expert/v1",
+        instrument="drums",
+    )
+    invalid = model_root / "invalid"
+    invalid.mkdir(parents=True)
+    (invalid / MANIFEST_FILENAME).write_text("not a model bundle")
+
+    result = discover_model_bundles(model_root)
+
+    assert result["format"] == "strum-model-bundle-discovery/v1"
+    assert result["candidate_count"] == 4
+    assert result["profile_count"] == 4
+    assert result["rejected_bundle_count"] == 1
+    candidates = result["candidates"]
+    assert isinstance(candidates, list)
+    assert {
+        (candidate["model_id"], candidate["profiles"][0]["instruments"][0])
+        for candidate in candidates
+    } == {
+        ("guitar-candidate", "guitar"),
+        ("bass-candidate", "bass"),
+        ("keys-candidate", "keys"),
+        ("drums-candidate", "drums"),
+    }
+    assert all(
+        candidate["artifact_id"].startswith("strum-model-bundle/") for candidate in candidates
+    )
+    assert all(candidate["deployment_status"] == "not_deployable" for candidate in candidates)
+    assert str(model_root) not in json.dumps(result)
+
+
+def test_checkpoint_inspection_requires_hashes_and_marks_only_typed_profile_executable(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "drums"
+    checkpoint = root / "weights" / "v14.pt"
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_bytes(b"verified V14 checkpoint")
+    component_config = root / "configs" / "drums-v14.yaml"
+    component_config.parent.mkdir()
+    component_config.write_text("model: drums-v14\n")
+    profile_config = root / "profiles" / "drums-v14.json"
+    profile_config.parent.mkdir()
+    profile_config.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "format": "strum-drums-v14-expert-profile/v1",
+                "model_architecture": "TwoStageDrumsCRNN/v14",
+                "preprocessing": "drums-logmel-44100-2048-512-128-v1",
+                "segment_duration_seconds": 10,
+                "overlap": 0.5,
+                "onset_threshold": 0.4,
+                "class_thresholds": [0.3, 0.25, 0.35, 0.12, 0.28, 0.12, 0.35, 0.12],
+                "min_distance_ms": 20,
+                "postprocess": "none",
+                "class_to_midi": [96, 97, 98, 98, 99, 99, 100, 100],
+                "model_parameters": {
+                    "n_mels": 128,
+                    "conv_channels": [64, 128, 256, 512],
+                    "freq_subbands": [32, 64, 96, 128],
+                    "subband_proj_dim": 256,
+                    "lstm_hidden": 640,
+                    "lstm_layers": 3,
+                    "attention_heads": 10,
+                    "attention_type": "flash",
+                    "attention_window": 512,
+                    "dropout": 0.0,
+                    "onset_detector_hidden": 320,
+                    "classifier_hidden": 640,
+                    "num_classes": 8,
+                    "predict_velocity": True,
+                },
+            }
+        )
+    )
+    (root / MANIFEST_FILENAME).write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "model_id": "drums-v14-candidate",
+                "compatibility": {"manifest_schema": 1, "strum_version": ">=0.1.0"},
+                "components": {
+                    "drums.v14": {
+                        "checkpoint": "weights/v14.pt",
+                        "sha256": hashlib.sha256(checkpoint.read_bytes()).hexdigest(),
+                        "byte_length": checkpoint.stat().st_size,
+                        "config": "configs/drums-v14.yaml",
+                        "config_sha256": hashlib.sha256(component_config.read_bytes()).hexdigest(),
+                        "config_byte_length": component_config.stat().st_size,
+                        "architecture": "TwoStageDrumsCRNN/v14",
+                        "preprocessing": "drums-logmel-44100-2048-512-128-v1",
+                    }
+                },
+                "profiles": {
+                    "drums-v14-expert": {
+                        "capability": "drums.v14-expert/v1",
+                        "instruments": ["drums"],
+                        "required_components": ["drums.v14"],
+                        "difficulty_policies": ["expert_only"],
+                        "configuration": "profiles/drums-v14.json",
+                        "configuration_sha256": hashlib.sha256(
+                            profile_config.read_bytes()
+                        ).hexdigest(),
+                        "configuration_byte_length": profile_config.stat().st_size,
+                    }
+                },
+            }
+        )
+    )
+
+    result = inspect_model_bundle(root)
+
+    assert result["format"] == "strum-model-bundle-inspection/v1"
+    assert result["deployment_status"] == "ready"
+    assert result["profiles"] == [
+        {
+            "profile_id": "drums-v14-expert",
+            "capability": "drums.v14-expert/v1",
+            "instruments": ["drums"],
+            "difficulty_policies": ["expert_only"],
+            "required_components": ["drums.v14"],
+            "profile_configuration_sha256": hashlib.sha256(profile_config.read_bytes()).hexdigest(),
+            "profile_configuration_byte_length": profile_config.stat().st_size,
+            "execution": {"status": "available", "difficulty_policies": ["expert_only"]},
+        }
+    ]
+    assert str(root) not in json.dumps(result)
 
 
 def test_chart_preflight_returns_an_explicit_non_execution_plan(tmp_path: Path) -> None:

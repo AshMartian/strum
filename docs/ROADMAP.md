@@ -27,8 +27,11 @@ presented as a successful OCTAVE auto-chart result.
 ## Shipped
 
 - ✅ Versioned worker discovery: runtime probe, dynamic pipeline descriptors,
-  catalog inspection, safe task-view preparation, model/checkpoint inspection,
-  profile validation, chart preflight, and chart execution.
+  catalog inspection, safe task-view preparation, bounded path-free
+  checkpoint-folder discovery/inspection, profile validation, chart preflight,
+  and chart execution. A discovered bundle is deployable only when a typed
+  profile validates its companion hashes and configuration and STRUM declares
+  a matching chart handler.
 - ✅ OCTAVE catalog boundary: STRUM consumes only
   `octave-song-source-catalog/v1` managed assets marked
   `training_use: allowed`; it never reads imported package/source locations.

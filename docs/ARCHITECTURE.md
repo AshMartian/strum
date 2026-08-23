@@ -422,8 +422,14 @@ OCTAVE renders only the selected descriptor's `prepare_schema` and
 job ID, monotonic sequence, stage, progress, state, and safe code/message.
 OCTAVE owns cancellation by terminating the supervised process group, rather
 than requiring STRUM to retain a private-path job. A model folder is validated
-separately from a STRUM runtime with `checkpoint inspect`, `inference profile
-validate`, `chart preflight`, and `chart run`.
+separately from a STRUM runtime with `checkpoint discover`, `checkpoint
+inspect`, `inference profile validate`, `chart preflight`, and `chart run`.
+Discovery is a bounded private-folder scan that returns opaque bundle artifact
+IDs and path-free, hash-verified profile metadata. It marks only profiles with
+both a verified typed configuration and a declared chart handler as executable;
+raw experiments and future capability contracts remain visible but
+non-deployable. OCTAVE must retain its artifact-ID-to-folder lookup in the main
+process and never pass a folder to the renderer.
 
 Model-bundle profiles can additionally carry a `strum-profile-composition/v1`
 graph. This is the safe declaration for a composed auto-chart profile: stages

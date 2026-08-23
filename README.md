@@ -363,6 +363,26 @@ python -m src.model_bundle validate /path/to/bundle --check-files --verify-hashe
 python -m src.model_bundle list /path/to/models
 ```
 
+For OCTAVE or another host, use the worker discovery boundary instead of
+walking that folder or deriving profile support from filenames:
+
+```bash
+strum-worker checkpoint discover --model-root /private/models --json
+strum-worker checkpoint inspect --model-root /private/models/release-a --json
+```
+
+`checkpoint discover` recursively scans one bounded user-selected folder
+(eight levels, at most 256 manifests), validates component hashes without
+loading tensors, and returns only opaque manifest-derived `artifact_id` values,
+model/profile identities, component hashes, and capability status. It never
+returns the selected folder, manifest location, or checkpoint location. Hosts
+keep the `artifact_id` → local-folder mapping in their main process. A profile
+is `execution.available` only when its declared component hashes *and* its
+Guitar/Bass/Keys/Drums/transform-specific configuration contract pass; a
+hash-valid experiment or a profile without a STRUM chart handler remains
+`not_deployable`. Selecting a candidate still requires `inference profile
+validate` and chart preflight for the explicit instruments and policy.
+
 The current model-bundle validator recognizes `drums.v14_onset`,
 `drums.ensemble.v2` through `drums.ensemble.v17`, and `guitar.onset`.
 `compatibility.strum_revision` is optional but recommended for portable
