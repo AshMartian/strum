@@ -93,11 +93,20 @@ def test_contract_is_lead_only_planned_and_cannot_deploy() -> None:
     ]
     assert "ctc-lyric-timestamp-decoder/v1" in definition["required_new_stages"]
     assert (
-        "strum-owned-lead-catalog-task-admission-resolver/v1" in definition["required_new_stages"]
+        "strum-owned-lead-catalog-task-admission-resolver/v1"
+        not in definition["required_new_stages"]
     )
-    assert definition["catalog_admission"]["status"] == (
-        "not_available_without-strum-catalog-task-revalidation/v1"
-    )
+    assert definition["catalog_admission"] == {
+        "status": "available-through-strum-owned-resolver/v1",
+        "resolver": "strum-owned-lead-catalog-task-admission-resolver/v1",
+        "scope": "catalog-data-admission-only/v1",
+        "required_splits": ["train", "val", "test"],
+        "data_gate": {
+            **vocal_lead_candidate_data_gate_identity(),
+            "definition": contract.vocal_lead_candidate_data_gate_definition(),
+        },
+        "test_source_ids_forbidden_in_training_or_calibration": True,
+    }
     assert definition["deployment"] == {
         "status": "not_deployable",
         "profile_package": "forbidden-until-full-vocal-profile-contract/v1",
@@ -122,7 +131,7 @@ def test_synthetic_passing_report_is_schema_only_and_never_admits() -> None:
     assert outcomes["aggregation"] == {
         "rule": "public-report-schema-validation-never-admits/v1",
         "passed": False,
-        "reason": "strum-owned-catalog-task-admission-resolver-not-implemented/v1",
+        "reason": "public-report-checker-is-not-catalog-admission-resolver/v1",
     }
     assert outcomes["candidate"] == {
         "status": "not_deployable",

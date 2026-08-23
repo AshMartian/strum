@@ -664,6 +664,20 @@ configuration hashes. Shared `vocals` and `mix` assets have no Harmony
 fallback. Existing catalogs without that policy are intentionally ineligible;
 no Harmony trainer, profile, or chart execution is claimed.
 
+Before a future lead-only held-out evaluator can consume the four component
+task views, `strum-worker vocal lead-admission` recomputes the catalog-owned
+lead data boundary. Its private inputs are the catalog root plus one task view
+for activity/pitch, phrase boundaries, lyric alignment, and talky activity.
+STRUM revalidates every view and managed asset, requires the same exact
+`PART VOCALS` source-to-split partition in all four, and counts completed
+pitched-note, phrase-boundary, lyric, and talky labels directly from that
+track. The response is path-free: it contains only catalog/task hashes and
+aggregate train/validation/test coverage. Missing labels, a missing test split,
+task tampering, or a cross-component split mismatch produce a non-admitted or
+invalid result; the curated three-song smoke catalog is therefore not
+admitted. This is data admission only: it loads no checkpoint and cannot
+evaluate, package, select, or execute a Vocal chart profile.
+
 The OCTAVE-managed sidecar is deliberately small and path-free:
 
 ```json

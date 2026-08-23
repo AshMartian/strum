@@ -76,6 +76,10 @@ from src.vocal_harmony_catalog import (
     inspect_vocal_harmony_source_catalog,
     write_vocal_harmony_source_task,
 )
+from src.vocal_lead_catalog_admission import (
+    VocalLeadCatalogAdmissionError,
+    resolve_vocal_lead_catalog_admission,
+)
 from src.vocal_lead_profile_contract import vocal_lead_candidate_contract_definition
 from src.vocal_profile_contract import (
     vocal_profile_protocol_definition,
@@ -442,6 +446,18 @@ VOCALS_TRAINING_CONTRACT: dict[str, object] = {
         "lead": {
             "track": "PART VOCALS",
             "difficulty": "expert",
+            "admission_resolver": {
+                "id": "strum-owned-lead-catalog-task-admission-resolver/v1",
+                "status": "available",
+                "scope": "catalog-data-admission-only/v1",
+                "required_task_views": [
+                    "vocals_activity",
+                    "vocals_phrase_boundaries",
+                    "vocals_lyric_alignment",
+                    "vocals_talky_activity",
+                ],
+                "report_format": "strum-vocal-lead-catalog-task-admission/v1",
+            },
             "required_labels": [
                 "pitched_note_timing_duration_midi_36_84",
                 "phrase_boundary_markers_midi_105_106_or_105_span",
@@ -4886,6 +4902,19 @@ def _parse_args() -> argparse.Namespace:
     prepare.add_argument("--request", type=Path, required=True)
     prepare.add_argument("--json", action="store_true")
     prepare.add_argument("--json-events", action="store_true")
+    vocal = commands.add_parser(
+        "vocal", help="revalidate Lead-Vocal catalog data without loading models"
+    )
+    vocal_commands = vocal.add_subparsers(dest="vocal_command", required=True)
+    lead_admission = vocal_commands.add_parser(
+        "lead-admission", help="recompute four-view lead-label data admission evidence"
+    )
+    lead_admission.add_argument("--catalog-root", type=Path, required=True)
+    lead_admission.add_argument("--activity-task-view", type=Path, required=True)
+    lead_admission.add_argument("--phrase-task-view", type=Path, required=True)
+    lead_admission.add_argument("--lyric-task-view", type=Path, required=True)
+    lead_admission.add_argument("--talky-task-view", type=Path, required=True)
+    lead_admission.add_argument("--json", action="store_true")
     training = commands.add_parser("train", help="run worker-managed training")
     training_commands = training.add_subparsers(dest="training_command", required=True)
     training_run = training_commands.add_parser("run", help="run one synchronous training job")
@@ -5412,6 +5441,24 @@ def main() -> int:
             return 0
         if args.command == "chart" and args.chart_command == "run":
             _print_json(run_chart_request(args.request))
+            return 0
+        if args.command == "vocal" and args.vocal_command == "lead-admission":
+            try:
+                _print_json(
+                    resolve_vocal_lead_catalog_admission(
+                        catalog_root=args.catalog_root,
+                        task_view_paths={
+                            "vocals_activity": args.activity_task_view,
+                            "vocals_phrase_boundaries": args.phrase_task_view,
+                            "vocals_lyric_alignment": args.lyric_task_view,
+                            "vocals_talky_activity": args.talky_task_view,
+                        },
+                    )
+                )
+            except VocalLeadCatalogAdmissionError as error:
+                raise WorkerRequestError(
+                    "lead Vocal catalog admission request is invalid"
+                ) from error
             return 0
     except BundleValidationError:
         _print_json(

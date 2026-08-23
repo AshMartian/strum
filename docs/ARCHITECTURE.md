@@ -564,6 +564,17 @@ exact `PART VOCALS` track. The preprocessor produces 22.05 kHz / 128-mel
 windows with two frame targets: pitched lead-vocal activity and MIDI pitch
 36--84.
 
+`strum-owned-lead-catalog-task-admission-resolver/v1` is a separate,
+pre-model admission boundary. It receives a private catalog root and all four
+lead task views, revalidates each immutable view against catalog assets, then
+requires one identical source-id train/validation/test partition and exact
+`PART VOCALS` selection across activity/pitch, phrase, lyric, and talky
+components. STRUM parses those managed MIDI assets itself and publishes only
+path-free source-set hashes, counts, and label-coverage outcomes. A missing
+label category or insufficient/no-test coverage is `not_admitted`; a tampered
+view or differing source partition is invalid. The resolver never loads a
+checkpoint and is not a profile evaluator, packager, or chart handler.
+
 The resulting `vocals.frame_activity_pitch` bundle has no profile and reports
 `deployment_status: requires_vocals_profile_evaluation_and_packaging`. It
 cannot be selected by `chart run`. A separate

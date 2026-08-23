@@ -13,7 +13,7 @@ auto-chart handler.
 | Guitar onset + fret | Available | Available; experiment-only | `guitar.hybrid-v2-rule/v1`, or evaluated `guitar.neural-v1-expert/v1`; Expert only |
 | Bass onset + fret | Available | Available; raw experiment gated | Evaluated `bass.neural-v1-expert/v1`; Expert only |
 | Keys onset + fret | Available | Available; raw experiment gated | Evaluated `keys.neural-v1-expert/v1`; Expert only |
-| Vocal lead components (activity/pitch, phrase, lyric, talky) | Available | Available; experiment-only | Planned; requires harmony, composition, and Vocal evaluation |
+| Vocal lead components (activity/pitch, phrase, lyric, talky) | Available, with STRUM-owned four-view admission | Available; experiment-only | Planned; requires harmony, composition, and Vocal evaluation |
 | Drums onset + classifier | Available | Available; V2 evaluation package | `drums.v14-expert/v1` direct Expert charts; V2 is evaluation-only |
 | Five-lane difficulty transform (Guitar/Bass/Keys/Drums) | Available | Available | `difficulty.transform/v1` |
 | Generic Keys / Vocals | Available | Planned | Planned |

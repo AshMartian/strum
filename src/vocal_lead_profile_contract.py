@@ -4,12 +4,9 @@ This is intentionally smaller than :mod:`src.vocal_profile_contract`: it
 describes ``PART VOCALS`` only and has no HARM-track inputs or outputs.  It is
 not a chart runtime, model loader, event decoder, evaluator, package writer,
 or deployable profile.  The four current catalog workers produce independent
-experiments. This module is only a public report-schema checker until STRUM
-has a private catalog/task-view resolver. A report can claim source counts and
-hashes, but cannot prove that they came from the selected catalog or that its
-source sets are disjoint. The checker therefore never admits a candidate; a
-future implementation must recompute that evidence from revalidated catalog
-assets before it can be considered for a full Vocal profile.
+experiments.  :mod:`src.vocal_lead_catalog_admission` now privately
+revalidates their catalog/task-view data evidence, while this public report
+checker still never trusts caller-reported hashes or admits a model candidate.
 
 The 3-song curated smoke views cannot meet this contract.  In particular,
 they have no test split and the current CTC lyric component has no timestamp
@@ -131,9 +128,10 @@ def vocal_lead_candidate_contract_definition() -> dict[str, object]:
     """Describe the exact, planned lead-only candidate boundary.
 
     A public report satisfying this module's schema remains deliberately
-    non-admissible and non-deployable. The missing catalog/task-view resolver,
-    decoder/loader/evaluator stages must be implemented and registered
-    separately; this contract is not permission to call the legacy charter.
+    non-admissible and non-deployable.  The catalog/task-view resolver is
+    available as a separate private-input data-admission stage; decoders,
+    evaluator stages, and runtime registration remain missing.  This contract
+    is not permission to call the legacy charter.
     """
     return {
         "format": "strum-vocal-lead-candidate-contract/v1",
@@ -170,11 +168,12 @@ def vocal_lead_candidate_contract_definition() -> dict[str, object]:
             "ctc-lyric-timestamp-decoder/v1",
             "talky-frame-to-span-decoder/v1",
             "part-vocals-midi-assembler/v1",
-            "strum-owned-lead-catalog-task-admission-resolver/v1",
             "strum-recomputed-lead-held-out-evaluator/v1",
         ],
         "catalog_admission": {
-            "status": "not_available_without-strum-catalog-task-revalidation/v1",
+            "status": "available-through-strum-owned-resolver/v1",
+            "resolver": "strum-owned-lead-catalog-task-admission-resolver/v1",
+            "scope": "catalog-data-admission-only/v1",
             "required_splits": list(_SPLITS),
             "data_gate": {
                 **vocal_lead_candidate_data_gate_identity(),
@@ -342,6 +341,16 @@ def _evaluate_data_coverage(raw: object) -> dict[str, object]:
     return {"source_counts": source_outcomes, "label_counts": label_outcomes, "passed": passed}
 
 
+def evaluate_vocal_lead_data_coverage(raw: object) -> dict[str, object]:
+    """Evaluate actual or reported aggregate lead-label data against the gate.
+
+    The helper deliberately evaluates counts only.  It cannot establish that
+    they came from a catalog; callers that need admission must use STRUM's
+    private catalog/task-view resolver rather than this reusable gate logic.
+    """
+    return _evaluate_data_coverage(raw)
+
+
 def _evaluate_metrics(raw: object) -> dict[str, dict[str, dict[str, object]]]:
     metrics = _require_exact_keys(
         raw, {"pitched_notes", "phrases", "lyrics", "talkies"}, "lead metrics"
@@ -468,6 +477,6 @@ def evaluate_vocal_lead_candidate_report(report: Mapping[str, object]) -> dict[s
         "aggregation": {
             "rule": "public-report-schema-validation-never-admits/v1",
             "passed": False,
-            "reason": "strum-owned-catalog-task-admission-resolver-not-implemented/v1",
+            "reason": "public-report-checker-is-not-catalog-admission-resolver/v1",
         },
     }
