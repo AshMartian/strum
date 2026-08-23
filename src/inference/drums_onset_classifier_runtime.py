@@ -14,6 +14,7 @@ from .drums_onset_classifier_profile import (
     COARSE_MEL_SHAPE,
     CONTEXT_SHAPE,
     FINE_MEL_SHAPE,
+    normalize_v2_model_parameters,
 )
 
 if TYPE_CHECKING:
@@ -34,7 +35,12 @@ class DrumsOnsetClassification:
 class DrumsOnsetClassifierRuntime:
     """Execute Stage 2 only; onset detection and chart writing are absent."""
 
-    def __init__(self, profile: DrumsOnsetClassifierEvaluationProfile, model: OnsetClassifier, device: torch.device) -> None:
+    def __init__(
+        self,
+        profile: DrumsOnsetClassifierEvaluationProfile,
+        model: OnsetClassifier,
+        device: torch.device,
+    ) -> None:
         self.profile = profile
         self.model = model.to(device).eval()
         self.device = device
@@ -49,16 +55,32 @@ class DrumsOnsetClassifierRuntime:
     ) -> DrumsOnsetClassifierRuntime:
         target_device = torch.device(device)
         try:
-            checkpoint = torch.load(Path(checkpoint_path), map_location=target_device, weights_only=True)
+            parameters = normalize_v2_model_parameters(dict(profile.model_parameters))
+        except (TypeError, ValueError) as error:
+            raise DrumsOnsetClassifierRuntimeError(
+                "Drums V2 profile has incompatible model parameters"
+            ) from error
+        try:
+            checkpoint = torch.load(
+                Path(checkpoint_path), map_location=target_device, weights_only=True
+            )
         except Exception as error:
-            raise DrumsOnsetClassifierRuntimeError("unable to load verified Drums V2 checkpoint") from error
-        if not isinstance(checkpoint, dict) or not isinstance(checkpoint.get("model_state_dict"), dict):
-            raise DrumsOnsetClassifierRuntimeError("Drums V2 checkpoint must contain model_state_dict")
-        model = OnsetClassifier(**profile.model_parameters)
+            raise DrumsOnsetClassifierRuntimeError(
+                "unable to load verified Drums V2 checkpoint"
+            ) from error
+        if not isinstance(checkpoint, dict) or not isinstance(
+            checkpoint.get("model_state_dict"), dict
+        ):
+            raise DrumsOnsetClassifierRuntimeError(
+                "Drums V2 checkpoint must contain model_state_dict"
+            )
+        model = OnsetClassifier(**parameters)
         try:
             model.load_state_dict(checkpoint["model_state_dict"], strict=True)
         except RuntimeError as error:
-            raise DrumsOnsetClassifierRuntimeError("Drums V2 checkpoint is incompatible with its declared model") from error
+            raise DrumsOnsetClassifierRuntimeError(
+                "Drums V2 checkpoint is incompatible with its declared model"
+            ) from error
         return cls(profile, model, target_device)
 
     @torch.inference_mode()
@@ -72,21 +94,33 @@ class DrumsOnsetClassifierRuntime:
             raise DrumsOnsetClassifierRuntimeError("Drums V2 inputs must have the same batch size")
         logits = self.model(fine.to(self.device), coarse.to(self.device), contexts.to(self.device))
         if not isinstance(logits, torch.Tensor) or logits.shape != (fine.shape[0], 8):
-            raise DrumsOnsetClassifierRuntimeError("Drums V2 model produced an invalid classification tensor")
+            raise DrumsOnsetClassifierRuntimeError(
+                "Drums V2 model produced an invalid classification tensor"
+            )
         probabilities = torch.sigmoid(logits).cpu()
-        return [DrumsOnsetClassification(tuple(float(value) for value in row)) for row in probabilities]
+        return [
+            DrumsOnsetClassification(tuple(float(value) for value in row)) for row in probabilities
+        ]
 
 
-def _validate_windows(value: torch.Tensor, expected: tuple[int, int, int], label: str) -> torch.Tensor:
+def _validate_windows(
+    value: torch.Tensor, expected: tuple[int, int, int], label: str
+) -> torch.Tensor:
     if not isinstance(value, torch.Tensor) or value.ndim != 4 or tuple(value.shape[1:]) != expected:
-        raise DrumsOnsetClassifierRuntimeError(f"Drums V2 {label} must have shape [N, {', '.join(map(str, expected))}]")
+        raise DrumsOnsetClassifierRuntimeError(
+            f"Drums V2 {label} must have shape [N, {', '.join(map(str, expected))}]"
+        )
     if not value.is_floating_point():
         raise DrumsOnsetClassifierRuntimeError(f"Drums V2 {label} must be floating point")
     return value.to(dtype=torch.float32, device="cpu")
 
 
 def _validate_context(value: torch.Tensor) -> torch.Tensor:
-    if not isinstance(value, torch.Tensor) or value.ndim != 2 or tuple(value.shape[1:]) != CONTEXT_SHAPE:
+    if (
+        not isinstance(value, torch.Tensor)
+        or value.ndim != 2
+        or tuple(value.shape[1:]) != CONTEXT_SHAPE
+    ):
         raise DrumsOnsetClassifierRuntimeError("Drums V2 context must have shape [N, 64]")
     if not value.is_floating_point():
         raise DrumsOnsetClassifierRuntimeError("Drums V2 context must be floating point")

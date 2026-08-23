@@ -51,13 +51,24 @@ def _experiment(root: Path, *, deployment_status: str = "requires_profile_packag
     ledger = {
         "format": "strum-drums-onset-experiment/v1",
         "pipeline": {"id": "drums.onset-classifier/v1", "version": 1},
-        "model": {"id": "catalog-v2", "profile": "onset_classifier_v2", "architecture": "OnsetClassifier/v2"},
-        "task_view": {"format": "task", "sha256": "a" * 64, "catalog_id": "catalog", "catalog_content_sha256": "b" * 64},
+        "model": {
+            "id": "catalog-v2",
+            "profile": "onset_classifier_v2",
+            "architecture": "OnsetClassifier/v2",
+        },
+        "task_view": {
+            "format": "task",
+            "sha256": "a" * 64,
+            "catalog_id": "catalog",
+            "catalog_content_sha256": "b" * 64,
+        },
         "preprocessing": {"id": "drums-onset-windows/v1", "splits": []},
         "training": {"config_name": config.name, "config_sha256": _sha256(config)},
         "checkpoint": {
-            "name": "checkpoints/best_f1.pt", "sha256": _sha256(checkpoint),
-            "byte_length": checkpoint.stat().st_size, "format": "torch-training-checkpoint/v1",
+            "name": "checkpoints/best_f1.pt",
+            "sha256": _sha256(checkpoint),
+            "byte_length": checkpoint.stat().st_size,
+            "format": "torch-training-checkpoint/v1",
             "deployment_status": deployment_status,
         },
         "metrics": {"test_overall_f1": 0.5, "test_loss": 1.0, "test_num_samples": 8},
@@ -159,7 +170,9 @@ def test_runtime_only_classifies_prepared_windows() -> None:
     )
 
     class Model(torch.nn.Module):
-        def forward(self, fine: torch.Tensor, coarse: torch.Tensor, context: torch.Tensor) -> torch.Tensor:
+        def forward(
+            self, fine: torch.Tensor, coarse: torch.Tensor, context: torch.Tensor
+        ) -> torch.Tensor:
             assert fine.shape == (2, 1, 128, 87)
             assert coarse.shape == (2, 1, 128, 44)
             assert context.shape == (2, 64)
@@ -173,14 +186,18 @@ def test_runtime_only_classifies_prepared_windows() -> None:
     assert len(result) == 2
     assert result[0].probabilities == (0.5,) * 8
     with pytest.raises(DrumsOnsetClassifierRuntimeError, match="fine mel"):
-        runtime.classify_windows(torch.zeros((2, 128, 87)), torch.zeros((2, 1, 128, 44)), torch.zeros((2, 64)))
+        runtime.classify_windows(
+            torch.zeros((2, 128, 87)), torch.zeros((2, 1, 128, 44)), torch.zeros((2, 64))
+        )
 
 
-def test_runtime_loader_uses_safe_checkpoint_and_exact_state(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_runtime_loader_uses_safe_checkpoint_and_exact_state(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     profile = DrumsOnsetClassifierEvaluationProfile(
         profile_id=PROFILE_ID,
         component_id=COMPONENT_ID,
-        model_parameters={"num_classes": 8},
+        model_parameters={"num_classes": 8, "use_freq_attn": False},
         configuration_sha256="a" * 64,
     )
     seen: dict[str, object] = {}
@@ -202,7 +219,29 @@ def test_runtime_loader_uses_safe_checkpoint_and_exact_state(monkeypatch: pytest
         lambda *args, **kwargs: {"model_state_dict": {"weight": torch.tensor([1.0])}},
     )
 
-    DrumsOnsetClassifierRuntime.from_profile(profile, checkpoint_path=tmp_path / "v2.pt", device="cpu")
+    DrumsOnsetClassifierRuntime.from_profile(
+        profile, checkpoint_path=tmp_path / "v2.pt", device="cpu"
+    )
 
-    assert seen["parameters"] == {"num_classes": 8}
+    assert seen["parameters"] == {
+        "num_classes": 8,
+        "branch_channels": [1, 32, 64, 128, 256],
+        "context_size": 4,
+        "context_hidden": 64,
+        "classifier_hidden": 512,
+        "spectral_dim": 32,
+        "dropout": 0.3,
+        "use_freq_attn": False,
+        "use_hpss": False,
+        "enhanced_spectral": False,
+        "use_contrastive": False,
+        "use_aux_head": False,
+        "projection_dim": 128,
+        "use_dual_head": False,
+        "tom_head_hidden": 256,
+        "use_lowfreq_branch": False,
+        "use_lowfreq_spectral": False,
+        "use_crash_flux": False,
+        "crash_flux_dim": 32,
+    }
     assert seen["strict"] is True
