@@ -13,10 +13,12 @@ auto-chart handler.
 | Guitar onset + fret | Available | Available; experiment-only | `guitar.hybrid-v2-rule/v1`, or evaluated `guitar.neural-v1-expert/v1`; Expert only |
 | Bass onset + fret | Available | Available; experiment-only | Planned; requires a separate Bass evaluator and runtime profile |
 | Keys onset + fret | Available | Available; experiment-only | Planned; requires a separate Keys evaluator and runtime profile |
+| Vocals activity + pitch | Available | Available; experiment-only | Planned; requires phrase/lyric/talky/harmony stages and Vocal evaluation |
 | Drums onset + classifier | Available | Available; V2 evaluation package | `drums.v14-expert/v1` direct Expert charts; V2 is evaluation-only |
 | Five-lane difficulty transform (Guitar/Bass/Keys/Drums) | Available | Available | `difficulty.transform/v1` |
 | Generic Keys / Vocals / Pro Guitar / Pro Bass / Pro Keys | Available | Planned | Planned |
-| Guitar/Bass fret mapper and section classifier | Available | Planned worker handler | Planned |
+| Guitar/Bass fret mapper | Available | Available; requires `pitch` extra | Planned; requires evaluation/profile packaging |
+| Guitar/Bass section classifier | Available | Planned worker handler | Planned |
 
 The legacy all-instrument batch scripts remain research/compatibility tools;
 they are not a single deployable worker profile. Their behavior must not be
@@ -54,6 +56,13 @@ presented as a successful OCTAVE auto-chart result.
   experiments are non-deployable. Guitar V1 has an explicit
   validation/packaging path; Bass and Keys require their own evaluator and
   profile contracts before promotion.
+- ✅ Catalog-backed, worker-trainable Vocal frame activity + sung-pitch
+  experiments. `vocals_activity` selects only `PART VOCALS`, retains
+  phrase/lyric metadata, and emits no inference profile: a playable Vocal
+  chart still needs evaluated phrase, lyric, talky, and harmony stages.
+- ✅ Catalog-backed, worker-trainable Guitar/Bass fret-mapper experiments.
+  They require the `pitch` extra, preserve catalog train/validation splits,
+  and remain profile-gated components rather than legacy fallback behavior.
 - ✅ A catalog-worker Drums V2 experiment can be integrity-packaged as
   `drums.onset-classifier-evaluation/v1`. Its hash-verified runtime accepts
   only STRUM's prepared onset windows and returns eight class probabilities;
@@ -77,8 +86,9 @@ presented as a successful OCTAVE auto-chart result.
    typed manifests cover each executable single-profile run; the full
    multi-instrument graph still needs the same partial-run/fallback reporting.
 3. Add dedicated learned trainers and event schemas for the generic Keys task,
-   Vocals, Pro instruments, fret mapping, and section routing. The existing
-   catalog views are the input boundary, not implementation completion.
+   Pro instruments, and section routing. Promote the bounded Vocal and
+   fret-mapper experiments only after their remaining component stages,
+   held-out evaluation, and complete profile contracts exist.
 4. Improve the learned difficulty model from the current event baseline to
    audio/stem-aware sequence modeling with song-disjoint evaluation. Difficulty
    mapping stays in STRUM; OCTAVE only selects and displays a validated profile.

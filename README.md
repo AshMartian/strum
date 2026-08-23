@@ -558,7 +558,8 @@ For example, a Guitar task-view request is:
 ```
 
 `guitar.onset-fret/v1`, `bass.onset-fret/v1`, `keys.onset-fret/v1`,
-`drums.onset-classifier/v1`, `chart_transform.five_lane/v1`, and the separate
+`drums.onset-classifier/v1`, `vocals.note-activity/v1`,
+`chart_transform.five_lane/v1`, and the separate
 `strum.fret-mapper/guitar/v1` / `strum.fret-mapper/bass/v1` derived-label
 pipelines are worker-trainable. Fret-mapper training builds Basic-Pitch
 features only from its revalidated approved task view, preserves the catalog's
@@ -566,8 +567,8 @@ song-level train/validation split, and requires the STRUM `pitch` extra. It
 produces an experiment component, not an auto-chart profile. Their renderer-visible
 schemas contain only bounded model/training knobs. The private top-level
 `catalog_root` request field is worker-local configuration for Guitar, Bass,
-Keys, Drums, and fret-mapper task-view revalidation, never a pipeline option or
-renderer control.
+Keys, Drums, Vocals, and fret-mapper task-view revalidation, never a pipeline
+option or renderer control.
 
 Guitar invokes the established window-preprocessing and two-stage onset/fret
 trainers, then packages verified `guitar.onset` and `guitar.fret` bundle
@@ -582,6 +583,17 @@ replace the verified `drums.v14-expert/v1` auto-chart profile. The five-lane
 transform creates a verified learned lower-difficulty component. OCTAVE must
 surface these distinct deployment states rather than selecting a checkpoint
 implicitly.
+
+Vocals has a separate bounded experiment because `PART VOCALS` is not a
+five-lane chart. `vocals.note-activity/v1` revalidates a dedicated
+`vocals_activity` task view whose only declared label track is `PART VOCALS`.
+It trains frame-level pitched-vocal activity plus MIDI pitch 36--84 from a
+vocal stem (or approved mix fallback), retaining phrase-marker and lyric event
+counts as metadata. It does **not** train word recognition, phrases, talkies,
+harmonies, or a playable chart. Its sole component,
+`vocals.frame_activity_pitch`, therefore remains
+`requires_vocals_profile_evaluation_and_packaging` with no inference
+capability; OCTAVE must never offer it as an auto-chart model.
 
 Bass invokes the same five-lane CRNN implementation only after STRUM has
 revalidated the dedicated `bass_onset_fret` task view and its `PART BASS`

@@ -119,7 +119,12 @@ def test_pipeline_descriptors_advertise_safe_host_orchestration_requirements() -
         "fallback_audio_role",
         "required_difficulty",
     ]
-    for pipeline_id in ("bass.onset-fret/v1", "keys.onset-fret/v1", "drums.onset-classifier/v1"):
+    for pipeline_id in (
+        "bass.onset-fret/v1",
+        "keys.onset-fret/v1",
+        "vocals.note-activity/v1",
+        "drums.onset-classifier/v1",
+    ):
         descriptor = next(item for item in PIPELINES if item.id == pipeline_id)
         assert descriptor.private_request_fields == ("catalog_root",)
         assert descriptor.catalog_inspection_option_keys == (
@@ -127,6 +132,10 @@ def test_pipeline_descriptors_advertise_safe_host_orchestration_requirements() -
             "fallback_audio_role",
             "required_difficulty",
         )
+    for pipeline_id in ("strum.fret-mapper/guitar/v1", "strum.fret-mapper/bass/v1"):
+        descriptor = next(item for item in PIPELINES if item.id == pipeline_id)
+        assert descriptor.private_request_fields == ("catalog_root",)
+        assert "strum_pitch_extra" in descriptor.training_requirements
 
 
 def test_legacy_inference_output_is_not_exposed_to_worker_clients(

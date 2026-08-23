@@ -455,6 +455,21 @@ The experiment remains
 it needs Keys-specific held-out evaluation and a runtime/profile contract
 before a chart handler may select it.
 
+### Vocal activity/pitch experiment gate
+
+`vocals.note-activity/v1` is a catalog worker experiment, not a conversion of
+vocal charts into five-lane data. Its `vocals_activity` task view is
+revalidated against the selected catalog and may derive labels only from
+`PART VOCALS`. The preprocessor produces 22.05 kHz / 128-mel windows with two
+frame targets: pitched lead-vocal activity and MIDI pitch 36--84. It retains
+observed phrase-marker and lyric-event counts only as metadata.
+
+The resulting `vocals.frame_activity_pitch` bundle has no profile and reports
+`deployment_status: requires_vocals_profile_evaluation_and_packaging`. It
+cannot be selected by `chart run` or used to invent phrase, lyric, talky, or
+harmony output; those require separately evaluated components and a complete
+Vocal-specific profile contract.
+
 ## 11. Hardware
 
 Developed on NVIDIA DGX Spark (GB10 GPU, CUDA 12.8). Inference runs in

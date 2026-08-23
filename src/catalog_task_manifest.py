@@ -47,6 +47,9 @@ PIPELINE_IDS = {
     # with the generic Keys chart task, which remains the label contract for
     # future keys-specific training architectures.
     "keys_onset_fret": "keys.onset-fret/v1",
+    # This narrow vocal-note view feeds only the bounded activity/pitch
+    # experiment; it is not a complete phrase/lyric chart profile.
+    "vocals_activity": "vocals.note-activity/v1",
     "keys": "strum.instrument-chart/keys/v1",
     "vocals": "strum.instrument-chart/vocals/v1",
     "pro_guitar": "strum.instrument-chart/pro-guitar/v1",
@@ -62,6 +65,7 @@ DEFAULT_AUDIO_ROLES = {
     "bass": ("bass", "mix"),
     "bass_onset_fret": ("bass", "mix"),
     "keys_onset_fret": ("keys", "mix"),
+    "vocals_activity": ("vocals", "mix"),
     "keys": ("keys", "mix"),
     "vocals": ("vocals", "mix"),
     "pro_guitar": ("guitar", "mix"),
@@ -77,6 +81,7 @@ TASK_INSTRUMENTS = {
     "bass": "bass",
     "bass_onset_fret": "bass",
     "keys_onset_fret": "keys",
+    "vocals_activity": "vocals",
     "keys": "keys",
     "vocals": "vocals",
     "pro_guitar": "pro_guitar",
@@ -109,6 +114,11 @@ TASK_LABEL_SCHEMAS: dict[str, dict[str, object]] = {
         "id": "five-lane-midi/v1",
         "track_prefixes": ["PART KEYS"],
         "difficulty_encoding": "five-lane-note-ranges/v1",
+    },
+    "vocals_activity": {
+        "id": "vocals-pitch-phrase-lyrics-midi/v1",
+        "track_prefixes": ["PART VOCALS"],
+        "difficulty_encoding": "vocal-pitch-phrase-events/v1",
     },
     "keys": {
         "id": "five-lane-midi/v1",

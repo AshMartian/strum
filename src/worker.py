@@ -261,6 +261,27 @@ DRUMS_ONSET_TRAIN_SCHEMA = _object_schema(
     },
     required=("model_id",),
 )
+VOCALS_ACTIVITY_TRAIN_SCHEMA = _object_schema(
+    {
+        "model_id": {"type": "string"},
+        "epochs": {"type": "integer", "minimum": 1, "default": 25},
+        "batch_size": {"type": "integer", "minimum": 1, "default": 16},
+        "learning_rate": {"type": "number", "exclusiveMinimum": 0, "default": 0.0003},
+        "device": {"type": "string", "enum": ["auto", "cuda", "mps", "cpu"], "default": "auto"},
+        "limit_songs": {"type": "integer", "minimum": 0, "default": 0},
+        "max_train_batches": {"type": "integer", "minimum": 0, "default": 0},
+        "max_val_batches": {"type": "integer", "minimum": 0, "default": 0},
+        "seed": {"type": "integer", "minimum": 0, "default": 20260822},
+    },
+    required=("model_id",),
+)
+VOCALS_ACTIVITY_PREPARE_SCHEMA = _object_schema(
+    {
+        **CATALOG_AUDIO_OPTIONS,
+        "split_ratios": {"type": "array", "items": {"type": "integer"}},
+        "split_seed": {"type": "string", "default": "catalog-source-id/v1"},
+    }
+)
 
 PIPELINES = (
     PipelineDescriptor(
@@ -365,6 +386,40 @@ PIPELINES = (
         catalog_inspection_option_keys=("instrument", "target_difficulty"),
     ),
     PipelineDescriptor(
+        id="vocals.note-activity/v1",
+        display_name="Vocals activity + pitch",
+        kind="audio_to_vocal_labels",
+        version=1,
+        catalog_requirements={
+            "instrument": "vocals",
+            "difficulties": ["expert"],
+            "audio_roles": ["vocals", "mix"],
+            "audio_policy": "prefer:vocals,fallback:mix",
+            "label_tracks": ["PART VOCALS"],
+            "label_outputs": ["pitched_vocal_activity", "midi_pitch_36_84"],
+        },
+        prepare_schema=VOCALS_ACTIVITY_PREPARE_SCHEMA,
+        train_schema=VOCALS_ACTIVITY_TRAIN_SCHEMA,
+        checkpoint_outputs=("vocals.frame_activity_pitch",),
+        # A playable chart also needs phrase/lyric/talky stages and an
+        # instrument-specific evaluation/profile contract.
+        inference_capability=None,
+        status="catalog_ready",
+        preparation_status="available",
+        training_status="available",
+        private_request_fields=("catalog_root",),
+        catalog_inspection_option_keys=(
+            "audio_role",
+            "fallback_audio_role",
+            "required_difficulty",
+        ),
+        training_requirements=(
+            "vocal_phrase_lyric_talky_stages",
+            "vocals_profile_evaluation",
+            "vocals_profile_packaging",
+        ),
+    ),
+    PipelineDescriptor(
         id="drums.onset-classifier/v1",
         display_name="Drums onset + velocity",
         kind="audio_to_chart",
@@ -443,7 +498,7 @@ PIPELINES = (
             ),
         )
         for task_kind, pipeline_id in sorted(CATALOG_TASK_PIPELINES.items())
-        if task_kind != "bass_onset_fret"
+        if task_kind not in {"bass_onset_fret", "keys_onset_fret", "vocals_activity"}
     ),
 )
 
@@ -1672,6 +1727,23 @@ def _inspect_pipeline_catalog(
             fallback_role=options.get("fallback_audio_role", "mix"),
             required_difficulty=options.get("required_difficulty", "expert"),
         )
+    if pipeline_id == "vocals.note-activity/v1":
+        permitted = {
+            "audio_role",
+            "fallback_audio_role",
+            "required_difficulty",
+            "split_ratios",
+            "split_seed",
+        }
+        if set(options) - permitted:
+            raise WorkerRequestError("unsupported Vocal catalog inspection option")
+        return _audio_task_inspection(
+            catalog,
+            instrument="vocals",
+            preferred_role=options.get("audio_role", "vocals"),
+            fallback_role=options.get("fallback_audio_role", "mix"),
+            required_difficulty=options.get("required_difficulty", "expert"),
+        )
     if pipeline_id == "drums.onset-classifier/v1":
         permitted = {"audio_role", "fallback_audio_role", "required_difficulty"}
         if set(options) - permitted:
@@ -1827,6 +1899,20 @@ def prepare_dataset_request(request_path: Path) -> dict[str, object]:
         written = write_catalog_task_manifest(output, manifest)
         record_count = manifest["summary"]["record_count"]
         task_view_id = _task_view_digest(manifest)
+    elif pipeline_id == "vocals.note-activity/v1":
+        permitted = {
+            "audio_role",
+            "fallback_audio_role",
+            "required_difficulty",
+            "split_ratios",
+            "split_seed",
+        }
+        if set(options) - permitted:
+            raise WorkerRequestError("unsupported Vocal preparation option")
+        manifest = build_catalog_task_manifest(catalog_root, "vocals_activity", **options)
+        written = write_catalog_task_manifest(output, manifest)
+        record_count = manifest["summary"]["record_count"]
+        task_view_id = _task_view_digest(manifest)
     elif pipeline_id == "drums.onset-classifier/v1":
         permitted = {"audio_role", "fallback_audio_role", "required_difficulty"}
         if set(options) - permitted:
@@ -1911,6 +1997,7 @@ def _read_train_request(request_path: Path) -> dict[str, Any]:
         "guitar.onset-fret/v1",
         "bass.onset-fret/v1",
         "keys.onset-fret/v1",
+        "vocals.note-activity/v1",
         "drums.onset-classifier/v1",
         "strum.fret-mapper/guitar/v1",
         "strum.fret-mapper/bass/v1",
@@ -2194,6 +2281,47 @@ def run_training_request(request_path: Path) -> dict[str, object]:
         except (FretMapperTrainingError, OSError, TypeError, ValueError) as error:
             raise WorkerRequestError(
                 "fret-mapper training request failed validation or execution"
+            ) from error
+        return {
+            "status": "completed",
+            "pipeline_id": pipeline_id,
+            "model_id": preflight["model_id"],
+            "bundle_name": Path(result["bundle_dir"]).name,
+            "manifest_sha256": preflight["manifest_sha256"],
+            "components": preflight["components"],
+            "metrics": result["metrics"],
+            "deployment_status": result["deployment_status"],
+        }
+    if pipeline_id == "vocals.note-activity/v1":
+        from src.vocals_worker_training import (  # noqa: PLC0415
+            VocalsTrainingError,
+            VocalsTrainingOptions,
+            run_catalog_vocals_training,
+        )
+
+        if "parent_bundle" in request:
+            raise WorkerRequestError("Vocal training does not accept parent_bundle")
+        catalog_root = request.get("catalog_root")
+        if not isinstance(catalog_root, str) or not catalog_root:
+            raise WorkerRequestError("Vocal training requires worker-local catalog_root")
+        try:
+            options = VocalsTrainingOptions.from_mapping(request["options"])
+            revision, _dirty = _revision()
+            result = run_catalog_vocals_training(
+                task_view_path=Path(request["task_view"]),
+                output_dir=Path(request["output"]),
+                catalog_root=Path(catalog_root),
+                options=options,
+                strum_revision=revision,
+            )
+            preflight = preflight_bundle(
+                result["bundle_dir"], required_components=descriptor.checkpoint_outputs
+            )
+        except (BundleValidationError, CatalogValidationError):
+            raise
+        except (VocalsTrainingError, OSError, TypeError, ValueError) as error:
+            raise WorkerRequestError(
+                "Vocal training request failed validation or execution"
             ) from error
         return {
             "status": "completed",
