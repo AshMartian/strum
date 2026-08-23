@@ -11,6 +11,7 @@ import numpy as np
 import pytest
 
 from src.catalog_task_manifest import build_catalog_task_manifest
+from src.model_bundle import MANIFEST_FILENAME
 from src.pro_audio_preprocessing import _tempo_segments, _tick_seconds, prepare_pro_audio_windows
 from src.pro_event_worker_training import _source_inputs
 from src.pro_target_manifest import (
@@ -20,7 +21,7 @@ from src.pro_target_manifest import (
     resolve_catalog_pro_target_manifest_songs,
 )
 from src.song_source_catalog import CatalogValidationError
-from src.worker import prepare_dataset_request
+from src.worker import inspect_model_bundle, prepare_dataset_request, run_training_request
 
 
 def _asset(root: Path, content: bytes, filename: str) -> dict[str, object]:
@@ -154,6 +155,27 @@ def _catalog(root: Path, *, standard_fret: int = 3, valid_audio: bool = False) -
     )
 
 
+def _catalog_with_train_and_val(root: Path) -> None:
+    """Create enough immutable catalog records to prove split-disjoint training.
+
+    The shared managed MIDI/audio bytes are intentional: task identity is the
+    OCTAVE source ID, while this worker test only needs the exact-track target
+    contract and both required splits.  It mocks materialization and training
+    so it cannot accidentally exercise a path-bearing external process.
+    """
+    _catalog(root)
+    record = json.loads((root / "records.jsonl").read_text(encoding="utf-8"))
+    records = []
+    for index in range(32):
+        clone = dict(record)
+        clone["source_id"] = f"octave-src-proevent-{index:08x}"
+        clone["metadata"] = {"name": f"Pro worker fixture {index}"}
+        records.append(clone)
+    (root / "records.jsonl").write_text(
+        "\n".join(json.dumps(item) for item in records) + "\n", encoding="utf-8"
+    )
+
+
 @pytest.mark.parametrize(
     ("task_kind", "expected_schema", "expected_event"),
     [
@@ -255,6 +277,105 @@ def test_worker_prepare_returns_a_decoded_pro_target_view(tmp_path: Path) -> Non
     assert result["output_name"] == output.name
     assert written["format"] == PRO_TARGET_MANIFEST_FORMAT
     assert str(tmp_path) not in json.dumps(written)
+
+
+def test_worker_runs_pro_candidate_with_dirty_provenance_and_no_deployment_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The worker must preserve source state without exposing local paths.
+
+    This crosses the actual request parser, exact-Pro task resolver, candidate
+    bundle writer, preflight, and inspection boundary.  Audio materialization
+    and the CUDA/CPU trainer are mocked so the regression is quick and solely
+    tests worker/provenance semantics.
+    """
+    _catalog_with_train_and_val(tmp_path)
+    target_view = tmp_path / "views" / "pro-guitar-targets.json"
+    target_view.parent.mkdir()
+    target_view.write_text(
+        json.dumps(build_catalog_pro_target_manifest(tmp_path, "pro_guitar")),
+        encoding="utf-8",
+    )
+    decoded = json.loads(target_view.read_text(encoding="utf-8"))
+    assert {song["split"] for song in decoded["songs"]} >= {"train", "val"}
+
+    output_dir = tmp_path / "candidate"
+    request = tmp_path / "pro-train.json"
+    request.write_text(
+        json.dumps(
+            {
+                "pipeline_id": "strum.instrument-chart/pro-guitar/v1",
+                "task_view": str(target_view),
+                "output": str(output_dir),
+                "catalog_root": str(tmp_path),
+                "options": {
+                    "model_id": "pro-worker-dirty-fixture",
+                    "epochs": 1,
+                    "device": "cpu",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_preprocess(**kwargs: object) -> dict[str, object]:
+        assert kwargs["splits"] == ("train", "val")
+        return {
+            "preprocessing": {"id": PRO_AUDIO_PREPROCESSING_ID},
+            "splits": {"train": {"window_count": 3}, "val": {"window_count": 2}},
+        }
+
+    def fake_train(command: list[str]) -> None:
+        checkpoint_dir = Path(command[command.index("--checkpoint-dir") + 1])
+        checkpoint_dir.mkdir(parents=True)
+        (checkpoint_dir / "best.pt").write_bytes(b"mock known-event candidate")
+        (checkpoint_dir / "history.json").write_text(
+            json.dumps(
+                [
+                    {
+                        "epoch": 1,
+                        "train_loss": 0.5,
+                        "val_loss": 0.4,
+                        "val_known_event_token_f1": 0.75,
+                        "val_known_event_state_accuracy": 0.8,
+                        "val_known_event_exact_accuracy": 0.7,
+                    }
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr("src.pro_event_worker_training.prepare_pro_audio_windows", fake_preprocess)
+    monkeypatch.setattr("src.pro_event_worker_training._run_script", fake_train)
+    monkeypatch.setattr("src.worker._revision", lambda: ("a" * 40, True))
+
+    result = run_training_request(request)
+    inspection = inspect_model_bundle(output_dir / "bundle")
+    manifest = json.loads((output_dir / "bundle" / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+    experiment = json.loads((output_dir / "experiment.json").read_text(encoding="utf-8"))
+
+    assert result["status"] == "completed"
+    assert result["deployment_status"] == (
+        "not_deployable_requires_pro_event_proposal_sequence_evaluation_and_packaging"
+    )
+    assert result["runtime"] == {
+        "strum_version": result["runtime"]["strum_version"],
+        "strum_revision": "a" * 40,
+        "strum_source_dirty": True,
+        "device": "cpu",
+    }
+    assert inspection["profiles"] == []
+    assert inspection["deployment_status"] == "not_deployable"
+    assert inspection["compatibility"]["strum_source_dirty"] is True
+    assert manifest["compatibility"]["strum_revision"] == "a" * 40
+    assert manifest["compatibility"]["strum_source_dirty"] is True
+    assert "profiles" not in manifest
+    assert experiment["candidate_scope"] == "known_reference_event_attributes_only"
+    assert experiment["runtime"]["strum_source_dirty"] is True
+    assert str(tmp_path) not in json.dumps(result)
+    assert str(tmp_path) not in json.dumps(inspection)
+    assert str(tmp_path) not in json.dumps(manifest)
+    assert str(tmp_path) not in json.dumps(experiment)
 
 
 def test_pro_audio_preprocessing_materializes_exact_event_windows_without_paths(

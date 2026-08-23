@@ -272,6 +272,7 @@ def run_catalog_pro_event_training(
     pipeline_id: str,
     options: ProEventTrainingOptions,
     strum_revision: str | None,
+    strum_source_dirty: bool | None,
 ) -> dict[str, object]:
     """Train a raw exact-Pro event-attribute candidate; never a chart profile."""
     if output_dir.exists() and (not output_dir.is_dir() or any(output_dir.iterdir())):
@@ -370,7 +371,16 @@ def run_catalog_pro_event_training(
     config_path.write_text(
         json.dumps(portable_config, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
-    compatibility: dict[str, object] = {"manifest_schema": 1, "strum_version": f">={__version__}"}
+    # A commit ID by itself is not source provenance: a training worktree can
+    # contain uncommitted implementation changes.  Keep the dirty state next
+    # to the revision in the portable artifact, including ``None`` when this
+    # runtime was unable to inspect Git.  That makes an unknown state explicit
+    # rather than accidentally presenting the commit as a clean build.
+    compatibility: dict[str, object] = {
+        "manifest_schema": 1,
+        "strum_version": f">={__version__}",
+        "strum_source_dirty": strum_source_dirty,
+    }
     if strum_revision:
         compatibility["strum_revision"] = strum_revision
     component = {
@@ -425,6 +435,7 @@ def run_catalog_pro_event_training(
         "runtime": {
             "strum_version": __version__,
             "strum_revision": strum_revision,
+            "strum_source_dirty": strum_source_dirty,
             "device": device,
         },
         "metrics": _history_metrics(checkpoints / "history.json"),
@@ -448,4 +459,5 @@ def run_catalog_pro_event_training(
         "bundle_dir": str(bundle_dir),
         "metrics": experiment["metrics"],
         "deployment_status": experiment["deployment_status"],
+        "runtime": experiment["runtime"],
     }

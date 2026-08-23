@@ -450,16 +450,28 @@ class ModelBundle:
 
     def compatibility_status(self) -> list[str]:
         """Describe compatibility declarations that cannot be verified locally."""
+        source_dirty = self.compatibility.get("strum_source_dirty")
+        source_dirty_status: list[str] = []
+        if "strum_source_dirty" in self.compatibility:
+            if source_dirty is True:
+                source_dirty_status.append(
+                    "STRUM source tree was dirty when this artifact was built"
+                )
+            elif source_dirty is None:
+                source_dirty_status.append(
+                    "STRUM source tree state was unknown when this artifact was built"
+                )
         required_revision = self.compatibility.get("strum_revision")
         if not isinstance(required_revision, str) or not required_revision.strip():
-            return []
+            return source_dirty_status
         runtime_revision = get_runtime_revision()
         if runtime_revision is None:
             return [
+                *source_dirty_status,
                 f"STRUM source revision {required_revision}: declared, unverified "
-                "(set STRUM_SOURCE_REVISION to verify)"
+                "(set STRUM_SOURCE_REVISION to verify)",
             ]
-        return [f"STRUM source revision {required_revision}: verified"]
+        return [*source_dirty_status, f"STRUM source revision {required_revision}: verified"]
 
 
 def _version_is_compatible(current: str, requirement: object) -> bool:
@@ -958,6 +970,12 @@ def load_model_bundle(path: str | Path, *, check_files: bool = False) -> ModelBu
     model_id = _parse_identifier(raw["model_id"], "model_id")
     if not isinstance(raw["compatibility"], dict):
         raise BundleValidationError("compatibility must be an object")
+    if (
+        "strum_source_dirty" in raw["compatibility"]
+        and raw["compatibility"]["strum_source_dirty"] is not None
+        and not isinstance(raw["compatibility"]["strum_source_dirty"], bool)
+    ):
+        raise BundleValidationError("compatibility.strum_source_dirty must be a boolean or null")
     if not isinstance(raw["components"], dict) or not raw["components"]:
         raise BundleValidationError("components must be a non-empty object")
     if "profiles" in raw and not isinstance(raw["profiles"], dict):

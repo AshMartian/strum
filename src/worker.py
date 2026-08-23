@@ -1586,7 +1586,7 @@ def _safe_compatibility_summary(bundle: ModelBundle) -> dict[str, object]:
     """
     return {
         key: bundle.compatibility[key]
-        for key in ("manifest_schema", "strum_version", "strum_revision")
+        for key in ("manifest_schema", "strum_version", "strum_revision", "strum_source_dirty")
         if key in bundle.compatibility
     }
 
@@ -4193,7 +4193,7 @@ def run_training_request(request_path: Path) -> dict[str, object]:
             )
         try:
             options = ProEventTrainingOptions.from_mapping(request["options"])
-            revision, _dirty = _revision()
+            revision, dirty = _revision()
             result = run_catalog_pro_event_training(
                 task_view_path=Path(request["task_view"]),
                 output_dir=Path(request["output"]),
@@ -4201,6 +4201,7 @@ def run_training_request(request_path: Path) -> dict[str, object]:
                 pipeline_id=pipeline_id,
                 options=options,
                 strum_revision=revision,
+                strum_source_dirty=dirty,
             )
             preflight = preflight_bundle(
                 result["bundle_dir"], required_components=descriptor.checkpoint_outputs
@@ -4220,6 +4221,7 @@ def run_training_request(request_path: Path) -> dict[str, object]:
             "components": preflight["components"],
             "metrics": result["metrics"],
             "deployment_status": result["deployment_status"],
+            "runtime": result["runtime"],
         }
     if pipeline_id in {"strum.fret-mapper/guitar/v1", "strum.fret-mapper/bass/v1"}:
         from src.fret_mapper_worker_training import (  # noqa: PLC0415
