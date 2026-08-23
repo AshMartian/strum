@@ -537,6 +537,16 @@ view and `strum-worker keys profile package` has copied it into an immutable
 `keys.onset`/`keys.fret`, writes one Expert `PART KEYS` track, and cannot
 select or substitute Guitar/Bass profiles.
 
+The broader `strum.instrument-chart/bass/v1` and
+`strum.instrument-chart/keys/v1` descriptors remain non-executable source
+contracts for future architectures.  Their worker descriptors publish the
+exact five-lane source track and the generic model, held-out evaluation,
+profile-package, and chart-execution gates.  They also name the available,
+separate V1 implementation path (`bass.onset-fret/v1` or
+`keys.onset-fret/v1`) without aliasing task views, component identities, or
+profiles.  OCTAVE may offer that concrete path for training, but cannot use a
+generic descriptor as a fallback chart runtime.
+
 ### Vocal lead-component experiment gates
 
 `vocals.note-activity/v1` is a catalog worker experiment, not a conversion of

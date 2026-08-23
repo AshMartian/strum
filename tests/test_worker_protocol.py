@@ -373,6 +373,87 @@ def test_pro_descriptors_publish_non_executable_real_midi_training_contracts(
     assert task_kind in pipeline_id.replace("-", "_")
 
 
+@pytest.mark.parametrize(
+    (
+        "pipeline_id",
+        "task_kind",
+        "track",
+        "concrete_pipeline",
+        "components",
+        "capability",
+    ),
+    [
+        (
+            "strum.instrument-chart/bass/v1",
+            "bass",
+            "PART BASS",
+            "bass.onset-fret/v1",
+            ["bass.onset", "bass.fret"],
+            "bass.neural-v1-expert/v1",
+        ),
+        (
+            "strum.instrument-chart/keys/v1",
+            "keys",
+            "PART KEYS",
+            "keys.onset-fret/v1",
+            ["keys.onset", "keys.fret"],
+            "keys.neural-v1-expert/v1",
+        ),
+    ],
+)
+def test_generic_bass_and_keys_descriptors_publish_exact_v1_bridges_without_aliasing_them(
+    pipeline_id: str,
+    task_kind: str,
+    track: str,
+    concrete_pipeline: str,
+    components: list[str],
+    capability: str,
+) -> None:
+    descriptor = next(item for item in PIPELINES if item.id == pipeline_id)
+
+    # The generic task is intentionally a future source contract.  It does
+    # not become trainable or executable just because the narrow V1 path is.
+    assert descriptor.kind == "audio_to_chart"
+    assert descriptor.training_status == "planned"
+    assert descriptor.train_schema is None
+    assert descriptor.inference_capability is None
+    assert descriptor.checkpoint_outputs == ()
+    assert descriptor.catalog_requirements["label_schema"] == "five-lane-midi/v1"
+    assert descriptor.catalog_requirements["label_tracks"] == [track]
+    assert descriptor.catalog_requirements["audio_roles"] == [task_kind, "mix"]
+    assert descriptor.catalog_requirements["audio_policy"] == f"prefer:{task_kind},fallback:mix"
+
+    contract = descriptor.as_json()["training_contract"]
+    assert contract["format"] == "strum-planned-training-contract/v1"
+    assert contract["training_status"] == "planned"
+    assert contract["label_source"] == {
+        "schema_id": "five-lane-midi/v1",
+        "selection": "exact-five-lane-track/v1",
+        "tracks": [track],
+        "required_difficulty": "expert",
+        "target_semantics": [
+            "five_lane_note_timing_and_duration",
+            "expert_lane_notes_96_100",
+        ],
+    }
+    assert contract["execution"] == {"status": "not_available", "inference_capability": None}
+    assert set(contract["required_stages"]) == set(descriptor.training_requirements)
+
+    paths = contract["available_concrete_paths"]
+    assert paths == [
+        {
+            "pipeline_id": concrete_pipeline,
+            "task_kind": f"{task_kind}_onset_fret",
+            "label_source": f"exact-part-{task_kind}-five-lane/v1",
+            "components": components,
+            "profile_capability": capability,
+            "deployment_status": "requires_held_out_evaluation_and_profile_packaging",
+            "difficulty_policy": "expert_only",
+            "execution": "available_after_profile_validation",
+        }
+    ]
+
+
 def test_legacy_inference_output_is_not_exposed_to_worker_clients(
     capfd: pytest.CaptureFixture[str],
 ) -> None:

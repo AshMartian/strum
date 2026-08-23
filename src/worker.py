@@ -255,6 +255,24 @@ SECTION_TRAIN_SCHEMA = _object_schema(
     required=("model_id",),
 )
 PLANNED_TRAINING_REQUIREMENTS: dict[str, tuple[str, ...]] = {
+    # ``strum.instrument-chart/{bass,keys}/v1`` are durable catalog label
+    # contracts for a future, potentially different architecture.  They are
+    # deliberately not aliases for the narrower V1 five-lane workers below:
+    # a host must not send their generic task view to a V1 trainer or assume a
+    # generic task view has a chart handler.  The concrete V1 paths are
+    # advertised separately in ``INSTRUMENT_CHART_TRAINING_CONTRACTS``.
+    "bass": (
+        "generic_bass_chart_model_trainer/v1",
+        "generic_bass_held_out_chart_evaluation/v1",
+        "generic_bass_profile_package/v1",
+        "generic_bass_chart_execution/v1",
+    ),
+    "keys": (
+        "generic_keys_chart_model_trainer/v1",
+        "generic_keys_held_out_chart_evaluation/v1",
+        "generic_keys_profile_package/v1",
+        "generic_keys_chart_execution/v1",
+    ),
     "vocals": (
         "vocal_activity_pitch_component/v1",
         "vocal_phrase_boundary_component/v1",
@@ -296,6 +314,71 @@ PLANNED_TRAINING_REQUIREMENTS: dict[str, tuple[str, ...]] = {
         "held_out_chart_impact_ablation",
         "composed_bass_chart_profile_contract",
     ),
+}
+
+
+INSTRUMENT_CHART_TRAINING_CONTRACTS: dict[str, dict[str, object]] = {
+    "bass": {
+        "format": "strum-planned-training-contract/v1",
+        "training_status": "planned",
+        "label_source": {
+            "schema_id": "five-lane-midi/v1",
+            "selection": "exact-five-lane-track/v1",
+            "tracks": ["PART BASS"],
+            "required_difficulty": "expert",
+            "target_semantics": [
+                "five_lane_note_timing_and_duration",
+                "expert_lane_notes_96_100",
+            ],
+        },
+        # A generic descriptor is a durable source contract, not a promise
+        # that any existing runtime can execute it.  This explicit bridge
+        # lets OCTAVE present the available narrow V1 implementation without
+        # treating the two task views, component identities, or profiles as
+        # interchangeable.
+        "available_concrete_paths": [
+            {
+                "pipeline_id": "bass.onset-fret/v1",
+                "task_kind": "bass_onset_fret",
+                "label_source": "exact-part-bass-five-lane/v1",
+                "components": ["bass.onset", "bass.fret"],
+                "profile_capability": "bass.neural-v1-expert/v1",
+                "deployment_status": "requires_held_out_evaluation_and_profile_packaging",
+                "difficulty_policy": "expert_only",
+                "execution": "available_after_profile_validation",
+            }
+        ],
+        "required_stages": list(PLANNED_TRAINING_REQUIREMENTS["bass"]),
+        "execution": {"status": "not_available", "inference_capability": None},
+    },
+    "keys": {
+        "format": "strum-planned-training-contract/v1",
+        "training_status": "planned",
+        "label_source": {
+            "schema_id": "five-lane-midi/v1",
+            "selection": "exact-five-lane-track/v1",
+            "tracks": ["PART KEYS"],
+            "required_difficulty": "expert",
+            "target_semantics": [
+                "five_lane_note_timing_and_duration",
+                "expert_lane_notes_96_100",
+            ],
+        },
+        "available_concrete_paths": [
+            {
+                "pipeline_id": "keys.onset-fret/v1",
+                "task_kind": "keys_onset_fret",
+                "label_source": "exact-part-keys-five-lane/v1",
+                "components": ["keys.onset", "keys.fret"],
+                "profile_capability": "keys.neural-v1-expert/v1",
+                "deployment_status": "requires_held_out_evaluation_and_profile_packaging",
+                "difficulty_policy": "expert_only",
+                "execution": "available_after_profile_validation",
+            }
+        ],
+        "required_stages": list(PLANNED_TRAINING_REQUIREMENTS["keys"]),
+        "execution": {"status": "not_available", "inference_capability": None},
+    },
 }
 
 
@@ -797,12 +880,27 @@ PIPELINES = (
             display_name=task_kind.replace("_", " ").title(),
             kind="derived_labels"
             if task_kind.startswith(("fret_mapper", "section_"))
-            else "chart_to_chart",
+            else "audio_to_chart",
             version=1,
             catalog_requirements={
                 "instrument": task_kind.replace("fret_mapper_", "").replace("section_", ""),
                 "difficulties": ["expert"],
                 "audio_policy": "task-specific managed role with mix fallback",
+                # Bass and Keys generic source contracts must not make OCTAVE
+                # reconstruct their audio selection from an implementation
+                # detail.  The concrete five-lane worker has the same
+                # preferred/fallback contract, but remains a separate path.
+                **(
+                    {
+                        "audio_roles": list(CATALOG_TASK_DEFAULT_AUDIO_ROLES[task_kind]),
+                        "audio_policy": "prefer:"
+                        + CATALOG_TASK_DEFAULT_AUDIO_ROLES[task_kind][0]
+                        + ",fallback:"
+                        + CATALOG_TASK_DEFAULT_AUDIO_ROLES[task_kind][1],
+                    }
+                    if task_kind in INSTRUMENT_CHART_TRAINING_CONTRACTS
+                    else {}
+                ),
                 **(
                     {
                         "label_schema": CATALOG_TASK_LABEL_SCHEMAS[task_kind]["id"],
@@ -820,7 +918,8 @@ PIPELINES = (
                             else {}
                         ),
                     }
-                    if task_kind in {*PRO_TRAINING_CONTRACTS, "vocals"}
+                    if task_kind
+                    in {*PRO_TRAINING_CONTRACTS, *INSTRUMENT_CHART_TRAINING_CONTRACTS, "vocals"}
                     else {}
                 ),
             },
@@ -845,6 +944,13 @@ PIPELINES = (
                 if task_kind.startswith("fret_mapper_")
                 else (f"section_classifier.{task_kind.removeprefix('section_')}",)
                 if task_kind.startswith("section_")
+                # A planned generic instrument-chart descriptor does not have
+                # a stable component identity.  Its concrete implementation
+                # path declares the actual component pair in the training
+                # contract instead of misleading a host with ``bass``/``keys``
+                # pseudo-component names.
+                else ()
+                if task_kind in INSTRUMENT_CHART_TRAINING_CONTRACTS
                 else (task_kind,)
             ),
             inference_capability=None,
@@ -877,7 +983,9 @@ PIPELINES = (
             training_contract=(
                 VOCALS_TRAINING_CONTRACT
                 if task_kind == "vocals"
-                else PRO_TRAINING_CONTRACTS.get(task_kind)
+                else INSTRUMENT_CHART_TRAINING_CONTRACTS.get(
+                    task_kind, PRO_TRAINING_CONTRACTS.get(task_kind)
+                )
             ),
         )
         for task_kind, pipeline_id in sorted(CATALOG_TASK_PIPELINES.items())
