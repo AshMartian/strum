@@ -1,10 +1,33 @@
 # STRUM Architecture
 
-This document describes the **as-built** STRUM pipeline. For high-level usage
-see [README.md](../README.md); for status & next steps see
+This document describes the **as-built** STRUM research pipeline and the
+separate, versioned worker boundary used by OCTAVE. For high-level usage see
+[README.md](../README.md); for status & next steps see
 [ROADMAP.md](ROADMAP.md).
 
-## 1. System Overview
+## Deployment status and ownership
+
+The diagram below is the legacy multi-instrument batch architecture. It is not
+a claim that every stage is a deployable `strum-worker` profile. The worker
+fails closed to the profiles declared by a validated model bundle:
+
+| Capability | Worker status | Output boundary |
+| --- | --- | --- |
+| `guitar.hybrid-v2-rule/v1` | Executable | Expert Guitar only |
+| `drums.v14-expert/v1` | Executable | Expert Drums only, direct V14 (no legacy ensemble/fallbacks) |
+| `difficulty.transform/v1` | Executable | Learned five-lane Expert → Hard/Medium/Easy transform for Guitar, Bass, Keys, or Drums |
+| Guitar / Drums catalog task views | Catalog-ready, script-only training | Safe task views; their legacy trainers are not worker handlers yet |
+| Bass, Keys, Vocals, Pro instruments, mapper, section | Catalog-ready task views, training planned | No worker trainer or deployable profile |
+| Legacy batch pipeline | Research / compatibility scripts | Not a worker execution handler |
+
+OCTAVE owns source import, rights decisions, curation, runtime selection, and
+job/process lifecycle. STRUM owns preprocessing, labels, learned models,
+checkpoint/profile compatibility, and difficulty semantics. In particular,
+OCTAVE must not implement a deterministic Expert-to-lower-difficulty mapper:
+an Expert worker output stays Expert-only until a declared STRUM learned
+difficulty profile is run.
+
+## 1. Legacy system overview
 
 STRUM converts a single audio file (`song.ogg/.wav/.mp3`) into a Clone Hero /
 YARG chart package containing PART DRUMS, PART GUITAR, PART BASS, PART VOCALS
@@ -43,8 +66,8 @@ YARG chart package containing PART DRUMS, PART GUITAR, PART BASS, PART VOCALS
                 └────────────┬─────────────┘
                              │
                 ┌────────────▼─────────────┐
-                │  Difficulty reduction    │
-                │  (Expert/Hard/Med/Easy)  │
+                │ Legacy difficulty stage  │
+                │ (not OCTAVE deployment) │
                 └────────────┬─────────────┘
                              │
                 ┌────────────▼─────────────┐
@@ -250,7 +273,13 @@ Standard MIDI File Type 1, 480 ticks per quarter note. Tracks:
 * `PART VOCALS` — Pitched phrases + lyric meta-events
 * `PART KEYS` / `PART REAL_KEYS_X` — 5-lane + Pro Keys
 
-### 7.2 Difficulty Generation (`scripts/chart_enhancer.py`)
+### 7.2 Legacy difficulty generation (`scripts/chart_enhancer.py`)
+
+`chart_enhancer.py` is legacy batch behavior, not an OCTAVE-owned deployment
+feature and not a generic worker fallback. The table documents its historical
+heuristic configuration only. Worker lower-difficulty output requires the
+explicit `difficulty.transform/v1` learned STRUM profile and records its model
+provenance in the run manifest.
 
 | Difficulty | Notes/sec cap | Max chord size | Notes |
 |------------|---------------|----------------|-------|
@@ -280,7 +309,7 @@ src/
 │   ├── bg_mel.py                 # Background-mel subtraction utilities
 │   └── common.py
 ├── inference/
-│   ├── guitar_hybrid_v2.py       # ★ Production guitar/bass backend
+│   ├── guitar_hybrid_v2.py       # Hybrid Guitar/Bass research backend
 │   ├── guitar_neural.py          # Neural-only backend
 │   ├── guitar_bass.py            # Dataclasses + rule backend
 │   ├── section_router.py         # Section-aware onset gating
@@ -295,7 +324,7 @@ src/
 └── lyrics/                       # LRCLIB + Lyrics.ovh fetcher
 ```
 
-## 9. Training Inventory
+## 9. Legacy training inventory
 
 | Model | Trainer | Preprocess | Config |
 |-------|---------|------------|--------|
@@ -306,10 +335,37 @@ src/
 | Pitch→fret mapper (V4) | `train_fret_mapper.py` | `build_mapper_dataset.py` | inline |
 | Section classifier | `train_section_classifier.py` | `build_section_labels.py` → `preprocess_section_windows.py` | inline |
 
-All trainers log to W&B (`WANDB_MODE=offline` to disable). Checkpoints land in
-`checkpoints/<model>/` and are loaded by name by the production scripts.
+All trainers log to W&B (`WANDB_MODE=offline` to disable). These are legacy
+script interfaces; catalog readiness does not make a trainer worker-runnable,
+and script output is not deployment-ready until STRUM packages and validates a
+model bundle/profile.
 
-## 10. Hardware
+## 10. Catalog and worker contract
+
+OCTAVE writes an `octave-song-source-catalog/v1` of already-authorized managed
+assets. STRUM validates it, selects only `training_use: allowed` records, and
+creates path-free task views. STRUM never imports `.sng`, `.rb3con`, ZIP, or
+original source folders, and task/experiment/checkpoint manifests must not
+contain those locations.
+
+Discovery is dynamic rather than hard-coded in OCTAVE:
+
+```bash
+strum-worker probe --json
+strum-worker pipeline list --json
+strum-worker catalog inspect --catalog-root /private/catalog --pipeline guitar.onset-fret/v1 --json
+```
+
+OCTAVE renders only the selected descriptor's `prepare_schema` and
+`train_schema`. It uses `dataset prepare --json-events` and `train start
+--json-events` for supervised work; event lines have a request-derived opaque
+job ID, monotonic sequence, stage, progress, state, and safe code/message.
+OCTAVE owns cancellation by terminating the supervised process group, rather
+than requiring STRUM to retain a private-path job. A model folder is validated
+separately from a STRUM runtime with `checkpoint inspect`, `inference profile
+validate`, `chart preflight`, and `chart run`.
+
+## 11. Hardware
 
 Developed on NVIDIA DGX Spark (GB10 GPU, CUDA 12.8). Inference runs in
 ~real-time on a single 12 GB GPU; training one drum classifier takes

@@ -1,51 +1,79 @@
 # STRUM Roadmap
 
-## Status
+## Current contract status
 
-The core pipeline is **production**: drums + guitar + bass + vocals + keys all
-generate playable Clone Hero / YARG charts with cross-instrument grid
-alignment. Verified on a held-out test set of 9 paired audio + ground-truth
-chart pairs (see `docs/ARCHITECTURE.md` and the Performance section in
-[README.md](../README.md)).
+STRUM is moving from legacy research scripts to a versioned, catalog-aware
+worker runtime for OCTAVE. “Catalog-ready” means STRUM can create a safe,
+path-free task view from OCTAVE's already-authorized catalog. It does **not**
+mean the pipeline has a worker trainer, a deployable checkpoint, or a complete
+auto-chart handler.
+
+| Family | Catalog task view | Worker training | Executable worker profile |
+| --- | --- | --- | --- |
+| Guitar onset + fret | Available | Script-only | `guitar.hybrid-v2-rule/v1`, Expert only |
+| Drums onset + classifier | Available | Script-only | `drums.v14-expert/v1`, Expert only direct V14 |
+| Five-lane difficulty transform (Guitar/Bass/Keys/Drums) | Available | Available | `difficulty.transform/v1` |
+| Bass / Keys / Vocals / Pro Guitar / Pro Bass / Pro Keys | Available | Planned | Planned |
+| Guitar/Bass fret mapper and section classifier | Available | Planned worker handler | Planned |
+
+The legacy all-instrument batch scripts remain research/compatibility tools;
+they are not a single deployable worker profile. Their behavior must not be
+presented as a successful OCTAVE auto-chart result.
 
 ## Shipped
 
-- ✅ Two-stage drum onset detector + ensemble lane classifier (8 lanes)
-- ✅ Six audio-coupled rescue passes (onset / cymbal / tom / drumsep)
-- ✅ Hybrid guitar & bass (V2 onset CRNN + Spotify Basic Pitch + fret mapping)
-- ✅ Whisper + pYIN vocal pipeline with LRCLIB lyrics
-- ✅ Spectral keyboard detection with Pro Keys output
-- ✅ Cross-instrument BPM refinement + phase shift + 32nd-note snap with
-  per-lane roll detection
-- ✅ Difficulty reduction (Expert / Hard / Medium / Easy)
-- ✅ Clone Hero / YARG packaging (`notes.mid`, `song.ini`, album art)
-- ✅ Backend selection via env vars (`STRUM_GUITAR_BACKEND`,
-  `STRUM_BASS_BACKEND`, `STRUM_FRET_MAPPER`, `STRUM_V12C_VARIANT`)
-- ✅ Training pipelines for every model with W&B logging
+- ✅ Versioned worker discovery: runtime probe, dynamic pipeline descriptors,
+  catalog inspection, safe task-view preparation, model/checkpoint inspection,
+  profile validation, chart preflight, and chart execution.
+- ✅ OCTAVE catalog boundary: STRUM consumes only
+  `octave-song-source-catalog/v1` managed assets marked
+  `training_use: allowed`; it never reads imported package/source locations.
+- ✅ Path-free catalog task views and lineage for Guitar, Drums, Bass, Keys,
+  Vocals, Pro instruments, fret mapper, and section families.
+- ✅ Worker lifecycle streams for dataset preparation and training. OCTAVE
+  owns process creation/cancellation and retains private paths.
+- ✅ Bundle-validated Expert Guitar hybrid profile and Expert Drums direct V14
+  profile. Both fail closed rather than invoking legacy companion/fallback
+  behavior.
+- ✅ Catalog-backed, worker-trainable learned five-lane chart transforms for
+  Guitar, Bass, Keys, and Drums, including explicit Expert → lower-difficulty
+  provenance.
+- ✅ Legacy model/training research assets: two-stage drums, Guitar onset,
+  mapper, section, vocals, keys, tempo/grid, MIDI export, and batch assembly.
 
-## In Flight
+## Next worker milestones
 
-- 🔄 Per-instrument benchmark harness (drums F1 verified; guitar / bass /
-  vocals / keys numbers being collected on the GT test set)
-- 🔄 Hugging Face Hub model release (`opria123/strum`)
-- 🔄 OCTAVE chart-editor integration
+1. Make Guitar and Drums catalog trainers worker-runable: typed training
+   schemas, cache/preprocessing jobs, experiment manifests, compatible
+   resume/fine-tune checks, evaluation output, and deployable bundle profiles.
+2. Replace the remaining legacy auto-chart assembly behavior with declared,
+   component-level bundle requirements and typed result manifests. A partial
+   run must state its actual stage status and fallback policy.
+3. Add dedicated learned trainers and event schemas for Bass, Keys, Vocals,
+   Pro instruments, fret mapping, and section routing. Their existing catalog
+   views are the input boundary, not implementation completion.
+4. Improve the learned difficulty model from the current event baseline to
+   audio/stem-aware sequence modeling with song-disjoint evaluation. Difficulty
+   mapping stays in STRUM; OCTAVE only selects and displays a validated profile.
+5. Publish signed/versioned runtime and model-bundle releases, then support
+   OCTAVE-managed immutable runtime installation, locking, rollback, and
+   offline use. Release OCTAVE must not auto-pull arbitrary Git branches.
+6. Add shared worker fixtures and real-catalog end-to-end smoke tests proving
+   source paths never appear in a task view, experiment, checkpoint, renderer
+   payload, event stream, log, or user-visible error.
 
-## Planned
+## Research and evaluation
 
-- ☐ Whitepaper writeup (problem framing, alignment story, results,
-  limitations)
-- ☐ Streaming inference mode (chunked Demucs + incremental rescue passes)
-- ☐ Pro Guitar (string + fret inference, not just 5-fret)
-- ☐ Web demo (Hugging Face Space) — drag-and-drop a song, get a chart
-- ☐ Genre-specific drum classifier variants (metal, jazz, electronic)
-- ☐ Multi-take training data from charter community
+- Per-profile, song-disjoint evaluation with declared operating envelopes and
+  bundle provenance.
+- Genre-specific Drums variants and community-authorized training data.
+- Streaming inference, Pro Guitar string/fret inference, and a web demo only
+  after their model/profile contracts are explicit.
 
 ## Hardware
 
-- **Training**: NVIDIA DGX Spark (GB10, 12 GB)
-- **Inference**: any CUDA GPU; CPU works but ~10× slower
-
-## Tracking
-
-W&B project: `strum`. Runs are tagged by model family
-(`drums-v14-*`, `onset-classifier-v15-*`, `guitar-v2-*`, etc.).
+- **Training**: CUDA-capable NVIDIA GPU preferred; the runtime also declares
+  MPS and CPU support where a profile permits it.
+- **Inference**: profile requirements, optional dependencies, and device
+  support are discovered through `strum-worker probe --json` and each bundle
+  preflight rather than assumed from a legacy script.

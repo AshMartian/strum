@@ -18,9 +18,21 @@
 
 ---
 
-STRUM converts any song into a fully playable Clone Hero / YARG chart package — complete with **pro drums**, **guitar**, **bass**, **vocals with lyrics**, and **keys** — all generated from audio alone.
+STRUM is an audio-to-chart research runtime for Clone Hero / YARG. Its legacy
+batch scripts can assemble multi-instrument chart packages, while its versioned
+worker exposes only explicitly declared, bundle-validated inference profiles.
+Today those executable worker profiles are Expert Guitar (`guitar.hybrid-v2-rule/v1`),
+Expert Drums through the direct V14 interpreter (`drums.v14-expert/v1`), and
+learned five-lane difficulty transforms (`difficulty.transform/v1`). Bass,
+vocals, keys, and Pro-instrument behavior in the legacy scripts are not yet
+deployable worker capabilities.
 
-The system uses a two-stage neural drum transcription pipeline, neural onset detection with rule-based fret mapping for guitar/bass, Whisper-powered vocal transcription with pitch tracking, and spectral analysis for keyboard detection. Charts are exported as standard MIDI with four difficulty levels (Expert, Hard, Medium, Easy) and packaged with metadata, album art, and song.ini files ready for play.
+The system includes a two-stage neural drum transcription pipeline, hybrid
+Guitar transcription, experimental legacy Bass/Vocals/Keys paths, and
+catalog-backed training adapters. Lower difficulties are a STRUM concern: a
+worker run is Expert-only unless an explicit, validated STRUM difficulty profile
+is selected. OCTAVE must never supply its own deterministic Expert-to-lower-
+difficulty mapping.
 
 ## Architecture
 
@@ -160,7 +172,7 @@ Model checkpoints (~6 GB) are not committed; download from the releases page or 
 Drop one or more `.wav` / `.mp3` / `.flac` files in a directory and run:
 
 ```bash
-# Full chart package (all instruments)
+# Legacy full chart package (not a worker deployment profile)
 python scripts/batch_pipeline.py \
   --songs-dir /path/to/songs/ \
   --output-dir /path/to/output/
@@ -182,9 +194,12 @@ Each output folder contains `notes.mid`, `song.ini`, the source audio, and album
 | `STRUM_FRET_MAPPER`    | `0`, `1` | `0` | Use learned pitch→fret mapper instead of rules |
 | `STRUM_V12C_VARIANT`   | `default`, `community` | `default` | Swap drum classifier v12c checkpoint |
 
-### Training Your Own Models
+### Legacy script training
 
-All trainers are plain `python scripts/train_*.py` invocations driven by Hydra-style YAMLs in `configs/`. They expect a manifest of preprocessed windows produced by the matching `preprocess_*` / `build_*` script.
+These script entry points predate the worker contract. They are useful for
+research and for the catalog adapters described below, but a script-produced
+checkpoint is not automatically an OCTAVE-deployable profile. Deployable
+checkpoints require a validated STRUM model bundle and profile manifest.
 
 | Model | Preprocess | Train | Config |
 |-------|------------|-------|--------|
@@ -220,7 +235,7 @@ strum/
 ├── checkpoints/                      # Trained weights (gitignored)
 ├── scripts/
 │   ├── batch_pipeline.py             # ★ Full multi-instrument pipeline (entry point)
-│   ├── batch_infer_hybrid.py         # Drums-only production pipeline
+│   ├── batch_infer_hybrid.py         # Legacy Drums batch pipeline
 │   ├── chart_postprocess.py          # Snap-to-grid + rescue passes + quantization
 │   ├── chart_enhancer.py             # Difficulty reduction + lane balancing
 │   ├── vocals_charter.py             # Whisper + pYIN vocal transcription
@@ -250,7 +265,7 @@ strum/
 │   │   ├── bg_mel.py                 # Background-mel subtraction
 │   │   └── common.py
 │   ├── inference/
-│   │   ├── guitar_hybrid_v2.py       # ★ Production guitar/bass backend
+│   │   ├── guitar_hybrid_v2.py       # Hybrid Guitar/Bass research backend
 │   │   ├── guitar_neural.py          # Neural-only guitar/bass backend
 │   │   ├── guitar_bass.py            # GuitarChart/Note/Chord dataclasses + rule backend
 │   │   ├── section_router.py         # Section-aware onset gating
@@ -345,7 +360,7 @@ python -m src.model_bundle validate /path/to/bundle --check-files --verify-hashe
 python -m src.model_bundle list /path/to/models
 ```
 
-Current production integration recognizes `drums.v14_onset`,
+The current model-bundle validator recognizes `drums.v14_onset`,
 `drums.ensemble.v2` through `drums.ensemble.v17`, and `guitar.onset`.
 `compatibility.strum_revision` is optional but recommended for portable
 bundles: it records the STRUM Git revision the model was trained against. Set
@@ -552,7 +567,7 @@ surface these distinct deployment states rather than selecting a checkpoint
 implicitly.
 
 ```bash
-strum-worker train run --request /path/to/owned-train-request.json --json
+strum-worker train start --request /path/to/owned-train-request.json --json-events
 ```
 
 For example, OCTAVE owns these private locations and never displays them from
@@ -631,15 +646,15 @@ Run it with `strum-worker chart run --request /path/to/owned-chart-run.json
 --json`. STRUM writes Expert-only `notes.mid` and `run.json`, recording profile
 and component hashes. It never enables the learned fret mapper, uses no
 `STRUM_GUITAR_*` overrides, and cannot make Hard/Medium/Easy charts unless a
-separate explicit STRUM difficulty profile is selected. Drums and the legacy
-multi-instrument batch pipeline are deliberately not execution handlers yet:
-they still contain undeclared companion/fallback behavior. A narrow
-`drums.v14-expert/v1` bundle profile can already be preflighted: it permits
-exactly one verified V14 8-class checkpoint, fixed V14 preprocessing, direct
-class thresholds, and Expert output with no postprocessing, ensemble, cymbal,
-or multiclass fallback. It remains non-executable until that checkpoint is
-packaged as a safe weights-only state dictionary and the direct V14 interpreter
-is enabled; STRUM will not load the legacy pickle checkpoint through this API.
+separate explicit STRUM difficulty profile is selected.
+
+`drums.v14-expert/v1` is also executable. It accepts exactly one
+bundle-verified, tensor-only V14 8-class checkpoint with fixed V14
+preprocessing and emits Expert Drums with direct class thresholds. It
+intentionally does **not** run legacy postprocessing, ensemble, cymbal, or
+multiclass fallback stages. The legacy multi-instrument batch pipeline remains
+outside this worker execution contract because its companions and fallbacks are
+not yet declared profiles.
 
 ```bash
 python -m src.song_source_catalog /path/to/catalog
