@@ -1322,9 +1322,13 @@ PIPELINES = (
                 # a stable component identity.  Its concrete implementation
                 # path declares the actual component pair in the training
                 # contract instead of misleading a host with ``bass``/``keys``
-                # pseudo-component names.
+                # pseudo-component names.  The planned Vocal descriptor has
+                # the same boundary: its narrow lead-component workers expose
+                # their own outputs, while the generic chart contract cannot
+                # claim a fictitious ``vocals`` checkpoint before a composed
+                # trainer and handler exist.
                 else ()
-                if task_kind in INSTRUMENT_CHART_TRAINING_CONTRACTS
+                if task_kind in {*INSTRUMENT_CHART_TRAINING_CONTRACTS, "vocals"}
                 else (f"pro.{task_kind.removeprefix('pro_')}.event_attributes",)
                 if task_kind in PRO_TRAINING_CONTRACTS
                 else (task_kind,)

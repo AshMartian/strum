@@ -548,6 +548,42 @@ def test_generic_bass_and_keys_descriptors_publish_exact_v1_bridges_without_alia
     ]
 
 
+def test_planned_vocal_descriptor_does_not_advertise_a_pseudo_checkpoint() -> None:
+    """A generic Vocal chart contract cannot stand in for its components."""
+    descriptor = next(item for item in PIPELINES if item.id == "strum.instrument-chart/vocals/v1")
+
+    assert descriptor.training_status == "planned"
+    assert descriptor.train_schema is None
+    assert descriptor.inference_capability is None
+    assert descriptor.checkpoint_outputs == ()
+    payload = descriptor.as_json()
+    assert payload["checkpoint_outputs"] == []
+    assert payload["training_contract"]["available_experiment_components"] == [
+        "vocals.frame_activity_pitch",
+        "vocals.phrase_boundaries",
+        "vocals.lyric_alignment",
+        "vocals.talky_activity",
+    ]
+
+    # Those names remain outputs of concrete catalog-ready workers only.
+    assert {
+        item.checkpoint_outputs
+        for item in PIPELINES
+        if item.id
+        in {
+            "vocals.note-activity/v1",
+            "vocals.phrase-boundaries/v1",
+            "vocals.lyric-alignment/v1",
+            "vocals.talky-activity/v1",
+        }
+    } == {
+        ("vocals.frame_activity_pitch",),
+        ("vocals.phrase_boundaries",),
+        ("vocals.lyric_alignment",),
+        ("vocals.talky_activity",),
+    }
+
+
 @pytest.mark.parametrize(
     "pipeline_id",
     (

@@ -698,7 +698,10 @@ the policy cannot use `vocals` or `mix` in place of a `harmN` output role.
 The planned `strum.instrument-chart/vocals/v1` descriptor publishes those
 remaining machine-readable stages and rejects chart execution until a composed
 Vocal profile has passed held-out chart evaluation and packaging. OCTAVE must
-never offer either raw component as an auto-chart model.
+never offer either raw component as an auto-chart model. Because the generic
+Vocal trainer and handler do not exist yet, this planned descriptor advertises
+no checkpoint outputs; its listed component names are only the outputs of the
+separate, catalog-ready lead-component workers.
 
 Its `training_contract` now makes the future boundary explicit. A composed
 profile must bind all lead components to the same catalog control identity and
