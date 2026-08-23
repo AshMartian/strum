@@ -238,6 +238,23 @@ def test_vocals_pipeline_exposes_strict_private_catalog_training_contract() -> N
         "vocals.lyric_alignment",
         "vocals.talky_activity",
     }
+    lead_only = contract["lead_only_candidate_contract"]
+    assert lead_only["format"] == "strum-vocal-lead-candidate-contract/v1"
+    assert lead_only["status"] == "planned_nondeployable"
+    assert lead_only["scope"] == {"input_track": "PART VOCALS", "output_track": "PART VOCALS"}
+    assert [item["id"] for item in lead_only["components"]] == [
+        "vocals.frame_activity_pitch",
+        "vocals.phrase_boundaries",
+        "vocals.lyric_alignment",
+        "vocals.talky_activity",
+    ]
+    assert "ctc-lyric-timestamp-decoder/v1" in lead_only["required_new_stages"]
+    assert lead_only["deployment"] == {
+        "status": "not_deployable",
+        "profile_package": "forbidden-until-full-vocal-profile-contract/v1",
+        "chart_execution": "not_available",
+        "fallback": "forbidden",
+    }
     assert contract["available_source_policies"]["harmony"] == {
         "pipeline_id": "vocals.harmony-source-policy/v1",
         "task_format": "strum-vocal-harmony-source-task/v1",

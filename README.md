@@ -727,6 +727,32 @@ evaluation, package, and `vocal_chart_profile_handler/v1` stages, and it still
 forbids a legacy charter, external lyrics, raw components, or fallback chart
 execution.
 
+### Lead-only Vocal candidate boundary
+
+STRUM also publishes a distinct `lead_only_candidate_contract` under the
+planned Vocal descriptor. It is deliberately **not** a reduced Vocal profile:
+it accepts and could eventually emit only `PART VOCALS`, contains no Harmony
+inputs or outputs, and remains `not_deployable` even if its evidence passes.
+It records the smallest honest route for developing the lead event composer
+before OCTAVE has isolated Harmony material.
+
+The four existing lead components share the catalog log-mel timeline, but none
+is currently a loader or an event decoder. A future candidate must add a
+tensor-only component loader; pitched-frame-to-note, phrase-boundary,
+timestamped-CTC-lyric, and talky-span decoders; a `PART VOCALS` MIDI assembler;
+and a STRUM-recomputed held-out evaluator. It cannot use the legacy charter,
+external lyrics, a component selected by filename, implicit Harmony output, or
+any runtime fallback.
+
+Before that candidate may be evaluated, the pinned lead data gate requires
+source-disjoint splits of at least 40/10/10 train/validation/test songs, with
+per-split observed coverage for pitched notes, phrase boundaries, lyric events,
+and talky spans. Its held-out quality policy separately gates note onset,
+offset, and pitch; phrase boundaries; lyric token error and timestamp error;
+talky spans; and assembled `PART VOCALS` MIDI validity/coverage. The current
+three-song curated lead views have no test split, and their one-epoch smokes
+have no qualifying component evidence, so they cannot form a candidate.
+
 Bass invokes the same five-lane CRNN implementation only after STRUM has
 revalidated the dedicated `bass_onset_fret` task view and its `PART BASS`
 labels. It emits distinct `bass.onset` and `bass.fret` components plus a

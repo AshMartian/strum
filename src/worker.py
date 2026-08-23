@@ -72,6 +72,7 @@ from src.vocal_harmony_catalog import (
     inspect_vocal_harmony_source_catalog,
     write_vocal_harmony_source_task,
 )
+from src.vocal_lead_profile_contract import vocal_lead_candidate_contract_definition
 from src.vocal_profile_contract import (
     vocal_profile_protocol_definition,
     vocal_profile_protocol_identity,
@@ -739,6 +740,10 @@ def _vocal_training_contract_for_output(template: object) -> dict[str, object]:
     }
     packaging["quality_policy_definition"] = vocal_profile_quality_policy_definition()
     packaging["quality_policy_sha256"] = quality_identity["sha256"]
+    # Lead-only is a useful research boundary while OCTAVE has no isolated
+    # Harmony material.  It is deliberately a separate candidate/evidence
+    # contract, never a weakened substitute for the full Vocal profile.
+    contract["lead_only_candidate_contract"] = vocal_lead_candidate_contract_definition()
     return contract
 
 
