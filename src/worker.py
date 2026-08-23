@@ -71,6 +71,11 @@ from src.vocal_harmony_catalog import (
     inspect_vocal_harmony_source_catalog,
     write_vocal_harmony_source_task,
 )
+from src.vocal_profile_contract import (
+    VOCAL_PROFILE_QUALITY_POLICY_SHA256,
+    vocal_profile_quality_policy_definition,
+    vocal_profile_quality_policy_identity,
+)
 
 PROTOCOL_VERSION = 1
 MODEL_BUNDLE_SCHEMA_VERSIONS = (1,)
@@ -435,7 +440,7 @@ VOCALS_TRAINING_CONTRACT: dict[str, object] = {
         },
         "harmony": {
             "tracks": ["HARM1", "HARM2", "HARM3"],
-            "selection": "exact-declared-harmony-track/v1",
+            "selection": "exact-approved-harmony-subset/v1",
             "source_task_format": "strum-vocal-harmony-source-task/v1",
             "required_audio_policy": "isolated-harmony-stem-only/v1",
             "forbidden_audio_roles": ["vocals", "mix"],
@@ -443,6 +448,23 @@ VOCALS_TRAINING_CONTRACT: dict[str, object] = {
                 "isolated_source_stem/v1",
                 "isolated_separation_output/v1",
             ],
+            "subset": {
+                "minimum_tracks": 1,
+                "all_tracks_required": False,
+                "must_be_declared_by_selected_source_task": True,
+            },
+            "required_per_track_binding": {
+                "track_name": "HARM1|HARM2|HARM3",
+                "audio_role": "matching-harm1-harm2-harm3-role/v1",
+                "source_task": {
+                    "format": "strum-vocal-harmony-source-task/v1",
+                    "task_view_sha256": "sha256",
+                    "source_policy_format": "octave-vocal-harmony-source-policy/v1",
+                    "source_policy_sha256": "sha256",
+                    "catalog_control_sha256": "sha256",
+                    "harmony_tracks": "exact-selected-subset/v1",
+                },
+            },
         },
         "partition": {
             "unit": "source_id",
@@ -482,8 +504,10 @@ VOCALS_TRAINING_CONTRACT: dict[str, object] = {
             {
                 "id": "vocals.harmony_model",
                 "producer_pipeline": "not_implemented",
-                "required_outputs": ["HARM1", "HARM2", "HARM3"],
+                "required_outputs": "approved-nonempty-HARM-subset/v1",
                 "source_policy": "vocals.harmony-source-policy/v1",
+                "per_track_binding": "strum-vocal-harmony-track-binding/v1",
+                "same_source_task_for_selected_tracks": True,
             },
         ],
         "compatibility": {
@@ -506,7 +530,9 @@ VOCALS_TRAINING_CONTRACT: dict[str, object] = {
             },
             "harmony": {
                 "tracks": ["HARM1", "HARM2", "HARM3"],
+                "selected_subset": "approved-nonempty-subset/v1",
                 "only_from_provenance_approved_harmony_components": True,
+                "per_track_output_binding_required": True,
             },
         },
         "forbidden_shortcuts": [
@@ -528,14 +554,16 @@ VOCALS_TRAINING_CONTRACT: dict[str, object] = {
                 "lyrics_or_text_meta_events",
                 "pitchless_talky_note_96",
             ],
-            "harmony": ["exact-HARM1-HARM2-HARM3-tracks-with-approved-source-policy"],
+            "harmony": [
+                "each-selected-HARM-track-with-matching-harm-role-and-approved-source-task"
+            ],
         },
         "required_metrics": {
             "pitched_notes": ["onset_f1", "offset_f1", "pitch_accuracy"],
             "phrases": ["start_f1", "end_f1"],
             "lyrics": ["token_error_rate", "timestamp_alignment_error_ms"],
             "talkies": ["span_f1"],
-            "harmony": ["track_specific_note_f1"],
+            "harmony": ["per-track-track_specific_note_f1"],
             "assembled_chart": ["valid_midi", "per_track_event_coverage"],
         },
         "evidence": {
@@ -546,9 +574,17 @@ VOCALS_TRAINING_CONTRACT: dict[str, object] = {
                 "catalog_control_sha256",
                 "task_view_hashes",
                 "test_source_ids",
-                "harmony_source_policy_sha256",
+                "per-track-harmony-source-task-view-sha256",
+                "per-track-harmony-source-policy-sha256",
+                "per-track-harmony-catalog-control-sha256",
+                "strum-quality-policy-sha256",
             ],
-            "quality_thresholds": "explicit-profile-policy-not-yet-defined",
+            "per_track_harmony_evidence": "required-for-each-selected-HARM-track/v1",
+            "quality_policy": {
+                **vocal_profile_quality_policy_identity(),
+                "outcomes": "strum-vocal-profile-quality-outcomes/v1",
+                "aggregation": "all-required-metrics-pass/v1",
+            },
         },
     },
     "packaging_contract": {
@@ -556,10 +592,23 @@ VOCALS_TRAINING_CONTRACT: dict[str, object] = {
         "status": "not_available",
         "requires": [
             "completed-strum-recomputed-held-out-report",
+            "pinned-strum-vocal-profile-quality-policy-v1",
+            "all-required-strum-quality-policy-outcomes-pass",
+            "per-selected-HARM-track-source-task-policy-and-metric-evidence",
             "hash-verified-required-components-and-configurations",
             "validated-strum-profile-composition-v1-graph",
             "registered-vocal-chart-execution-handler",
         ],
+        "quality_policy": {
+            **vocal_profile_quality_policy_identity(),
+            "failure_behavior": "reject-package/v1",
+            "verification": "recompute-outcomes-do-not-trust-reported-pass/v1",
+        },
+        # Expose the complete pinned requirement rather than asking OCTAVE to
+        # duplicate thresholds.  This is still a planned package contract;
+        # no package writer or Vocal chart handler is registered here.
+        "quality_policy_definition": vocal_profile_quality_policy_definition(),
+        "quality_policy_sha256": VOCAL_PROFILE_QUALITY_POLICY_SHA256,
         "raw_component_bundle_deployment_status": "not_deployable",
     },
     "required_stages": list(PLANNED_TRAINING_REQUIREMENTS["vocals"]),

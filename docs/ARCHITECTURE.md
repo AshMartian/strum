@@ -598,7 +598,18 @@ policy. A `strum-vocal-held-out-chart-evaluation-contract/v1` requires
 source-disjoint test songs and STRUM-recomputed note, phrase, lyric/alignment,
 talky, per-HARM-track, and assembled-MIDI evidence before a
 `strum-vocal-profile-package-contract/v1` can bind components into a
-`strum-profile-composition/v1` graph. Until the named
+`strum-profile-composition/v1` graph. The planned composition supports a
+nonempty approved subset of `HARM1`/`HARM2`/`HARM3`, not an all-three
+requirement, but records one exact binding per selected output: matching
+`harmN` role, `strum-vocal-harmony-source-task/v1` task-view hash, OCTAVE
+sidecar-policy hash, and catalog-control hash. The evaluator must repeat those
+bindings alongside each HARM metric rather than reporting one aggregate
+Harmony score. `strum-vocal-profile-quality-policy/v1` is STRUM-owned and
+hash-pinned: it defines every metric and its all-required/all-selected-track
+aggregation. Future packaging calls the contract validator to recompute
+outcomes and rejects absent, unpinned, or failed policy evidence. No trainer,
+package writer, or executable Vocal profile is introduced by that validation
+contract. Until the named
 `vocal_chart_profile_handler/v1` exists, execution is unavailable and fallback
 to the legacy charter, shared Harmony audio, external lyrics, or raw component
 outputs is forbidden.

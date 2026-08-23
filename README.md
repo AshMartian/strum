@@ -695,13 +695,24 @@ profile must bind all lead components to the same catalog control identity and
 source-ID split, use either the same catalog audio identity or a pinned
 same-master alignment, and keep the four lead event languages distinct. It
 must emit `PART VOCALS` pitched notes (36--84), note-96 talkies, phrase
-markers, and observed lyric/text events; `HARM1`/`HARM2`/`HARM3` may be emitted
-only by a future Harmony component trained from the policy-approved isolated
-sources. Evaluation must use source-disjoint `test` songs and STRUM-recompute
-note, phrase, lyric/alignment, talky, Harmony, and assembled-MIDI evidence.
-The descriptor names the still-unimplemented Harmony component, composition,
-evaluation, package, and `vocal_chart_profile_handler/v1` stages explicitly;
-it forbids a legacy charter, external lyrics, or a raw component fallback.
+markers, and observed lyric/text events. Harmony may emit an approved nonempty
+subset of `HARM1`/`HARM2`/`HARM3`, but each output is bound independently to
+its matching `harm1`/`harm2`/`harm3` asset role, the selected
+`strum-vocal-harmony-source-task/v1` view hash, its OCTAVE sidecar-policy hash,
+and catalog-control identity. A shared `vocals` or `mix` source cannot stand
+in for any omitted or selected Harmony track.
+
+Evaluation must use source-disjoint `test` songs and STRUM-recompute note,
+phrase, lyric/alignment, talky, per-Harmony-track, and assembled-MIDI evidence.
+The versioned STRUM-owned `strum-vocal-profile-quality-policy/v1` pins every
+metric threshold and aggregation rule before held-out evaluation. A future
+package gate must recompute those outcomes, require every selected Harmony
+track's source-task/policy/metric evidence, and reject missing or failed
+evidence—it may not trust a report's claimed pass flag. This is a contract
+validator only: the descriptor still names unimplemented Harmony composition,
+evaluation, package, and `vocal_chart_profile_handler/v1` stages, and it still
+forbids a legacy charter, external lyrics, raw components, or fallback chart
+execution.
 
 Bass invokes the same five-lane CRNN implementation only after STRUM has
 revalidated the dedicated `bass_onset_fret` task view and its `PART BASS`

@@ -251,7 +251,7 @@ def test_vocals_pipeline_exposes_strict_private_catalog_training_contract() -> N
     }
     assert contract["catalog_admission"]["harmony"] == {
         "tracks": ["HARM1", "HARM2", "HARM3"],
-        "selection": "exact-declared-harmony-track/v1",
+        "selection": "exact-approved-harmony-subset/v1",
         "source_task_format": "strum-vocal-harmony-source-task/v1",
         "required_audio_policy": "isolated-harmony-stem-only/v1",
         "forbidden_audio_roles": ["vocals", "mix"],
@@ -259,6 +259,23 @@ def test_vocals_pipeline_exposes_strict_private_catalog_training_contract() -> N
             "isolated_source_stem/v1",
             "isolated_separation_output/v1",
         ],
+        "subset": {
+            "minimum_tracks": 1,
+            "all_tracks_required": False,
+            "must_be_declared_by_selected_source_task": True,
+        },
+        "required_per_track_binding": {
+            "track_name": "HARM1|HARM2|HARM3",
+            "audio_role": "matching-harm1-harm2-harm3-role/v1",
+            "source_task": {
+                "format": "strum-vocal-harmony-source-task/v1",
+                "task_view_sha256": "sha256",
+                "source_policy_format": "octave-vocal-harmony-source-policy/v1",
+                "source_policy_sha256": "sha256",
+                "catalog_control_sha256": "sha256",
+                "harmony_tracks": "exact-selected-subset/v1",
+            },
+        },
     }
     composition = contract["composition_contract"]
     assert composition["format"] == "strum-vocal-chart-composition-contract/v1"
@@ -274,8 +291,10 @@ def test_vocals_pipeline_exposes_strict_private_catalog_training_contract() -> N
     assert composition["required_components"][-1] == {
         "id": "vocals.harmony_model",
         "producer_pipeline": "not_implemented",
-        "required_outputs": ["HARM1", "HARM2", "HARM3"],
+        "required_outputs": "approved-nonempty-HARM-subset/v1",
         "source_policy": "vocals.harmony-source-policy/v1",
+        "per_track_binding": "strum-vocal-harmony-track-binding/v1",
+        "same_source_task_for_selected_tracks": True,
     }
     assert composition["compatibility"] == {
         "component_task_lineage": "same-catalog-control-and-source-partition/v1",
@@ -297,20 +316,29 @@ def test_vocals_pipeline_exposes_strict_private_catalog_training_contract() -> N
     assert evaluation["split"] == "test"
     assert evaluation["source_partition"] == "source-id-disjoint-from-train-and-val/v1"
     assert evaluation["evidence"]["recomputed_by"] == "strum"
-    assert evaluation["evidence"]["quality_thresholds"] == (
-        "explicit-profile-policy-not-yet-defined"
+    quality_policy = evaluation["evidence"]["quality_policy"]
+    assert quality_policy["format"] == "strum-vocal-profile-quality-policy/v1"
+    assert quality_policy["outcomes"] == "strum-vocal-profile-quality-outcomes/v1"
+    assert quality_policy["aggregation"] == "all-required-metrics-pass/v1"
+    assert "strum-quality-policy-sha256" in evaluation["evidence"]["binds"]
+    assert "per-track-harmony-source-task-view-sha256" in evaluation["evidence"]["binds"]
+    packaging = contract["packaging_contract"]
+    assert packaging["format"] == "strum-vocal-profile-package-contract/v1"
+    assert packaging["status"] == "not_available"
+    assert packaging["quality_policy"]["failure_behavior"] == "reject-package/v1"
+    assert packaging["quality_policy"]["verification"] == (
+        "recompute-outcomes-do-not-trust-reported-pass/v1"
     )
-    assert contract["packaging_contract"] == {
-        "format": "strum-vocal-profile-package-contract/v1",
-        "status": "not_available",
-        "requires": [
-            "completed-strum-recomputed-held-out-report",
-            "hash-verified-required-components-and-configurations",
-            "validated-strum-profile-composition-v1-graph",
-            "registered-vocal-chart-execution-handler",
-        ],
-        "raw_component_bundle_deployment_status": "not_deployable",
+    assert packaging["quality_policy_definition"]["aggregation"] == {
+        "per_metric": "all-required-metrics-pass/v1",
+        "harmony": "all-selected-approved-tracks-pass/v1",
+        "assembled_chart": "lead-and-every-selected-harmony-track-pass/v1",
+        "minimum_selected_harmony_tracks": 1,
+        "threshold_selection": "policy-pinned-before-held-out-evaluation/v1",
+        "failed_or_missing_outcome": "package-rejected/v1",
     }
+    assert len(packaging["quality_policy_sha256"]) == 64
+    assert "all-required-strum-quality-policy-outcomes-pass" in packaging["requires"]
     assert contract["execution"] == {
         "status": "not_available",
         "inference_capability": None,
