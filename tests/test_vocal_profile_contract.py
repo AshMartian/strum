@@ -5,6 +5,7 @@ import json
 
 import pytest
 
+import src.vocal_profile_contract as vocal_profile_contract
 from src.vocal_profile_contract import (
     VOCAL_HELD_OUT_REPORT_FORMAT,
     VocalProfileContractError,
@@ -102,6 +103,19 @@ def test_harmony_contract_supports_approved_subsets_with_exact_track_role_bindin
     assert "midi_path" not in rendered
 
 
+def test_harmony_contract_returns_canonical_evidence_immune_to_input_mutation() -> None:
+    tracks = ["HARM1", "HARM3"]
+    bindings = [_binding(track, tracks) for track in tracks]
+
+    result = validate_vocal_harmony_bindings(tracks, bindings)
+    bindings[0]["source_task"]["harmony_tracks"][0] = "HARM2"
+
+    returned_task = result["bindings"][0]["source_task"]
+    assert returned_task["harmony_tracks"] == ["HARM1", "HARM3"]
+    assert returned_task is not bindings[0]["source_task"]
+    assert returned_task["harmony_tracks"] is not bindings[0]["source_task"]["harmony_tracks"]
+
+
 @pytest.mark.parametrize(
     ("mutate", "message"),
     [
@@ -160,6 +174,20 @@ def test_quality_policy_definition_is_reconstructed_from_its_pinned_content() ->
     fresh_copy = vocal_profile_quality_policy_definition()
     assert fresh_copy["metric_requirements"]["pitched_notes"]["onset_f1"]["threshold"] == 0.80
     assert fresh_copy["format"] == vocal_profile_quality_policy_identity()["format"]
+
+
+def test_quality_policy_identity_cannot_diverge_from_its_pinned_hash() -> None:
+    expected = vocal_profile_quality_policy_identity()
+    original_id = vocal_profile_contract._VOCAL_PROFILE_QUALITY_POLICY["policy_id"]
+    try:
+        vocal_profile_contract._VOCAL_PROFILE_QUALITY_POLICY["policy_id"] = "mutated-policy-id"
+
+        assert vocal_profile_quality_policy_identity() == expected
+        assert (
+            evaluate_vocal_profile_quality_report(_passing_report())["quality_policy"] == expected
+        )
+    finally:
+        vocal_profile_contract._VOCAL_PROFILE_QUALITY_POLICY["policy_id"] = original_id
 
 
 def test_quality_gate_rejects_missing_or_non_strum_policy_and_failed_evidence() -> None:

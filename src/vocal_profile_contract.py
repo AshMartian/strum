@@ -122,9 +122,16 @@ def vocal_profile_quality_policy_definition() -> dict[str, object]:
 
 def vocal_profile_quality_policy_identity() -> dict[str, object]:
     """Return the safe immutable identity hosts and reports must pin."""
+    # Never read identity data from the mutable module-level source object.
+    # The canonical JSON was fixed when this module loaded; decode it anew so
+    # an in-process caller cannot make the published ID disagree with the
+    # pinned policy hash.
+    policy = vocal_profile_quality_policy_definition()
+    policy_id = policy["policy_id"]
+    assert isinstance(policy_id, str)
     return {
         "format": VOCAL_PROFILE_QUALITY_POLICY_FORMAT,
-        "policy_id": _VOCAL_PROFILE_QUALITY_POLICY["policy_id"],
+        "policy_id": policy_id,
         "sha256": VOCAL_PROFILE_QUALITY_POLICY_SHA256,
     }
 
@@ -258,7 +265,18 @@ def validate_vocal_harmony_bindings(
             {
                 "track_name": track,
                 "audio_role": role,
-                "source_task": dict(source_task),
+                # Construct the exact canonical identity from validated
+                # scalar values.  ``dict(source_task)`` shallow-copied its
+                # nested ``harmony_tracks`` list, letting a caller mutate
+                # already-validated evidence after this function returned.
+                "source_task": {
+                    "format": task_identity[3],
+                    "task_view_sha256": task_identity[0],
+                    "source_policy_format": HARMONY_SOURCE_POLICY_FORMAT,
+                    "source_policy_sha256": task_identity[1],
+                    "catalog_control_sha256": task_identity[2],
+                    "harmony_tracks": list(task_identity[4]),
+                },
             }
         )
     if seen_tracks != set(tracks):
