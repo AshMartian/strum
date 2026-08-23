@@ -83,8 +83,10 @@ presented as a successful OCTAVE auto-chart result.
   `vocals.talky_activity` components; no raw component is a profile. Talky
   labels are only source note-96 spans and require positives in train and val.
   The current 58-song OCTAVE curated catalog contains only two lead-talky
-  sources, both in its deterministic train split, so it is intentionally not
-  sufficient to start that worker until curation adds held-out talky examples.
+  sources. A declared `sha256-source-id-seed-mod-100/v2` 67/33 smoke split can
+  place one positive in each split and exercise the worker, but its zero-F1
+  one-epoch result is not quality evidence; curation still needs substantially
+  more held-out talky examples.
   The planned generic Vocal descriptor retains harmony, composition, held-out
   evaluation, packaging, and execution stages.
 - ✅ Catalog-backed, worker-trainable Guitar/Bass fret-mapper experiments.
