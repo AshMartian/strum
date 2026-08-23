@@ -16,6 +16,7 @@ from src.worker import (
     PIPELINES,
     PROTOCOL_VERSION,
     _chart_result_contract,
+    _revision,
     _run_without_legacy_output,
     _runtime_payload,
     _write_expert_guitar_midi,
@@ -68,6 +69,22 @@ def test_probe_declares_versioned_runtime_and_available_pipelines() -> None:
         "strum-chart-preflight/v1",
         "strum-chart-run/v1",
     ]
+
+
+def test_runtime_revision_ignores_untracked_non_source_files(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    def check_output(command: list[str], **_kwargs: object) -> str:
+        calls.append(command)
+        return "" if "--untracked-files=no" in command else "0123456789abcdef\n"
+
+    monkeypatch.delenv("STRUM_SOURCE_REVISION", raising=False)
+    monkeypatch.setattr("src.worker.subprocess.check_output", check_output)
+
+    assert _revision() == ("0123456789abcdef", False)
+    assert calls[1][-2:] == ["--porcelain", "--untracked-files=no"]
 
 
 def test_chart_transform_schema_exposes_opaque_parent_artifact_selection() -> None:

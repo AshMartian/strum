@@ -281,7 +281,14 @@ def _revision() -> tuple[str | None, bool | None]:
         ).strip()
         dirty = bool(
             subprocess.check_output(
-                ["git", "-C", str(PROJECT_ROOT), "status", "--porcelain"],
+                [
+                    "git",
+                    "-C",
+                    str(PROJECT_ROOT),
+                    "status",
+                    "--porcelain",
+                    "--untracked-files=no",
+                ],
                 text=True,
                 stderr=subprocess.DEVNULL,
             ).strip()
