@@ -77,10 +77,19 @@ class PipelineDescriptor:
     status: str
     preparation_status: str
     training_status: str
+    # These names are safe to reveal to a host renderer, but their values are
+    # always resolved and injected by the host's main process.  Keeping them
+    # in STRUM's descriptor avoids a growing OCTAVE-side list of pipeline IDs.
+    private_request_fields: tuple[str, ...] = ()
+    catalog_inspection_option_keys: tuple[str, ...] = ()
 
     def as_json(self) -> dict[str, object]:
         data = asdict(self)
         data["checkpoint_outputs"] = list(self.checkpoint_outputs)
+        data["private_request_fields"] = list(self.private_request_fields)
+        data["catalog_inspection_option_keys"] = list(
+            self.catalog_inspection_option_keys
+        )
         return data
 
 
@@ -202,6 +211,12 @@ PIPELINES = (
         status="catalog_ready",
         preparation_status="available",
         training_status="available",
+        private_request_fields=("catalog_root",),
+        catalog_inspection_option_keys=(
+            "audio_role",
+            "fallback_audio_role",
+            "required_difficulty",
+        ),
     ),
     PipelineDescriptor(
         id="bass.onset-fret/v1",
@@ -224,6 +239,12 @@ PIPELINES = (
         status="catalog_ready",
         preparation_status="available",
         training_status="available",
+        private_request_fields=("catalog_root",),
+        catalog_inspection_option_keys=(
+            "audio_role",
+            "fallback_audio_role",
+            "required_difficulty",
+        ),
     ),
     PipelineDescriptor(
         id="chart_transform.five_lane/v1",
@@ -242,6 +263,8 @@ PIPELINES = (
         status="catalog_ready",
         preparation_status="available",
         training_status="available",
+        private_request_fields=("parent_bundle",),
+        catalog_inspection_option_keys=("instrument", "target_difficulty"),
     ),
     PipelineDescriptor(
         id="drums.onset-classifier/v1",
@@ -261,6 +284,12 @@ PIPELINES = (
         status="catalog_ready",
         preparation_status="available",
         training_status="available",
+        private_request_fields=("catalog_root",),
+        catalog_inspection_option_keys=(
+            "audio_role",
+            "fallback_audio_role",
+            "required_difficulty",
+        ),
     ),
     *(
         PipelineDescriptor(
@@ -290,6 +319,12 @@ PIPELINES = (
             status="catalog_ready",
             preparation_status="available",
             training_status="planned",
+            catalog_inspection_option_keys=(
+                "audio_role",
+                "fallback_audio_role",
+                "disable_fallback",
+                "required_difficulty",
+            ),
         )
         for task_kind, pipeline_id in sorted(CATALOG_TASK_PIPELINES.items())
         if task_kind != "bass_onset_fret"

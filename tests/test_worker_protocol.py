@@ -101,6 +101,24 @@ def test_chart_transform_schema_exposes_opaque_parent_artifact_selection() -> No
         "format": "strum-model-bundle-artifact-id",
     }
     assert "parent_bundle" not in properties
+    assert descriptor.private_request_fields == ("parent_bundle",)
+
+
+def test_pipeline_descriptors_advertise_safe_host_orchestration_requirements() -> None:
+    guitar = next(item for item in PIPELINES if item.id == "guitar.onset-fret/v1")
+    assert guitar.private_request_fields == ("catalog_root",)
+    assert guitar.catalog_inspection_option_keys == (
+        "audio_role",
+        "fallback_audio_role",
+        "required_difficulty",
+    )
+    rendered = guitar.as_json()
+    assert rendered["private_request_fields"] == ["catalog_root"]
+    assert rendered["catalog_inspection_option_keys"] == [
+        "audio_role",
+        "fallback_audio_role",
+        "required_difficulty",
+    ]
 
 
 def test_legacy_inference_output_is_not_exposed_to_worker_clients(
