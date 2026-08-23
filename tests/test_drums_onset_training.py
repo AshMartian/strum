@@ -15,19 +15,17 @@ from src.drums_onset_training import (
 )
 
 
-def test_training_options_are_strict_and_require_catalog_root(tmp_path: Path) -> None:
-    options = DrumsTrainingOptions.from_mapping(
-        {"model_id": "drums-local-v1", "catalog_root": str(tmp_path), "epochs": 1}
-    )
+def test_training_options_are_strict_and_do_not_accept_catalog_locations(tmp_path: Path) -> None:
+    options = DrumsTrainingOptions.from_mapping({"model_id": "drums-local-v1", "epochs": 1})
 
     assert options.profile == "onset_classifier_v2"
     assert options.epochs == 1
-    with pytest.raises(DrumsTrainingError, match="catalog_root"):
-        DrumsTrainingOptions.from_mapping({"model_id": "drums-local-v1"})
     with pytest.raises(DrumsTrainingError, match="unsupported"):
         DrumsTrainingOptions.from_mapping(
-            {"model_id": "drums-local-v1", "catalog_root": str(tmp_path), "device": "cuda"}
+            {"model_id": "drums-local-v1", "catalog_root": str(tmp_path)}
         )
+    with pytest.raises(DrumsTrainingError, match="epochs"):
+        DrumsTrainingOptions.from_mapping({"model_id": "drums-local-v1", "epochs": True})
 
 
 def test_experiment_ledger_links_task_preprocessing_and_checkpoint_without_paths(
@@ -46,9 +44,7 @@ def test_experiment_ledger_links_task_preprocessing_and_checkpoint_without_paths
     }
     index = tmp_path / "train_index.json"
     index.write_text("{}")
-    options = DrumsTrainingOptions.from_mapping(
-        {"model_id": "drums-local-v1", "catalog_root": str(tmp_path), "epochs": 1}
-    )
+    options = DrumsTrainingOptions.from_mapping({"model_id": "drums-local-v1", "epochs": 1})
 
     payload = _experiment_payload(
         task_view=task_view,
@@ -122,7 +118,8 @@ def test_worker_training_records_catalog_and_checkpoint_lineage(
     result = run_drums_onset_training(
         task_view,
         output,
-        {"model_id": "drums-local-v1", "catalog_root": str(tmp_path), "epochs": 1},
+        {"model_id": "drums-local-v1", "epochs": 1},
+        catalog_root=tmp_path,
     )
 
     ledger = json.loads((output / "experiment.json").read_text())

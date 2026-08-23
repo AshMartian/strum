@@ -140,7 +140,6 @@ DRUMS_ONSET_TRAIN_SCHEMA = _object_schema(
     },
     required=("model_id",),
 )
-)
 
 PIPELINES = (
     PipelineDescriptor(
@@ -1048,9 +1047,8 @@ def _read_train_request(request_path: Path) -> dict[str, Any]:
         raw = json.loads(request_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise WorkerRequestError("request is unreadable or not valid JSON") from error
-    expected = {"pipeline_id", "task_view", "output", "options"}
-    permitted = expected | {"catalog_root"}
-    if not isinstance(raw, dict) or set(raw) - permitted or not expected <= set(raw):
+    base_fields = {"pipeline_id", "task_view", "output", "options"}
+    if not isinstance(raw, dict) or not base_fields.issubset(raw):
         raise WorkerRequestError("training request has unsupported fields")
     if not all(
         isinstance(raw[key], str) and raw[key] for key in ("pipeline_id", "task_view", "output")
@@ -1060,8 +1058,13 @@ def _read_train_request(request_path: Path) -> dict[str, Any]:
         )
     if not isinstance(raw["options"], dict):
         raise WorkerRequestError("training options must be an object")
-    if "catalog_root" in raw and (not isinstance(raw["catalog_root"], str) or not raw["catalog_root"]):
-        raise WorkerRequestError("training catalog_root must be a non-empty string")
+    if raw["pipeline_id"] in {"guitar.onset-fret/v1", "drums.onset-classifier/v1"}:
+        if set(raw) != base_fields | {"catalog_root"}:
+            raise WorkerRequestError("catalog-backed training request has unsupported fields")
+        if not isinstance(raw["catalog_root"], str) or not raw["catalog_root"]:
+            raise WorkerRequestError("catalog-backed training requires worker-local catalog_root")
+    elif set(raw) != base_fields:
+        raise WorkerRequestError("training request has unsupported fields")
     return raw
 
 

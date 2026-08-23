@@ -33,7 +33,6 @@ class DrumsTrainingOptions:
     """Validated, worker-owned configuration for the established trainer."""
 
     model_id: str
-    catalog_root: Path
     profile: str = TRAINING_PROFILE
     seed: int = 20260813
     batch_size: int = 256
@@ -50,7 +49,6 @@ class DrumsTrainingOptions:
             raise DrumsTrainingError("training options must be an object")
         permitted = {
             "model_id",
-            "catalog_root",
             "profile",
             "seed",
             "batch_size",
@@ -63,14 +61,12 @@ class DrumsTrainingOptions:
         }
         if set(raw) - permitted:
             raise DrumsTrainingError("unsupported Drums training option")
-        model_id, catalog_root = raw.get("model_id"), raw.get("catalog_root")
+        model_id = raw.get("model_id")
         if not isinstance(model_id, str) or not model_id:
             raise DrumsTrainingError("Drums training requires model_id")
-        if not isinstance(catalog_root, str) or not catalog_root:
-            raise DrumsTrainingError("Drums training requires catalog_root")
 
-        defaults = cls(model_id=model_id, catalog_root=Path(catalog_root))
-        values: dict[str, Any] = {"model_id": model_id, "catalog_root": Path(catalog_root)}
+        defaults = cls(model_id=model_id)
+        values: dict[str, Any] = {"model_id": model_id}
         for key in (
             "profile",
             "seed",
@@ -86,12 +82,16 @@ class DrumsTrainingOptions:
 
         if values["profile"] != TRAINING_PROFILE:
             raise DrumsTrainingError("unsupported Drums training profile")
-        if not isinstance(values["seed"], int):
+        if isinstance(values["seed"], bool) or not isinstance(values["seed"], int):
             raise DrumsTrainingError("seed must be an integer")
         for key in ("batch_size", "epochs", "max_train_batches", "max_test_batches"):
-            if not isinstance(values[key], int) or values[key] < 1:
+            if isinstance(values[key], bool) or not isinstance(values[key], int) or values[key] < 1:
                 raise DrumsTrainingError(f"{key} must be a positive integer")
-        if not isinstance(values["num_workers"], int) or values["num_workers"] < 0:
+        if (
+            isinstance(values["num_workers"], bool)
+            or not isinstance(values["num_workers"], int)
+            or values["num_workers"] < 0
+        ):
             raise DrumsTrainingError("num_workers must be a non-negative integer")
         if (
             not isinstance(values["learning_rate"], (float, int))
@@ -266,16 +266,22 @@ def _run_existing_trainer(config: Any, options: DrumsTrainingOptions) -> dict[st
 
 
 def run_drums_onset_training(
-    task_view_path: str | Path, output_dir: str | Path, raw_options: object
+    task_view_path: str | Path,
+    output_dir: str | Path,
+    raw_options: object,
+    *,
+    catalog_root: str | Path,
 ) -> dict[str, object]:
     """Execute the established Drums classifier trainer from a catalog task view."""
     task_view_path, output = Path(task_view_path).resolve(), Path(output_dir).resolve()
     options = DrumsTrainingOptions.from_mapping(raw_options)
+    if not isinstance(catalog_root, (str, Path)) or not str(catalog_root):
+        raise DrumsTrainingError("Drums training requires worker-local catalog_root")
     task_view = _load_task_view(task_view_path)
     output.mkdir(parents=True, exist_ok=True)
 
     try:
-        indexes = _prepare_cache(task_view_path, output, options.catalog_root)
+        indexes = _prepare_cache(task_view_path, output, Path(catalog_root))
     except CatalogValidationError as error:
         raise DrumsTrainingError("catalog no longer matches the Drums task view") from error
     config = _load_training_config(output, options)

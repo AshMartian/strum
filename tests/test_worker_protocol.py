@@ -15,6 +15,7 @@ from src.models.chart_transform import EventTransformMLP
 from src.worker import (
     PIPELINES,
     PROTOCOL_VERSION,
+    WorkerRequestError,
     _run_without_legacy_output,
     _runtime_payload,
     _write_expert_guitar_midi,
@@ -163,12 +164,13 @@ def test_drums_pipeline_exposes_a_strict_worker_training_schema() -> None:
     assert descriptor.training_status == "available"
     assert descriptor.checkpoint_outputs == ("drums_onset_classifier",)
     assert descriptor.inference_capability is None
+    assert descriptor.train_schema is not None
+    assert "catalog_root" not in descriptor.train_schema["properties"]
     assert descriptor.train_schema == {
         "type": "object",
         "additionalProperties": False,
         "properties": {
             "model_id": {"type": "string"},
-            "catalog_root": {"type": "string"},
             "profile": {
                 "type": "string",
                 "enum": ["onset_classifier_v2"],
@@ -183,7 +185,7 @@ def test_drums_pipeline_exposes_a_strict_worker_training_schema() -> None:
             "num_workers": {"type": "integer", "minimum": 0, "default": 0},
             "strum_revision": {"type": "string"},
         },
-        "required": ["model_id", "catalog_root"],
+        "required": ["model_id"],
     }
 
 
@@ -199,9 +201,9 @@ def test_drums_training_request_routes_catalog_task_view_to_existing_trainer(
                 "pipeline_id": "drums.onset-classifier/v1",
                 "task_view": str(task_view),
                 "output": str(tmp_path / "experiment"),
+                "catalog_root": str(tmp_path / "catalog"),
                 "options": {
                     "model_id": "curated-drums-v1",
-                    "catalog_root": str(tmp_path / "catalog"),
                     "epochs": 1,
                     "max_train_batches": 1,
                     "max_test_batches": 1,
@@ -212,12 +214,17 @@ def test_drums_training_request_routes_catalog_task_view_to_existing_trainer(
     observed: dict[str, object] = {}
 
     def fake_train(
-        received_task_view: str | Path, output_dir: str | Path, options: object
+        received_task_view: str | Path,
+        output_dir: str | Path,
+        options: object,
+        *,
+        catalog_root: str | Path,
     ) -> dict[str, object]:
         print(f"legacy trainer input={received_task_view}")
         observed["task_view"] = received_task_view
         observed["output_dir"] = output_dir
         observed["options"] = options
+        observed["catalog_root"] = catalog_root
         return {
             "status": "completed",
             "pipeline_id": "drums.onset-classifier/v1",
@@ -236,8 +243,27 @@ def test_drums_training_request_routes_catalog_task_view_to_existing_trainer(
     assert observed["task_view"] == str(task_view)
     assert observed["output_dir"] == str(tmp_path / "experiment")
     assert observed["options"] == json.loads(request.read_text())["options"]
+    assert observed["catalog_root"] == str(tmp_path / "catalog")
     captured = capfd.readouterr()
     assert str(task_view) not in captured.out
+
+
+def test_chart_transform_training_rejects_drums_worker_location_fields(tmp_path: Path) -> None:
+    request = tmp_path / "chart-transform-train.json"
+    request.write_text(
+        json.dumps(
+            {
+                "pipeline_id": "chart_transform.five_lane/v1",
+                "task_view": str(tmp_path / "pairs.json"),
+                "output": str(tmp_path / "experiment"),
+                "catalog_root": str(tmp_path / "catalog"),
+                "options": {"model_id": "not-run"},
+            }
+        )
+    )
+
+    with pytest.raises(WorkerRequestError, match="unsupported fields"):
+        run_training_request(request)
 
 
 def test_preflight_requires_hash_and_length_for_deployable_components(tmp_path: Path) -> None:
