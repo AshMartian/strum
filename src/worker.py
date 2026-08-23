@@ -962,11 +962,7 @@ def _profile_discovery_record(
     if executable_policies and not _executable_profile_contract_is_valid(bundle, profile):
         executable_policies = []
     return {
-        "profile_id": profile.profile_id,
-        "capability": profile.capability,
-        "instruments": list(profile.instruments),
-        "difficulty_policies": list(profile.difficulty_policies),
-        "required_components": list(profile.required_components),
+        **bundle.profile_summary(profile),
         "profile_configuration_sha256": profile.configuration_sha256,
         "profile_configuration_byte_length": profile.configuration_byte_length,
         "execution": {
