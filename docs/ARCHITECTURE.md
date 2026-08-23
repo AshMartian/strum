@@ -19,8 +19,8 @@ fails closed to the profiles declared by a validated model bundle:
 | Guitar onset/fret | Worker-trainable, experiment-only | Safe task views plus path-free experiment bundles; auto-chart profile packaging remains required |
 | Bass onset/fret | Worker-trainable, experiment-only | Revalidated `PART BASS` task views and distinct `bass.onset`/`bass.fret` components; a Bass evaluator/profile is required before auto-charting |
 | `drums.onset-classifier-evaluation/v1` | Executable evaluator only | Prepared V2 onset windows → eight class probabilities; explicitly not a chart handler |
-| Generic Keys, Pro Guitar, Pro Bass, Pro Keys, section | Catalog-ready task views, training planned | No worker trainer or deployable profile; Pro discovery declares exact REAL_* labels and structured missing stages |
-| Vocals, Guitar/Bass mapper | Worker-trainable experiments | No deployable profile without their dedicated evaluation/package gates |
+| Pro Guitar, Pro Bass, Pro Keys | Catalog-ready task views, training planned | No worker trainer or deployable profile; exact REAL_* labels and structured missing stages are declared |
+| Vocals, Guitar/Bass mapper, Guitar/Bass section | Worker-trainable experiments | No deployable profile without their dedicated evaluation/package/runtime gates |
 | Legacy batch pipeline | Research / compatibility scripts | Not a worker execution handler |
 
 OCTAVE owns source import, rights decisions, curation, runtime selection, and
@@ -381,8 +381,9 @@ missing stages, and an explicit `execution.status: not_available`. Pro Keys
 accepts only `PART REAL_KEYS_X` for the Expert path; Pro Guitar/Bass retain
 the standard versus `_22` source variant for their future encoder. OCTAVE can
 render those facts directly rather than treating a planned descriptor as a
-disabled version of a five-lane model. Section descriptors continue to name
-their preprocessor, worker, and runtime gaps.
+disabled version of a five-lane model. Section descriptors now expose their
+real catalog worker while retaining evaluation, profile-packaging, and runtime
+integration requirements.
 
 Discovery is dynamic rather than hard-coded in OCTAVE:
 

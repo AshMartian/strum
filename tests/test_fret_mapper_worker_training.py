@@ -229,11 +229,9 @@ def test_fret_mapper_pipelines_advertise_strict_worker_training(
         ("strum.instrument-chart/pro-guitar/v1", "pro_string_fret_target_encoder/v1"),
         ("strum.instrument-chart/pro-bass/v1", "pro_bass_sequence_trainer/v1"),
         ("strum.instrument-chart/pro-keys/v1", "pro_keys_pitch_target_encoder/v1"),
-        ("strum.section-classifier/guitar/v1", "section_training_worker"),
-        ("strum.section-classifier/bass/v1", "section_runtime_integration"),
     ],
 )
-def test_prepare_only_pro_and_section_pipelines_publish_their_actual_gaps(
+def test_prepare_only_pro_pipelines_publish_their_actual_gaps(
     pipeline_id: str, required_gap: str
 ) -> None:
     descriptor = next(item for item in PIPELINES if item.id == pipeline_id)

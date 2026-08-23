@@ -820,12 +820,14 @@ python scripts/build_mapper_dataset.py \
   --catalog-root /path/to/catalog --cache-dir /path/to/mapper-cache
 ```
 
-These task views make each family catalog-ready. They do not invent missing
-trainers: Bass currently reuses the Guitar/Bass chart representation, while
-Keys, Vocals, and Pro-instrument learned trainer architectures still need to
-be implemented before their task views can produce checkpoints. The declared
-label schemas are source contracts, not a claim that these future models share
-the five-lane representation.
+These task views make each family catalog-ready. Guitar/Bass section task views
+also feed a bounded worker experiment: STRUM derives six chart-pattern labels,
+materializes catalog-split log-mel windows, and trains `SectionClassifier/v1`.
+The resulting `section_classifier.guitar` or `section_classifier.bass`
+component has no inference profile; it must pass a section-routing evaluation
+and a dedicated runtime/profile contract before it can alter an auto-chart.
+Keys, Vocals, and Pro-instrument generic task views remain source contracts,
+not a claim that their future models share the five-lane representation.
 ### Catalog-backed chart-transform tasks
 
 The `chart_transform.five_lane/v1` pipeline learns Expert → Hard, Medium, or

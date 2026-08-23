@@ -213,6 +213,17 @@ FRET_MAPPER_TRAIN_SCHEMA = _object_schema(
     },
     required=("model_id",),
 )
+SECTION_TRAIN_SCHEMA = _object_schema(
+    {
+        "model_id": {"type": "string"},
+        "epochs": {"type": "integer", "minimum": 1, "default": 15},
+        "batch_size": {"type": "integer", "minimum": 1, "default": 256},
+        "learning_rate": {"type": "number", "exclusiveMinimum": 0, "default": 0.001},
+        "num_workers": {"type": "integer", "minimum": 0, "default": 0},
+        "device": {"type": "string", "enum": ["auto", "cuda", "mps", "cpu"], "default": "auto"},
+    },
+    required=("model_id",),
+)
 PLANNED_TRAINING_REQUIREMENTS: dict[str, tuple[str, ...]] = {
     "vocals": (
         "vocal_pitch_phrase_lyrics_preprocessor",
@@ -249,12 +260,14 @@ PLANNED_TRAINING_REQUIREMENTS: dict[str, tuple[str, ...]] = {
     ),
     "section_guitar": (
         "section_window_preprocessor",
-        "section_training_worker",
+        "section_profile_evaluation",
+        "section_profile_packaging",
         "section_runtime_integration",
     ),
     "section_bass": (
         "section_window_preprocessor",
-        "section_training_worker",
+        "section_profile_evaluation",
+        "section_profile_packaging",
         "section_runtime_integration",
     ),
 }
@@ -559,19 +572,27 @@ PIPELINES = (
                 }
             ),
             train_schema=(
-                FRET_MAPPER_TRAIN_SCHEMA if task_kind.startswith("fret_mapper_") else None
+                FRET_MAPPER_TRAIN_SCHEMA
+                if task_kind.startswith("fret_mapper_")
+                else SECTION_TRAIN_SCHEMA
+                if task_kind.startswith("section_")
+                else None
             ),
             checkpoint_outputs=(
                 (f"fret_mapper.{task_kind.removeprefix('fret_mapper_')}",)
                 if task_kind.startswith("fret_mapper_")
+                else (f"section_classifier.{task_kind.removeprefix('section_')}",)
+                if task_kind.startswith("section_")
                 else (task_kind,)
             ),
             inference_capability=None,
             status="catalog_ready",
             preparation_status="available",
-            training_status="available" if task_kind.startswith("fret_mapper_") else "planned",
+            training_status=(
+                "available" if task_kind.startswith(("fret_mapper_", "section_")) else "planned"
+            ),
             private_request_fields=("catalog_root",)
-            if task_kind.startswith("fret_mapper_")
+            if task_kind.startswith(("fret_mapper_", "section_"))
             else (),
             catalog_inspection_option_keys=(
                 "audio_role",
@@ -586,6 +607,12 @@ PIPELINES = (
                     "instrument_specific_profile_packaging",
                 )
                 if task_kind.startswith("fret_mapper_")
+                else (
+                    "section_profile_evaluation",
+                    "section_profile_packaging",
+                    "section_runtime_integration",
+                )
+                if task_kind.startswith("section_")
                 else PLANNED_TRAINING_REQUIREMENTS.get(task_kind, ())
             ),
             training_contract=PRO_TRAINING_CONTRACTS.get(task_kind),
@@ -2094,6 +2121,8 @@ def _read_train_request(request_path: Path) -> dict[str, Any]:
         "drums.onset-classifier/v1",
         "strum.fret-mapper/guitar/v1",
         "strum.fret-mapper/bass/v1",
+        "strum.section-classifier/guitar/v1",
+        "strum.section-classifier/bass/v1",
     }:
         if set(raw) != base_fields | {"catalog_root"}:
             raise WorkerRequestError("catalog-backed training request has unsupported fields")
@@ -2374,6 +2403,48 @@ def run_training_request(request_path: Path) -> dict[str, object]:
         except (FretMapperTrainingError, OSError, TypeError, ValueError) as error:
             raise WorkerRequestError(
                 "fret-mapper training request failed validation or execution"
+            ) from error
+        return {
+            "status": "completed",
+            "pipeline_id": pipeline_id,
+            "model_id": preflight["model_id"],
+            "bundle_name": Path(result["bundle_dir"]).name,
+            "manifest_sha256": preflight["manifest_sha256"],
+            "components": preflight["components"],
+            "metrics": result["metrics"],
+            "deployment_status": result["deployment_status"],
+        }
+    if pipeline_id in {"strum.section-classifier/guitar/v1", "strum.section-classifier/bass/v1"}:
+        from src.section_worker_training import (  # noqa: PLC0415
+            SectionTrainingError,
+            SectionTrainingOptions,
+            run_catalog_section_training,
+        )
+
+        if "parent_bundle" in request:
+            raise WorkerRequestError("section training does not accept parent_bundle")
+        catalog_root = request.get("catalog_root")
+        if not isinstance(catalog_root, str) or not catalog_root:
+            raise WorkerRequestError("section training requires worker-local catalog_root")
+        try:
+            options = SectionTrainingOptions.from_mapping(request["options"])
+            revision, _dirty = _revision()
+            result = run_catalog_section_training(
+                task_view_path=Path(request["task_view"]),
+                output_dir=Path(request["output"]),
+                catalog_root=Path(catalog_root),
+                pipeline_id=pipeline_id,
+                options=options,
+                strum_revision=revision,
+            )
+            preflight = preflight_bundle(
+                result["bundle_dir"], required_components=descriptor.checkpoint_outputs
+            )
+        except (BundleValidationError, CatalogValidationError):
+            raise
+        except (SectionTrainingError, OSError, TypeError, ValueError) as error:
+            raise WorkerRequestError(
+                "section training request failed validation or execution"
             ) from error
         return {
             "status": "completed",
