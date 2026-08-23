@@ -41,7 +41,6 @@ class GuitarTrainingOptions:
     """Bounded knobs supported by the existing two-stage training scripts."""
 
     model_id: str
-    catalog_root: Path
     epochs: int = 25
     batch_size: int = 128
     device: str = "auto"
@@ -49,16 +48,13 @@ class GuitarTrainingOptions:
 
     @classmethod
     def from_mapping(cls, raw: dict[str, Any]) -> GuitarTrainingOptions:
-        permitted = {"model_id", "catalog_root", "epochs", "batch_size", "device", "limit_songs"}
+        permitted = {"model_id", "epochs", "batch_size", "device", "limit_songs"}
         if set(raw) - permitted:
             raise GuitarTrainingError("unsupported Guitar training option")
         model_id = raw.get("model_id")
-        catalog_root = raw.get("catalog_root")
         if not isinstance(model_id, str) or not _MODEL_ID.fullmatch(model_id):
             raise GuitarTrainingError("Guitar model_id is invalid")
-        if not isinstance(catalog_root, str) or not catalog_root:
-            raise GuitarTrainingError("Guitar catalog_root is required")
-        values: dict[str, Any] = {"model_id": model_id, "catalog_root": Path(catalog_root)}
+        values: dict[str, Any] = {"model_id": model_id}
         for key, default in (("epochs", 25), ("batch_size", 128), ("limit_songs", 0)):
             value = raw.get(key, default)
             if (
@@ -233,13 +229,14 @@ def run_catalog_guitar_training(
     *,
     task_view_path: Path,
     output_dir: Path,
+    catalog_root: Path,
     options: GuitarTrainingOptions,
     strum_revision: str | None,
 ) -> dict[str, object]:
     """Run both genuine Guitar training stages and package a portable bundle."""
     if output_dir.exists() and (not output_dir.is_dir() or any(output_dir.iterdir())):
         raise GuitarTrainingError("Guitar output directory must be an empty directory")
-    task_view, songs = _read_task_view(task_view_path, options.catalog_root)
+    task_view, songs = _read_task_view(task_view_path, catalog_root)
     output_dir.mkdir(parents=True, exist_ok=True)
     config_path, portable_config = _write_training_config(output_dir, options)
     device = _resolve_device(options.device)
@@ -250,7 +247,7 @@ def run_catalog_guitar_training(
         "--manifest",
         str(task_view_path),
         "--catalog-root",
-        str(options.catalog_root),
+        str(catalog_root),
         "--cache-dir",
         str(output_dir / "cache"),
         "--splits",

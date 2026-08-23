@@ -114,13 +114,12 @@ CHART_TRANSFORM_TRAIN_SCHEMA = _object_schema(
 GUITAR_TRAIN_SCHEMA = _object_schema(
     {
         "model_id": {"type": "string"},
-        "catalog_root": {"type": "string"},
         "epochs": {"type": "integer", "minimum": 1, "default": 25},
         "batch_size": {"type": "integer", "minimum": 1, "default": 128},
         "device": {"type": "string", "enum": ["auto", "cuda", "mps", "cpu"], "default": "auto"},
         "limit_songs": {"type": "integer", "minimum": 0, "default": 0},
     },
-    required=("model_id", "catalog_root"),
+    required=("model_id",),
 )
 
 PIPELINES = (
@@ -976,7 +975,8 @@ def _read_train_request(request_path: Path) -> dict[str, Any]:
     except (OSError, json.JSONDecodeError) as error:
         raise WorkerRequestError("request is unreadable or not valid JSON") from error
     expected = {"pipeline_id", "task_view", "output", "options"}
-    if not isinstance(raw, dict) or set(raw) != expected:
+    permitted = expected | {"catalog_root"}
+    if not isinstance(raw, dict) or set(raw) - permitted or not expected <= set(raw):
         raise WorkerRequestError("training request has unsupported fields")
     if not all(
         isinstance(raw[key], str) and raw[key] for key in ("pipeline_id", "task_view", "output")
@@ -986,6 +986,8 @@ def _read_train_request(request_path: Path) -> dict[str, Any]:
         )
     if not isinstance(raw["options"], dict):
         raise WorkerRequestError("training options must be an object")
+    if "catalog_root" in raw and (not isinstance(raw["catalog_root"], str) or not raw["catalog_root"]):
+        raise WorkerRequestError("training catalog_root must be a non-empty string")
     return raw
 
 
@@ -1008,12 +1010,16 @@ def run_training_request(request_path: Path) -> dict[str, object]:
             run_catalog_guitar_training,
         )
 
+        catalog_root = request.get("catalog_root")
+        if not isinstance(catalog_root, str) or not catalog_root:
+            raise WorkerRequestError("Guitar training requires worker-local catalog_root")
         try:
             options = GuitarTrainingOptions.from_mapping(request["options"])
             revision, _dirty = _revision()
             result = run_catalog_guitar_training(
                 task_view_path=Path(request["task_view"]),
                 output_dir=Path(request["output"]),
+                catalog_root=Path(catalog_root),
                 options=options,
                 strum_revision=revision,
             )
@@ -1035,6 +1041,8 @@ def run_training_request(request_path: Path) -> dict[str, object]:
         }
     if pipeline_id != "chart_transform.five_lane/v1":
         raise WorkerRequestError("pipeline has no worker training handler")
+    if "catalog_root" in request:
+        raise WorkerRequestError("chart-transform training does not accept catalog_root")
 
     # Importing PyTorch belongs to an actual job, not `strum-worker probe`.
     from scripts.train_chart_transform import (  # noqa: PLC0415

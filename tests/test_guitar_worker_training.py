@@ -108,9 +108,9 @@ def test_guitar_worker_trains_from_catalog_task_view_and_packages_provenance(
                 "pipeline_id": "guitar.onset-fret/v1",
                 "task_view": str(task_view),
                 "output": str(output),
+                "catalog_root": str(tmp_path),
                 "options": {
                     "model_id": "catalog-guitar-v1",
-                    "catalog_root": str(tmp_path),
                     "epochs": 1,
                     "batch_size": 2,
                     "device": "cpu",
@@ -145,5 +145,6 @@ def test_guitar_pipeline_advertises_a_strict_worker_training_schema() -> None:
 
     assert descriptor.training_status == "available"
     assert descriptor.train_schema is not None
-    assert descriptor.train_schema["required"] == ["model_id", "catalog_root"]
+    assert descriptor.train_schema["required"] == ["model_id"]
+    assert "catalog_root" not in descriptor.train_schema["properties"]
     assert descriptor.checkpoint_outputs == ("guitar.onset", "guitar.fret")

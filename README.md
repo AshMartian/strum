@@ -530,8 +530,10 @@ For example, a Guitar task-view request is:
 ```
 
 `guitar.onset-fret/v1` is worker-trainable from its catalog task view. Its
-strict request requires `model_id` and the worker-local `catalog_root`, then
-accepts bounded `epochs`, `batch_size`, `device`, and `limit_songs` options.
+renderer-visible schema accepts only bounded `model_id`, `epochs`,
+`batch_size`, `device`, and `limit_songs` options. The private top-level
+`catalog_root` request field is worker-local configuration, not a pipeline
+option or renderer control.
 The worker invokes the established Guitar window-preprocessing and two-stage
 onset/fret trainers; it packages both resulting checkpoints as hash-verified
 `guitar.onset` and `guitar.fret` bundle components and records the task-view
@@ -554,9 +556,9 @@ worker output:
   "pipeline_id": "guitar.onset-fret/v1",
   "task_view": "/private/task-views/guitar-v1.json",
   "output": "/private/experiments/guitar-v1",
+  "catalog_root": "/private/catalog",
   "options": {
     "model_id": "my-guitar-v1",
-    "catalog_root": "/private/catalog",
     "epochs": 25,
     "batch_size": 128,
     "device": "auto"
