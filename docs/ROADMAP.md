@@ -13,7 +13,7 @@ auto-chart handler.
 | Guitar onset + fret | Available | Available; experiment-only | `guitar.hybrid-v2-rule/v1`, or evaluated `guitar.neural-v1-expert/v1`; Expert only |
 | Bass onset + fret | Available | Available; raw experiment gated | Evaluated `bass.neural-v1-expert/v1`; Expert only |
 | Keys onset + fret | Available | Available; raw experiment gated | Evaluated `keys.neural-v1-expert/v1`; Expert only |
-| Vocals activity + pitch | Available | Available; experiment-only | Planned; requires phrase/lyric/talky/harmony stages and Vocal evaluation |
+| Vocal lead components (activity/pitch, phrase, lyric, talky) | Available | Available; experiment-only | Planned; requires harmony, composition, and Vocal evaluation |
 | Drums onset + classifier | Available | Available; V2 evaluation package | `drums.v14-expert/v1` direct Expert charts; V2 is evaluation-only |
 | Five-lane difficulty transform (Guitar/Bass/Keys/Drums) | Available | Available | `difficulty.transform/v1` |
 | Generic Keys / Vocals / Pro Guitar / Pro Bass / Pro Keys | Available | Planned | Planned |
@@ -76,11 +76,17 @@ presented as a successful OCTAVE auto-chart result.
   evaluator and hash-verified Expert-only profile/runtime; Keys has the same
   distinct held-out evaluator and Expert-only runtime boundary.
 - ✅ Catalog-backed, worker-trainable Vocal frame activity/sung-pitch,
-  lead-phrase-boundary, and observed-lyric/alignment experiments. The exact
+  lead-phrase-boundary, observed-lyric/alignment, and pitchless/talky
+  experiments. The exact
   `PART VOCALS` source tasks emit separate `vocals.frame_activity_pitch`,
-  `vocals.phrase_boundaries`, and `vocals.lyric_alignment` components; no raw
-  component is a profile. The planned generic Vocal descriptor retains talky,
-  harmony, composition, held-out evaluation, packaging, and execution stages.
+  `vocals.phrase_boundaries`, `vocals.lyric_alignment`, and
+  `vocals.talky_activity` components; no raw component is a profile. Talky
+  labels are only source note-96 spans and require positives in train and val.
+  The current 58-song OCTAVE curated catalog contains only two lead-talky
+  sources, both in its deterministic train split, so it is intentionally not
+  sufficient to start that worker until curation adds held-out talky examples.
+  The planned generic Vocal descriptor retains harmony, composition, held-out
+  evaluation, packaging, and execution stages.
 - ✅ Catalog-backed, worker-trainable Guitar/Bass fret-mapper experiments.
   They require the `pitch` extra, preserve catalog train/validation splits,
   record the Basic Pitch distribution/version that generated their features,

@@ -21,7 +21,7 @@ fails closed to the profiles declared by a validated model bundle:
 | Keys onset/fret | Worker-trainable; evaluated profile executable | Revalidated `PART KEYS` task views and distinct `keys.onset`/`keys.fret` components; only an evaluated `keys.neural-v1-expert/v1` profile writes Expert Keys |
 | `drums.onset-classifier-evaluation/v1` | Executable evaluator only | Prepared V2 onset windows → eight class probabilities; explicitly not a chart handler |
 | Pro Guitar, Pro Bass, Pro Keys | Catalog-ready task views, training planned | No worker trainer or deployable profile; exact REAL_* labels and structured missing stages are declared |
-| Vocals, Guitar/Bass mapper, Guitar/Bass section | Worker-trainable experiments | Vocal activity/pitch and lead phrase-boundary components are distinct and non-deployable; no profile without remaining composition/evaluation/runtime gates |
+| Vocals, Guitar/Bass mapper, Guitar/Bass section | Worker-trainable experiments | Vocal activity/pitch, phrase-boundary, lyric, and lead talky components are distinct and non-deployable; no profile without remaining composition/evaluation/runtime gates |
 | Legacy batch pipeline | Research / compatibility scripts | Not a worker execution handler |
 
 OCTAVE owns source import, rights decisions, curation, runtime selection, and
@@ -525,7 +525,7 @@ view and `strum-worker keys profile package` has copied it into an immutable
 `keys.onset`/`keys.fret`, writes one Expert `PART KEYS` track, and cannot
 select or substitute Guitar/Bass profiles.
 
-### Vocal activity/pitch and phrase-boundary experiment gates
+### Vocal lead-component experiment gates
 
 `vocals.note-activity/v1` is a catalog worker experiment, not a conversion of
 vocal charts into five-lane data. Its `vocals_activity` task view is
@@ -545,11 +545,17 @@ handler. `vocals.lyric-alignment/v1` is a third bounded component: it trains a
 character CTC acoustic encoder solely from observed `lyrics`/`text` meta
 events on exact `PART VOCALS`, keeping the MIDI event timestamp alongside the
 local target window. It neither imports external lyrics nor decides talkies,
-harmonies, phrases, or chart structure. The planned
-`strum.instrument-chart/vocals/v1` descriptor preserves the remaining talky,
-harmony, composition, held-out evaluation, packaging, and execution
-requirements in a machine-readable non-executable contract. No Vocal worker
-path may invent those outputs from a raw component.
+harmonies, phrases, or chart structure. `vocals.talky-activity/v1` is a fourth
+bounded component. Its labels are only duration-bearing note-96 spans on exact
+`PART VOCALS`; note 96 is a pitchless/talky marker, not a sung MIDI pitch.
+The trainer requires an observed note-96 span in both train and validation,
+which prevents an all-negative evaluation from becoming a plausible model.
+`HARM1`, `HARM2`, and `HARM3` are distinct source tracks and are deliberately
+not collapsed into a lead target or trained from a shared vocal stem without a
+separate harmony-source policy. The planned `strum.instrument-chart/vocals/v1`
+descriptor preserves harmony, composition, held-out evaluation, packaging, and
+execution requirements in a machine-readable non-executable contract. No
+Vocal worker path may invent those outputs from a raw component.
 
 ## 11. Hardware
 

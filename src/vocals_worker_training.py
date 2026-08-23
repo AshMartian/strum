@@ -202,6 +202,7 @@ def _history_metrics(path: Path) -> dict[str, object] | None:
             "val_pitch_accuracy",
             "val_phrase_start_f1",
             "val_phrase_end_f1",
+            "val_talky_activity_f1",
         )
         if isinstance(history[-1].get(key), (int, float)) and not isinstance(history[-1][key], bool)
     }

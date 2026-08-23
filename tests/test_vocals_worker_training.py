@@ -16,6 +16,7 @@ from scripts.preprocess_vocal_lyric_alignment import (
     tokenize_lyric,
 )
 from scripts.preprocess_vocal_phrase_boundaries import prepare_vocal_phrase_boundaries
+from scripts.preprocess_vocal_talky_activity import prepare_vocal_talky_activity
 from scripts.preprocess_vocals_frames import (
     PITCH_CLASS_COUNT,
     VocalsPreprocessError,
@@ -24,6 +25,8 @@ from scripts.preprocess_vocals_frames import (
 )
 from scripts.train_vocal_lyric_alignment import TrainingSettings as LyricTrainingSettings
 from scripts.train_vocal_lyric_alignment import train_vocal_lyric_alignment
+from scripts.train_vocal_talky_activity import TrainingSettings as TalkyTrainingSettings
+from scripts.train_vocal_talky_activity import train_vocal_talky_activity
 from src.catalog_task_manifest import build_catalog_task_manifest
 from src.model_bundle import load_model_bundle
 from src.vocals_worker_training import VocalsTrainingError, _read_task_view
@@ -57,6 +60,8 @@ def _vocal_midi() -> bytes:
     vocals.append(mido.Message("note_on", note=60, velocity=100, time=0))
     vocals.append(mido.Message("note_off", note=60, velocity=0, time=480))
     vocals.append(mido.Message("note_on", note=106, velocity=100, time=0))
+    vocals.append(mido.Message("note_on", note=96, velocity=100, time=0))
+    vocals.append(mido.Message("note_off", note=96, velocity=0, time=240))
     source.tracks.extend((guitar, vocals))
     stream = BytesIO()
     source.save(file=stream)
@@ -225,6 +230,7 @@ def test_vocals_pipeline_exposes_strict_private_catalog_training_contract() -> N
         "vocals.frame_activity_pitch",
         "vocals.phrase_boundaries",
         "vocals.lyric_alignment",
+        "vocals.talky_activity",
     }
 
 
@@ -354,6 +360,7 @@ def test_vocal_preprocessor_reads_part_vocals_not_guitar(tmp_path: Path) -> None
     assert events["phrase_marker_count"] == 2
     assert events["phrase_start_events"] == [0.0]
     assert events["phrase_end_events"] == [0.5]
+    assert events["talky_spans"] == [{"start": 0.5, "end": 0.75}]
     with pytest.raises(VocalsPreprocessError, match="PART VOCALS"):
         parse_vocal_events(path, label_track="HARM1")
 
@@ -483,3 +490,135 @@ def test_vocal_phrase_preprocessor_materializes_observed_boundaries_from_catalog
     ends = np.load(tmp_path / "phrase-cache" / "train_phrase_end.npy")
     assert starts.max() == 1
     assert ends.max() == 1
+
+
+def test_vocal_talky_worker_packages_exact_note_96_experiment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _catalog(tmp_path)
+    task_view = tmp_path / "views" / "vocals-talkies.json"
+    prepare = tmp_path / "prepare-talkies.json"
+    prepare.write_text(
+        json.dumps(
+            {
+                "catalog_root": str(tmp_path),
+                "pipeline_id": "vocals.talky-activity/v1",
+                "output": str(task_view),
+                "options": {"split_ratios": [50, 50, 0]},
+            }
+        )
+    )
+    prepare_dataset_request(prepare)
+    prepared = json.loads(task_view.read_text())
+    assert prepared["task"]["kind"] == "vocals_talky_activity"
+    assert prepared["task"]["label_schema"]["difficulty_encoding"] == (
+        "vocal-pitchless-talky-note-96-spans/v1"
+    )
+    assert str(tmp_path) not in json.dumps(prepared)
+
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str]) -> None:
+        commands.append(command)
+        if command[1].endswith("train_vocal_talky_activity.py"):
+            checkpoints = Path(command[command.index("--checkpoint-dir") + 1])
+            checkpoints.mkdir(parents=True, exist_ok=True)
+            (checkpoints / "best.pt").write_bytes(b"vocal-talky-weights")
+            (checkpoints / "history.json").write_text(
+                json.dumps(
+                    [
+                        {
+                            "epoch": 1,
+                            "train_loss": 0.5,
+                            "val_loss": 0.4,
+                            "val_talky_activity_f1": 0.7,
+                        }
+                    ]
+                )
+            )
+
+    monkeypatch.setattr("src.vocals_talky_worker_training._run_script", fake_run)
+    output = tmp_path / "experiments" / "vocal-talky-v1"
+    train = tmp_path / "train-talkies.json"
+    train.write_text(
+        json.dumps(
+            {
+                "pipeline_id": "vocals.talky-activity/v1",
+                "task_view": str(task_view),
+                "output": str(output),
+                "catalog_root": str(tmp_path),
+                "options": {"model_id": "catalog-vocal-talky-v1", "epochs": 1, "device": "cpu"},
+            }
+        )
+    )
+    result = run_training_request(train)
+    assert result["metrics"] == {
+        "epoch": 1,
+        "train_loss": 0.5,
+        "val_loss": 0.4,
+        "val_talky_activity_f1": 0.7,
+    }
+    assert (
+        result["deployment_status"] == "requires_vocal_chart_composition_evaluation_and_packaging"
+    )
+    assert [component["id"] for component in result["components"]] == ["vocals.talky_activity"]
+    assert "preprocess_vocal_talky_activity.py" in commands[0][1]
+    assert "train_vocal_talky_activity.py" in commands[1][1]
+    bundle = output / "bundle"
+    assert str(tmp_path) not in (bundle / "strum-model-bundle.json").read_text()
+    assert str(tmp_path) not in (output / "experiment.json").read_text()
+    model = load_model_bundle(bundle, check_files=True)
+    assert set(model.components) == {"vocals.talky_activity"}
+    assert model.profiles == {}
+    config = json.loads((bundle / "configs" / "vocals-talky-activity.json").read_text())
+    assert config["outputs"] == ["pitchless_talky_activity"]
+    assert config["excluded_outputs"] == ["pitch", "lyrics", "phrases", "harmonies", "chart"]
+
+
+def test_vocal_talky_preprocessor_and_trainer_require_observed_note_96_targets(
+    tmp_path: Path,
+) -> None:
+    _catalog(tmp_path, materialize=True)
+    task_view = tmp_path / "vocals-talkies.json"
+    task_view.write_text(json.dumps(build_catalog_task_manifest(tmp_path, "vocals_talky_activity")))
+    summary = prepare_vocal_talky_activity(
+        manifest_path=task_view,
+        catalog_root=tmp_path,
+        cache_dir=tmp_path / "talky-cache",
+        splits=("train", "val"),
+        limit_songs=1,
+    )
+    assert summary["splits"]["train"]["talky_span_count"] == 1
+    assert summary["splits"]["val"]["talky_span_count"] == 1
+    labels = np.load(tmp_path / "talky-cache" / "train_talky.npy")
+    assert labels.max() == 1
+    metrics = train_vocal_talky_activity(
+        TalkyTrainingSettings(
+            cache_dir=tmp_path / "talky-cache",
+            checkpoint_dir=tmp_path / "talky-checkpoints",
+            epochs=1,
+            batch_size=1,
+            learning_rate=0.0003,
+            device="cpu",
+            max_train_batches=1,
+            max_val_batches=1,
+            seed=7,
+        )
+    )
+    assert set(metrics) == {"train_loss", "val_loss", "val_talky_activity_f1"}
+    assert (tmp_path / "talky-checkpoints" / "best.pt").is_file()
+    np.save(tmp_path / "talky-cache" / "val_talky.npy", np.zeros_like(labels))
+    with pytest.raises(ValueError, match="observed note-96 spans in both train and val"):
+        train_vocal_talky_activity(
+            TalkyTrainingSettings(
+                cache_dir=tmp_path / "talky-cache",
+                checkpoint_dir=tmp_path / "talky-negative-checkpoints",
+                epochs=1,
+                batch_size=1,
+                learning_rate=0.0003,
+                device="cpu",
+                max_train_batches=1,
+                max_val_batches=1,
+                seed=7,
+            )
+        )

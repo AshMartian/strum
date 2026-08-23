@@ -60,6 +60,10 @@ PIPELINE_IDS = {
     # folded into pitched-activity or phrase-marker targets simply because all
     # three live in the same MIDI track.
     "vocals_lyric_alignment": "vocals.lyric-alignment/v1",
+    # Pitchless/talky spans are an independent source event language: note 96
+    # on the exact lead vocal track.  Do not make them a pseudo-pitch class in
+    # the sung-note activity task.
+    "vocals_talky_activity": "vocals.talky-activity/v1",
     "keys": "strum.instrument-chart/keys/v1",
     "vocals": "strum.instrument-chart/vocals/v1",
     "pro_guitar": "strum.instrument-chart/pro-guitar/v1",
@@ -78,6 +82,7 @@ DEFAULT_AUDIO_ROLES = {
     "vocals_activity": ("vocals", "mix"),
     "vocals_phrase_boundaries": ("vocals", "mix"),
     "vocals_lyric_alignment": ("vocals", "mix"),
+    "vocals_talky_activity": ("vocals", "mix"),
     "keys": ("keys", "mix"),
     "vocals": ("vocals", "mix"),
     "pro_guitar": ("guitar", "mix"),
@@ -96,6 +101,7 @@ TASK_INSTRUMENTS = {
     "vocals_activity": "vocals",
     "vocals_phrase_boundaries": "vocals",
     "vocals_lyric_alignment": "vocals",
+    "vocals_talky_activity": "vocals",
     "keys": "keys",
     "vocals": "vocals",
     "pro_guitar": "pro_guitar",
@@ -147,6 +153,11 @@ TASK_LABEL_SCHEMAS: dict[str, dict[str, object]] = {
         "id": "vocals-pitch-phrase-lyrics-midi/v1",
         "track_names": ["PART VOCALS"],
         "difficulty_encoding": "vocal-lyric-meta-events/v1",
+    },
+    "vocals_talky_activity": {
+        "id": "vocals-pitch-phrase-lyrics-midi/v1",
+        "track_names": ["PART VOCALS"],
+        "difficulty_encoding": "vocal-pitchless-talky-note-96-spans/v1",
     },
     "keys": {
         "id": "five-lane-midi/v1",

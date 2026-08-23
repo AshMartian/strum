@@ -588,7 +588,8 @@ For example, a Guitar task-view request is:
 
 `guitar.onset-fret/v1`, `bass.onset-fret/v1`, `keys.onset-fret/v1`,
 `drums.onset-classifier/v1`, `vocals.note-activity/v1`,
-`vocals.phrase-boundaries/v1`,
+`vocals.phrase-boundaries/v1`, `vocals.lyric-alignment/v1`,
+`vocals.talky-activity/v1`,
 `chart_transform.five_lane/v1`, and the separate
 `strum.fret-mapper/guitar/v1` / `strum.fret-mapper/bass/v1` derived-label
 pipelines are worker-trainable. Fret-mapper training builds Basic-Pitch
@@ -637,8 +638,14 @@ separate `vocals.phrase_boundaries` component is likewise experiment-only.
 `vocals.lyric-alignment/v1` separately derives CTC targets only from observed
 `lyrics`/`text` meta events on that same exact track, retaining their MIDI
 timestamps as local alignment supervision. It is not an external-lyrics
-lookup, a language-model correction, talky encoding, harmony source, or a
-playable chart. All three raw components remain experiment-only.
+lookup, a language-model correction, harmony source, or a playable chart.
+`vocals.talky-activity/v1` is a fourth independent component: it derives only
+pitchless/talky activity from duration-bearing MIDI note-96 spans on exact
+`PART VOCALS`, never from a sung-pitch label. It requires observed note-96
+spans in both train and validation splits and fails closed otherwise. All four
+raw components remain experiment-only. `HARM1`/`HARM2`/`HARM3` remain separate
+source tracks; a shared vocal stem is not evidence for an isolated harmony
+target, so no harmony worker is claimed until its source policy is explicit.
 The planned `strum.instrument-chart/vocals/v1` descriptor publishes those
 remaining machine-readable stages and rejects chart execution until a composed
 Vocal profile has passed held-out chart evaluation and packaging. OCTAVE must
@@ -999,9 +1006,9 @@ package a router profile or satisfy the router-on/off chart-impact gate.
 Keys and Pro-instrument generic task views remain source contracts, not a
 claim that their future models share the five-lane representation. The generic
 Vocal descriptor is also explicitly planned: its structured contract names the
-exact lead track, already-trainable activity/pitch and phrase components, and
-the lyric, talky, harmony, composition, evaluation, packaging, and execution
-stages still required for a selectable profile.
+exact lead track, already-trainable activity/pitch, phrase, lyric, and talky
+components, plus the harmony, composition, evaluation, packaging, and
+execution stages still required for a selectable profile.
 ### Catalog-backed chart-transform tasks
 
 The `chart_transform.five_lane/v1` pipeline learns Expert → Hard, Medium, or

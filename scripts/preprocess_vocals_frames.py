@@ -102,7 +102,12 @@ def parse_vocal_events(midi_path: Path, *, label_track: str = "PART VOCALS") -> 
         raise VocalsPreprocessError("PART VOCALS label track is missing")
     changes = _tempo_map(midi)
     active: dict[int, list[float]] = {}
+    active_talkies: list[float] = []
     notes: list[dict[str, float | int]] = []
+    # Note 96 is not a sung pitch.  In Clone Hero/Rock Band vocal tracks it
+    # denotes a pitchless/talky span; retain its true duration separately.
+    # Treating it as MIDI pitch 96 would manufacture out-of-range sung labels.
+    talky_spans: list[dict[str, float]] = []
     lyric_events = 0
     # Keep the source event times and raw strings.  Downstream components may
     # derive their own token language, but must never look at lyrics from a
@@ -133,6 +138,8 @@ def parse_vocal_events(midi_path: Path, *, label_track: str = "PART VOCALS") -> 
             elif message.note == 106:
                 phrase_markers += 1
                 phrase_ends.append(at_seconds)
+            elif message.note == 96:
+                active_talkies.append(at_seconds)
             elif VOCAL_MIN_MIDI <= message.note <= VOCAL_MAX_MIDI:
                 active.setdefault(message.note, []).append(at_seconds)
         elif message.type == "note_off" or (message.type == "note_on" and message.velocity == 0):
@@ -141,6 +148,11 @@ def parse_vocal_events(midi_path: Path, *, label_track: str = "PART VOCALS") -> 
                     phrase_start = active_phrase_markers.pop(0)
                     if at_seconds - phrase_start >= MIN_SPAN_PHRASE_SECONDS:
                         phrase_ends.append(at_seconds)
+            elif message.note == 96:
+                if active_talkies:
+                    start = active_talkies.pop(0)
+                    if at_seconds > start:
+                        talky_spans.append({"start": start, "end": at_seconds})
             else:
                 starts = active.get(message.note)
                 if starts:
@@ -151,8 +163,10 @@ def parse_vocal_events(midi_path: Path, *, label_track: str = "PART VOCALS") -> 
     # end times: fail them out of the target corpus rather than leaking a
     # silently broad label into training.
     notes.sort(key=lambda item: (float(item["start"]), int(item["pitch"])))
+    talky_spans.sort(key=lambda item: (item["start"], item["end"]))
     return {
         "notes": notes,
+        "talky_spans": talky_spans,
         "lyric_event_count": lyric_events,
         "lyric_events": lyric_meta_events,
         "phrase_marker_count": phrase_markers,
