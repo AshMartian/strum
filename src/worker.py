@@ -124,6 +124,13 @@ class PipelineDescriptor:
     status: str
     preparation_status: str
     training_status: str
+    # Some catalog-ready workers expose mutually exclusive candidate kinds.
+    # ``checkpoint_outputs`` is deliberately empty for those pipelines: a
+    # host must not assume that every candidate writes every component.  This
+    # typed selector map declares the component(s) produced by each train
+    # option, the preprocessing contract that produced them, and their
+    # deliberately non-deployable scope.
+    checkpoint_output_contracts: dict[str, object] | None = None
     # These names are safe to reveal to a host renderer, but their values are
     # always resolved and injected by the host's main process.  Keeping them
     # in STRUM's descriptor avoids a growing OCTAVE-side list of pipeline IDs.
@@ -141,6 +148,8 @@ class PipelineDescriptor:
     def as_json(self) -> dict[str, object]:
         data = asdict(self)
         data["checkpoint_outputs"] = list(self.checkpoint_outputs)
+        if data["checkpoint_output_contracts"] is None:
+            data.pop("checkpoint_output_contracts")
         data["private_request_fields"] = list(self.private_request_fields)
         data["catalog_inspection_option_keys"] = list(self.catalog_inspection_option_keys)
         data["training_requirements"] = list(self.training_requirements)
@@ -767,6 +776,84 @@ def _vocal_training_contract_for_output(template: object) -> dict[str, object]:
     return contract
 
 
+def _pro_candidate_checkpoint_output_contracts(task_kind: str) -> dict[str, object]:
+    """Return the selector-bound, non-deployable Pro artifact contract.
+
+    Pro's two train options do not produce interchangeable components.  Keep
+    that mapping alongside discovery rather than overloading the descriptor's
+    static ``checkpoint_outputs`` tuple, which means "all required outputs"
+    for ordinary single-output workers.
+    """
+    instrument = task_kind.removeprefix("pro_")
+    if instrument not in {"guitar", "bass", "keys"}:  # pragma: no cover - static callers
+        raise ValueError("unsupported Pro task kind")
+    known_event_outputs = (
+        ["string_fret_technique", "track_variant"]
+        if instrument in {"guitar", "bass"}
+        else ["chromatic_pitch_set", "range_shift_state"]
+    )
+    return {
+        "format": "strum-candidate-checkpoint-output-contracts/v1",
+        "selector": {
+            "training_option": "candidate_kind",
+            "default": "known_event_attributes/v1",
+        },
+        "by_candidate_kind": {
+            "known_event_attributes/v1": {
+                "component_outputs": [f"pro.{instrument}.event_attributes"],
+                "model_outputs": known_event_outputs,
+                "preprocessing": {
+                    "id": "pro-logmel-event-windows/v1",
+                    "input_contract": "strum-pro-known-reference-event-window/v1",
+                },
+                "deployment_scope": {
+                    "status": "raw_experiment_candidate_only",
+                    "profile": "not_available",
+                    "chart_execution": "not_available",
+                },
+            },
+            "free_running_event_proposal/v1": {
+                "component_outputs": [f"pro.{instrument}.event_proposal"],
+                "model_outputs": ["audio_event_proposal_scores"],
+                "preprocessing": {
+                    "id": PRO_EVENT_PROPOSAL_PREPROCESSING_ID,
+                    "input_contract": "strum-pro-arbitrary-audio-window/v1",
+                    "negative_policy": PRO_EVENT_PROPOSAL_NEGATIVE_POLICY_ID,
+                },
+                "deployment_scope": {
+                    "status": "raw_experiment_candidate_only",
+                    "profile": "not_available",
+                    "chart_execution": "not_available",
+                },
+            },
+        },
+    }
+
+
+def _checkpoint_outputs_for_candidate(
+    descriptor: PipelineDescriptor, candidate_kind: str
+) -> tuple[str, ...]:
+    """Resolve exactly the output component(s) selected by a train option."""
+    contract = descriptor.checkpoint_output_contracts
+    if not isinstance(contract, dict):  # pragma: no cover - static descriptor invariant
+        raise WorkerRequestError("pipeline has no candidate checkpoint-output contract")
+    by_candidate_kind = contract.get("by_candidate_kind")
+    candidate = (
+        by_candidate_kind.get(candidate_kind) if isinstance(by_candidate_kind, dict) else None
+    )
+    component_outputs = candidate.get("component_outputs") if isinstance(candidate, dict) else None
+    if (
+        not isinstance(component_outputs, list)
+        or not component_outputs
+        or not all(
+            isinstance(component_id, str) and component_id for component_id in component_outputs
+        )
+        or len(set(component_outputs)) != len(component_outputs)
+    ):  # pragma: no cover - static descriptor invariant
+        raise WorkerRequestError("pipeline candidate checkpoint-output contract is invalid")
+    return tuple(component_outputs)
+
+
 PRO_TRAINING_CONTRACTS: dict[str, dict[str, object]] = {
     "pro_guitar": {
         "format": "strum-planned-training-contract/v1",
@@ -998,6 +1085,12 @@ PRO_EVENT_CANDIDATE_TRAIN_SCHEMA = _object_schema(
             "type": "string",
             "enum": ["known_event_attributes/v1", "free_running_event_proposal/v1"],
             "default": "known_event_attributes/v1",
+            # The selected value resolves a single entry in the descriptor's
+            # path-free checkpoint-output contract.  This is intentionally a
+            # selector, not permission to combine raw candidate artifacts.
+            "x-strum-checkpoint-output-contract-selector": (
+                "checkpoint_output_contracts.by_candidate_kind"
+            ),
         },
         "epochs": {"type": "integer", "minimum": 1, "default": 25},
         "batch_size": {"type": "integer", "minimum": 1, "default": 32},
@@ -1445,7 +1538,12 @@ PIPELINES = (
                 # trainer and handler exist.
                 else ()
                 if task_kind in {*INSTRUMENT_CHART_TRAINING_CONTRACTS, "vocals"}
-                else (f"pro.{task_kind.removeprefix('pro_')}.event_attributes",)
+                # Pro has two selectable candidate kinds whose components are
+                # intentionally not interchangeable.  Their exact output
+                # identities live in ``checkpoint_output_contracts`` below;
+                # exposing one static component here would misdescribe the
+                # free-running proposal candidate.
+                else ()
                 if task_kind in PRO_TRAINING_CONTRACTS
                 else (task_kind,)
             ),
@@ -1457,6 +1555,11 @@ PIPELINES = (
                 if task_kind in PRO_TRAINING_CONTRACTS
                 or task_kind.startswith(("fret_mapper_", "section_"))
                 else "planned"
+            ),
+            checkpoint_output_contracts=(
+                _pro_candidate_checkpoint_output_contracts(task_kind)
+                if task_kind in PRO_TRAINING_CONTRACTS
+                else None
             ),
             # Every catalog task view requires a private catalog root during
             # preparation.  Training-only private fields must never be
@@ -4356,6 +4459,7 @@ def run_training_request(request_path: Path) -> dict[str, object]:
         if candidate_kind not in {"known_event_attributes/v1", "free_running_event_proposal/v1"}:
             raise WorkerRequestError("Pro event candidate kind is invalid")
         try:
+            required_components = _checkpoint_outputs_for_candidate(descriptor, candidate_kind)
             revision, dirty = _revision()
             if candidate_kind == "known_event_attributes/v1":
                 from src.pro_event_worker_training import (  # noqa: PLC0415
@@ -4383,7 +4487,6 @@ def run_training_request(request_path: Path) -> dict[str, object]:
                     strum_revision=revision,
                     strum_source_dirty=dirty,
                 )
-                required_components = descriptor.checkpoint_outputs
             else:
                 from src.pro_event_proposal_worker_training import (  # noqa: PLC0415
                     ProEventProposalTrainingOptions,
@@ -4401,11 +4504,10 @@ def run_training_request(request_path: Path) -> dict[str, object]:
                     strum_source_dirty=dirty,
                 )
                 component_id = result.get("component_id")
-                if not isinstance(component_id, str):
+                if not isinstance(component_id, str) or (component_id,) != required_components:
                     raise WorkerRequestError(
-                        "Pro proposal candidate omitted its component identity"
+                        "Pro proposal candidate component disagrees with its selected contract"
                     )
-                required_components = (component_id,)
             preflight = preflight_bundle(
                 result["bundle_dir"], required_components=required_components
             )

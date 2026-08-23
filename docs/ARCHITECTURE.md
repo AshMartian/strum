@@ -20,7 +20,7 @@ fails closed to the profiles declared by a validated model bundle:
 | Bass onset/fret | Worker-trainable; evaluated profile executable | Revalidated `PART BASS` task views and distinct `bass.onset`/`bass.fret` components; only an evaluated `bass.neural-v1-expert/v1` profile writes Expert Bass |
 | Keys onset/fret | Worker-trainable; evaluated profile executable | Revalidated `PART KEYS` task views and distinct `keys.onset`/`keys.fret` components; only an evaluated `keys.neural-v1-expert/v1` profile writes Expert Keys |
 | `drums.onset-classifier-evaluation/v1` | Executable evaluator only | Prepared V2 onset windows → eight class probabilities; explicitly not a chart handler |
-| Pro Guitar, Pro Bass, Pro Keys | Catalog-ready exact-REAL_* known-event candidates | Raw candidate learns attributes at supplied reference event times only; no event proposal, sequence decoder, profile, or deployable chart handler |
+| Pro Guitar, Pro Bass, Pro Keys | Catalog-ready exact-REAL_* known-event and audio-proposal candidates | `candidate_kind` selects one raw component/preprocessing contract; no sequence decoder, profile, or deployable chart handler |
 | Vocals, Guitar/Bass mapper, Guitar/Bass section | Worker-trainable experiments | Vocal activity/pitch, phrase-boundary, lyric, and lead talky components are distinct and non-deployable; no profile without remaining composition/evaluation/runtime gates |
 | Legacy batch pipeline | Research / compatibility scripts | Not a worker execution handler |
 
@@ -418,7 +418,14 @@ The proposal candidate scores bounded offline audio windows without MIDI at
 inference. Its deterministic negative policy excludes every center whose
 asymmetric feature window would contain a REAL event onset; it produces only
 event-proposal scores, not attributes, a sequence decoder, MIDI, a profile,
-or a chart. Pro Keys
+or a chart. The path-free
+`strum-candidate-checkpoint-output-contracts/v1` descriptor field binds the
+selected `candidate_kind` to exactly one component identity and preprocessing
+contract: known-event attributes use `pro-logmel-event-windows/v1`, while the
+proposal uses `pro-logmel-event-proposal-windows/v1`. Static
+`checkpoint_outputs` is intentionally empty for Pro because the candidates
+are mutually exclusive; every map entry remains raw-experiment-only with no
+profile or chart execution. Pro Keys
 accepts only `PART REAL_KEYS_X` for the Expert path; Pro Guitar/Bass retain
 the standard versus `_22` source variant in a worker-produced,
 `strum-pro-target-task-manifest/v1` target view. STRUM decodes those immutable

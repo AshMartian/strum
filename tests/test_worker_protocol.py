@@ -432,6 +432,17 @@ def test_pro_descriptors_publish_non_executable_real_midi_training_contracts(
         "known_event_attributes/v1",
         "free_running_event_proposal/v1",
     ]
+    assert (
+        descriptor.train_schema["properties"]["candidate_kind"][
+            "x-strum-checkpoint-output-contract-selector"
+        ]
+        == "checkpoint_output_contracts.by_candidate_kind"
+    )
+    # The two candidate kinds create different, non-composable artifacts.  A
+    # static component list would falsely imply every training run emits both
+    # (or only the old known-event component), so discovery must use the
+    # selected option's typed contract.
+    assert descriptor.checkpoint_outputs == ()
     assert descriptor.inference_capability is None
     assert descriptor.catalog_requirements["label_schema"] == schema_id
     assert descriptor.catalog_requirements["label_tracks"] == tracks
@@ -447,7 +458,51 @@ def test_pro_descriptors_publish_non_executable_real_midi_training_contracts(
         descriptor.catalog_requirements["prepared_audio_preprocessing"]
         == "pro-logmel-event-windows/v1"
     )
-    contract = descriptor.as_json()["training_contract"]
+    payload = descriptor.as_json()
+    output_contracts = payload["checkpoint_output_contracts"]
+    assert output_contracts == {
+        "format": "strum-candidate-checkpoint-output-contracts/v1",
+        "selector": {
+            "training_option": "candidate_kind",
+            "default": "known_event_attributes/v1",
+        },
+        "by_candidate_kind": {
+            "known_event_attributes/v1": {
+                "component_outputs": [f"pro.{task_kind.removeprefix('pro_')}.event_attributes"],
+                "model_outputs": (
+                    ["string_fret_technique", "track_variant"]
+                    if task_kind in {"pro_guitar", "pro_bass"}
+                    else ["chromatic_pitch_set", "range_shift_state"]
+                ),
+                "preprocessing": {
+                    "id": "pro-logmel-event-windows/v1",
+                    "input_contract": "strum-pro-known-reference-event-window/v1",
+                },
+                "deployment_scope": {
+                    "status": "raw_experiment_candidate_only",
+                    "profile": "not_available",
+                    "chart_execution": "not_available",
+                },
+            },
+            "free_running_event_proposal/v1": {
+                "component_outputs": [f"pro.{task_kind.removeprefix('pro_')}.event_proposal"],
+                "model_outputs": ["audio_event_proposal_scores"],
+                "preprocessing": {
+                    "id": "pro-logmel-event-proposal-windows/v1",
+                    "input_contract": "strum-pro-arbitrary-audio-window/v1",
+                    "negative_policy": "pro-event-proposal-asymmetric-window-exclusion/v1",
+                },
+                "deployment_scope": {
+                    "status": "raw_experiment_candidate_only",
+                    "profile": "not_available",
+                    "chart_execution": "not_available",
+                },
+            },
+        },
+    }
+    assert "/home/" not in json.dumps(output_contracts)
+    assert "/tmp/" not in json.dumps(output_contracts)
+    contract = payload["training_contract"]
     assert contract == {
         **contract,
         "format": "strum-planned-training-contract/v1",

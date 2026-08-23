@@ -813,6 +813,18 @@ handler until a quality-gated free-running event model, sequence decoder,
 held-out chart evaluator, profile package, and chart execution stages are
 implemented and validated.
 
+Because those train options produce different components, a Pro descriptor
+does **not** publish a misleading static `checkpoint_outputs` list. Its
+path-free `checkpoint_output_contracts` uses `candidate_kind` as a selector:
+`known_event_attributes/v1` produces only
+`pro.{guitar|bass|keys}.event_attributes` with
+`pro-logmel-event-windows/v1`, while `free_running_event_proposal/v1` produces
+only `pro.{guitar|bass|keys}.event_proposal` with
+`pro-logmel-event-proposal-windows/v1`. Every selected map entry is explicitly
+a raw experiment candidate with no profile or chart execution. Hosts must
+select one candidate kind and never combine those artifacts as a runnable
+model.
+
 Keys has the same narrow experiment boundary: `keys.onset-fret/v1` revalidates
 the dedicated `keys_onset_fret` task view, whose label schema selects only
 `PART KEYS` Expert five-lane labels. It emits distinct `keys.onset` and
