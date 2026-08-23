@@ -8,6 +8,7 @@ validates the catalog before returning ephemeral local paths to a trainer.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 from collections import Counter
@@ -71,6 +72,70 @@ TASK_INSTRUMENTS = {
     "fret_mapper_bass": "bass",
     "section_guitar": "guitar",
     "section_bass": "bass",
+}
+
+# A catalog only establishes that an approved MIDI asset contains an
+# instrument.  A future trainer must also know which event language it is
+# allowed to derive from that asset.  Keep that declaration in the immutable
+# task view, rather than teaching every future trainer implicit track-name
+# conventions.  These schemas describe label *sources*, not model outputs;
+# they deliberately do not claim that a trainer/profile exists yet.
+TASK_LABEL_SCHEMAS: dict[str, dict[str, object]] = {
+    "bass": {
+        "id": "five-lane-midi/v1",
+        "track_prefixes": ["PART BASS"],
+        "difficulty_encoding": "five-lane-note-ranges/v1",
+    },
+    "keys": {
+        "id": "five-lane-midi/v1",
+        "track_prefixes": ["PART KEYS"],
+        "difficulty_encoding": "five-lane-note-ranges/v1",
+    },
+    "vocals": {
+        "id": "vocals-pitch-phrase-lyrics-midi/v1",
+        "track_prefixes": ["PART VOCALS"],
+        "difficulty_encoding": "vocal-pitch-phrase-events/v1",
+    },
+    "pro_guitar": {
+        "id": "pro-string-fret-midi/v1",
+        "track_prefixes": ["PART REAL_GUITAR", "PART REAL_GUITAR_22"],
+        "difficulty_encoding": "pro-string-note-offsets/v1",
+    },
+    "pro_bass": {
+        "id": "pro-string-fret-midi/v1",
+        "track_prefixes": ["PART REAL_BASS", "PART REAL_BASS_22"],
+        "difficulty_encoding": "pro-string-note-offsets/v1",
+    },
+    "pro_keys": {
+        "id": "pro-keys-pitch-midi/v1",
+        "track_prefixes": [
+            "PART REAL_KEYS_X",
+            "PART REAL_KEYS_H",
+            "PART REAL_KEYS_M",
+            "PART REAL_KEYS_E",
+        ],
+        "difficulty_encoding": "pro-keys-track-suffix/v1",
+    },
+    "fret_mapper_guitar": {
+        "id": "five-lane-fret-mapper-midi/v1",
+        "track_prefixes": ["PART GUITAR"],
+        "difficulty_encoding": "five-lane-note-ranges/v1",
+    },
+    "fret_mapper_bass": {
+        "id": "five-lane-fret-mapper-midi/v1",
+        "track_prefixes": ["PART BASS"],
+        "difficulty_encoding": "five-lane-note-ranges/v1",
+    },
+    "section_guitar": {
+        "id": "midi-section-events/v1",
+        "track_prefixes": ["PART GUITAR"],
+        "difficulty_encoding": "not-applicable",
+    },
+    "section_bass": {
+        "id": "midi-section-events/v1",
+        "track_prefixes": ["PART BASS"],
+        "difficulty_encoding": "not-applicable",
+    },
 }
 
 
@@ -137,6 +202,20 @@ def _asset_matches(raw: object, asset: CatalogAsset, catalog: SongSourceCatalog)
     return isinstance(raw, dict) and raw == _relative_asset_reference(catalog, asset)
 
 
+def _label_tracks(task_kind: str, track_names: tuple[str, ...]) -> list[str]:
+    """Select the declared safe MIDI tracks for one immutable task view."""
+    prefixes = TASK_LABEL_SCHEMAS[task_kind]["track_prefixes"]
+    assert isinstance(prefixes, list)  # Static module contract.
+    selected = [
+        track_name
+        for track_name in track_names
+        if any(track_name.upper().startswith(prefix) for prefix in prefixes)
+    ]
+    if not selected:
+        raise CatalogValidationError("catalog coverage has no track for the declared label schema")
+    return selected
+
+
 def build_catalog_task_manifest(
     catalog_root: str | Path,
     task_kind: str,
@@ -184,6 +263,7 @@ def build_catalog_task_manifest(
     for source_id in sorted(selected_roles):
         record = records[source_id]
         role = selected_roles[source_id]
+        coverage = record.instruments[instrument]
         songs.append(
             {
                 "source_id": source_id,
@@ -191,6 +271,7 @@ def build_catalog_task_manifest(
                 "required_difficulty": required_difficulty,
                 "split": deterministic_split(source_id, split_ratios),
                 "audio_role": role,
+                "label_tracks": _label_tracks(task_kind, coverage.track_names),
                 "audio": _relative_asset_reference(catalog, record.audio[role]),
                 "notes_midi": _relative_asset_reference(catalog, record.notes_midi),
             }
@@ -209,6 +290,9 @@ def build_catalog_task_manifest(
         "split_ratios": list(split_ratios),
         "preprocessing": settings,
         "preprocessing_sha256": _canonical_json_hash(settings),
+        # Task views are caller-owned mutable dictionaries; never expose the
+        # module-level canonical declaration by reference.
+        "label_schema": copy.deepcopy(TASK_LABEL_SCHEMAS[task_kind]),
     }
     return {
         "schema_version": MANIFEST_VERSION,
@@ -278,6 +362,8 @@ def resolve_catalog_task_manifest_songs(
     )
     if task.get("preprocessing_sha256") != _canonical_json_hash(settings):
         raise CatalogValidationError("manifest preprocessing lineage is invalid")
+    if task.get("label_schema") != TASK_LABEL_SCHEMAS[task_kind]:
+        raise CatalogValidationError("manifest label schema is invalid")
     ratios = tuple(raw_ratios)
     deterministic_split("octave-src-00000000", ratios)
     catalog = load_catalog(catalog_root)
@@ -296,6 +382,7 @@ def resolve_catalog_task_manifest_songs(
             raise CatalogValidationError("manifest song must be an object")
         source_id = raw_song.get("source_id")
         role = raw_song.get("audio_role")
+        label_tracks = raw_song.get("label_tracks")
         if (
             not isinstance(source_id, str)
             or role not in AUDIO_ROLES
@@ -314,6 +401,7 @@ def resolve_catalog_task_manifest_songs(
             or raw_song.get("instrument") != TASK_INSTRUMENTS[task_kind]
             or raw_song.get("required_difficulty") != required_difficulty
             or raw_song.get("split") != deterministic_split(source_id, ratios)
+            or label_tracks != _label_tracks(task_kind, coverage.track_names)
             or not _asset_matches(raw_song.get("audio"), record.audio[role], catalog)
             or not _asset_matches(raw_song.get("notes_midi"), record.notes_midi, catalog)
         ):
@@ -327,6 +415,8 @@ def resolve_catalog_task_manifest_songs(
                 "midi_path": str(record.notes_midi.path),
                 "audio_kind": role,
                 "pipeline_id": task["pipeline_id"],
+                "label_schema": task["label_schema"],
+                "label_tracks": label_tracks,
             }
         )
     return resolved

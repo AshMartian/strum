@@ -712,8 +712,13 @@ training data. It supports `bass`, `keys`, `vocals`, `pro_guitar`, `pro_bass`,
 `pro_keys`, `fret_mapper_guitar`, `fret_mapper_bass`, `section_guitar`, and
 `section_bass`. Every view records the versioned pipeline ID, catalog control
 fingerprint, source IDs and input hashes, deterministic split algorithm/seed,
-and a fingerprint of portable preprocessing settings. It never records an
-OCTAVE source path.
+and a fingerprint of portable preprocessing settings. It also declares the
+immutable label-source schema and the exact approved MIDI track names selected
+for each song (for example `PART VOCALS`, `PART REAL_GUITAR`, or
+`PART REAL_KEYS_X`). A future trainer therefore receives explicit event
+semantics rather than inferring track conventions from its own source tree.
+STRUM revalidates both declarations against the catalog before resolving the
+ephemeral managed paths. The view never records an OCTAVE source path.
 
 ```bash
 # Any chart/audio family: only Expert coverage and allowed catalog records.
@@ -743,7 +748,9 @@ python scripts/build_mapper_dataset.py \
 These task views make each family catalog-ready. They do not invent missing
 trainers: Bass currently reuses the Guitar/Bass chart representation, while
 Keys, Vocals, and Pro-instrument learned trainer architectures still need to
-be implemented before their task views can produce checkpoints.
+be implemented before their task views can produce checkpoints. The declared
+label schemas are source contracts, not a claim that these future models share
+the five-lane representation.
 ### Catalog-backed chart-transform tasks
 
 The `chart_transform.five_lane/v1` pipeline learns Expert → Hard, Medium, or

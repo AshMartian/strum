@@ -32,18 +32,22 @@ def _asset(root: Path, payload: bytes, filename: str) -> dict[str, object]:
 
 
 def _record(root: Path, source_id: str, *, training_use: str = "allowed") -> dict[str, object]:
+    track_names = {
+        "bass": ["PART BASS"],
+        "keys": ["PART KEYS"],
+        "vocals": ["PART VOCALS"],
+        "pro_guitar": ["PART REAL_GUITAR"],
+        "pro_bass": ["PART REAL_BASS_22"],
+        "pro_keys": ["PART REAL_KEYS_X"],
+        "guitar": ["PART GUITAR"],
+    }
     instruments = {
         instrument: {
             "status": "present",
             "difficulties": ["expert"],
-            "track_names": [f"PART {instrument.upper()}"],
+            "track_names": names,
         }
-        for instrument in ("bass", "keys", "vocals", "pro_guitar", "pro_bass", "pro_keys")
-    }
-    instruments["guitar"] = {
-        "status": "present",
-        "difficulties": ["expert"],
-        "track_names": ["PART GUITAR"],
+        for instrument, names in track_names.items()
     }
     return {
         "source_id": source_id,
@@ -100,6 +104,7 @@ def test_all_remaining_training_families_use_one_path_free_catalog_contract(
     serialized = json.dumps(manifest)
     assert manifest["format"] == MANIFEST_FORMAT
     assert manifest["task"]["pipeline_id"] == PIPELINE_IDS[task_kind]
+    assert manifest["task"]["label_schema"]["id"]
     assert manifest["lineage"]["catalog_control_sha256"]
     assert manifest["task"]["preprocessing_sha256"]
     assert [song["source_id"] for song in manifest["songs"]] == ["octave-src-aaaaaaaa"]
@@ -108,7 +113,23 @@ def test_all_remaining_training_families_use_one_path_free_catalog_contract(
 
     resolved = resolve_catalog_task_manifest_songs(manifest, tmp_path)
     assert resolved[0]["source_id"] == "octave-src-aaaaaaaa"
+    assert resolved[0]["label_schema"] == manifest["task"]["label_schema"]
+    assert resolved[0]["label_tracks"] == manifest["songs"][0]["label_tracks"]
     assert str(tmp_path) in resolved[0]["audio_path"]
+
+
+def test_rejects_task_label_schema_or_track_tampering(tmp_path: Path) -> None:
+    _catalog(tmp_path, [_record(tmp_path, "octave-src-aaaaaaaa")])
+    manifest = build_catalog_task_manifest(tmp_path, "pro_guitar")
+
+    manifest["task"]["label_schema"]["id"] = "five-lane-midi/v1"
+    with pytest.raises(CatalogValidationError, match="label schema"):
+        resolve_catalog_task_manifest_songs(manifest, tmp_path)
+
+    manifest = build_catalog_task_manifest(tmp_path, "pro_guitar")
+    manifest["songs"][0]["label_tracks"] = ["PART GUITAR"]
+    with pytest.raises(CatalogValidationError, match="valid approved catalog task input"):
+        resolve_catalog_task_manifest_songs(manifest, tmp_path)
 
 
 def test_rejects_tampered_preprocessing_and_catalog_lineage(tmp_path: Path) -> None:

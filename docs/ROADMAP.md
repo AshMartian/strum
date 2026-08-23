@@ -29,7 +29,9 @@ presented as a successful OCTAVE auto-chart result.
   `octave-song-source-catalog/v1` managed assets marked
   `training_use: allowed`; it never reads imported package/source locations.
 - ✅ Path-free catalog task views and lineage for Guitar, Drums, Bass, Keys,
-  Vocals, Pro instruments, fret mapper, and section families.
+  Vocals, Pro instruments, fret mapper, and section families, including
+  declared event/label-source schemas and catalog-validated MIDI track
+  selection for every future trainer family.
 - ✅ Worker lifecycle streams for dataset preparation and training. OCTAVE
   owns process creation/cancellation and retains private paths.
 - ✅ Bundle-validated Expert Guitar hybrid profile and Expert Drums direct V14
