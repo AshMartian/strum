@@ -518,8 +518,19 @@ and one whose trainer can be run through the worker:
 strum-worker probe --json
 strum-worker pipeline list --json
 strum-worker catalog inspect --catalog-root /path/to/catalog --pipeline guitar.onset-fret/v1 --json
+strum-worker catalog inspect --catalog-root /path/to/catalog --pipeline chart_transform.five_lane/v1 --options '{"instrument":"guitar","target_difficulty":"Hard"}' --json
 strum-worker dataset prepare --request /path/to/owned-prepare-request.json --json
 ```
+
+`catalog inspect` is the UI planning preflight: a selected pipeline returns an
+`eligible_count`, stable safe exclusion-code counts, its effective audio
+policy, and a bounded `estimated_storage_bytes`.  The estimate is the sum of
+distinct immediate catalog input assets; it deliberately excludes generated
+task views, preprocessing caches, and checkpoints.  Supply the optional
+selection subset with `--options` whenever a preparation choice changes
+eligibility (in particular, chart-transform instrument and target difficulty).
+The result never includes catalog/source paths, record IDs, rights text, or
+provenance.
 
 For OCTAVE-supervised background work, use line-delimited lifecycle events
 instead of parsing human output:

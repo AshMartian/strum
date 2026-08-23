@@ -142,6 +142,56 @@ def _guitar_catalog(root: Path) -> None:
     )
 
 
+def _catalog_record(
+    root: Path,
+    suffix: str,
+    *,
+    training_use: str = "allowed",
+    instruments: dict[str, list[str]],
+    audio_roles: tuple[str, ...] = (),
+) -> dict[str, object]:
+    source_id = f"octave-src-{suffix}"
+    return {
+        "source_id": source_id,
+        "import": {"kind": "sng", "adapter_version": "octave-sng/1", "warnings": []},
+        "rights": {
+            "training_use": training_use,
+            "provenance": "Reviewed private collection",
+            "license": "test-only",
+        },
+        "metadata": {"name": "Fixture"},
+        "chart": {
+            "notes_midi": _catalog_asset(root, f"midi-{suffix}".encode(), "notes.mid"),
+            "instruments": {
+                instrument: {
+                    "status": "present",
+                    "difficulties": difficulties,
+                    "track_names": [f"PART {instrument.upper()}"],
+                }
+                for instrument, difficulties in instruments.items()
+            },
+        },
+        "audio": {
+            role: _catalog_asset(root, f"audio-{role}-{suffix}".encode(), f"{role}.ogg")
+            for role in audio_roles
+        },
+    }
+
+
+def _write_catalog(root: Path, records: list[dict[str, object]]) -> None:
+    (root / "records.jsonl").write_text("\n".join(json.dumps(record) for record in records) + "\n")
+    (root / "catalog.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "format": "octave-song-source-catalog/v1",
+                "catalog_id": "worker-fixture",
+                "records": "records.jsonl",
+            }
+        )
+    )
+
+
 def test_catalog_inspect_and_prepare_emit_path_free_task_view(tmp_path: Path) -> None:
     _guitar_catalog(tmp_path)
     inspection = inspect_catalog(tmp_path, "guitar.onset-fret/v1")
@@ -151,6 +201,26 @@ def test_catalog_inspect_and_prepare_emit_path_free_task_view(tmp_path: Path) ->
         "record_count": 1,
         "allowed_record_count": 1,
         "pipeline_id": "guitar.onset-fret/v1",
+        "eligible_count": 1,
+        "exclusion_reason_counts": {
+            "training_use_not_allowed": 0,
+            "instrument_not_present": 0,
+            "required_difficulty_missing": 0,
+            "audio_unavailable": 0,
+        },
+        "audio_policy": {
+            "kind": "preferred_with_fallback",
+            "preferred_role": "guitar",
+            "fallback_role": "mix",
+            "required": True,
+        },
+        "estimated_storage_bytes": 9,
+        "storage_estimate_capped": False,
+        "storage_estimate_semantics": (
+            "sum of distinct catalog input assets selected by the declared policy; "
+            "excludes generated task views, preprocessing caches, checkpoints, and "
+            "existing catalog storage"
+        ),
     }
     request_path = tmp_path / "request.json"
     output = tmp_path / "views" / "guitar.json"
@@ -171,6 +241,154 @@ def test_catalog_inspect_and_prepare_emit_path_free_task_view(tmp_path: Path) ->
     assert result["output_name"] == "guitar.json"
     assert result["record_count"] == 1
     assert str(tmp_path) not in output.read_text()
+
+
+def test_catalog_inspect_is_pipeline_specific_and_path_free(tmp_path: Path) -> None:
+    _write_catalog(
+        tmp_path,
+        [
+            _catalog_record(
+                tmp_path,
+                "aaaaaaaa",
+                instruments={"guitar": ["expert", "hard"]},
+                audio_roles=("guitar",),
+            ),
+            _catalog_record(
+                tmp_path,
+                "bbbbbbbb",
+                instruments={"guitar": ["expert", "hard"]},
+            ),
+            _catalog_record(
+                tmp_path,
+                "cccccccc",
+                instruments={"drums": ["expert"]},
+                audio_roles=("drums",),
+            ),
+            _catalog_record(
+                tmp_path,
+                "dddddddd",
+                instruments={"guitar": ["expert"]},
+            ),
+            _catalog_record(
+                tmp_path,
+                "eeeeeeee",
+                training_use="review_required",
+                instruments={"guitar": ["expert", "hard"]},
+                audio_roles=("guitar",),
+            ),
+        ],
+    )
+
+    guitar = inspect_catalog(tmp_path, "guitar.onset-fret/v1")
+    assert guitar["eligible_count"] == 1
+    assert guitar["exclusion_reason_counts"] == {
+        "training_use_not_allowed": 1,
+        "instrument_not_present": 1,
+        "required_difficulty_missing": 0,
+        "audio_unavailable": 2,
+    }
+    assert guitar["audio_policy"] == {
+        "kind": "preferred_with_fallback",
+        "preferred_role": "guitar",
+        "fallback_role": "mix",
+        "required": True,
+    }
+    assert isinstance(guitar["estimated_storage_bytes"], int)
+    assert guitar["estimated_storage_bytes"] > 0
+
+    drums = inspect_catalog(tmp_path, "drums.onset-classifier/v1")
+    assert drums["eligible_count"] == 1
+    assert drums["exclusion_reason_counts"] == {
+        "training_use_not_allowed": 1,
+        "instrument_not_present": 3,
+        "required_difficulty_missing": 0,
+        "audio_unavailable": 0,
+    }
+    assert drums["audio_policy"]["preferred_role"] == "drums"
+
+    transform = inspect_catalog(
+        tmp_path,
+        "chart_transform.five_lane/v1",
+        options={"instrument": "guitar", "target_difficulty": "Hard"},
+    )
+    assert transform["eligible_count"] == 2
+    assert transform["exclusion_reason_counts"] == {
+        "training_use_not_allowed": 1,
+        "instrument_not_present": 1,
+        "source_difficulty_missing": 0,
+        "target_difficulty_missing": 1,
+    }
+    assert transform["audio_policy"] == {"kind": "not_required", "required": False}
+    assert transform["eligibility_selection"] == {
+        "mode": "requested_prepare_options",
+        "instrument": "guitar",
+        "target_difficulty": "Hard",
+    }
+
+    rendered = json.dumps({"guitar": guitar, "drums": drums, "transform": transform})
+    assert str(tmp_path) not in rendered
+    assert "Reviewed private collection" not in rendered
+
+
+def test_catalog_inspect_has_a_uniform_planning_summary_for_every_pipeline(tmp_path: Path) -> None:
+    _guitar_catalog(tmp_path)
+    required_keys = {
+        "status",
+        "catalog_id",
+        "record_count",
+        "allowed_record_count",
+        "pipeline_id",
+        "eligible_count",
+        "exclusion_reason_counts",
+        "audio_policy",
+        "estimated_storage_bytes",
+        "storage_estimate_capped",
+        "storage_estimate_semantics",
+    }
+    for descriptor in PIPELINES:
+        summary = inspect_catalog(tmp_path, descriptor.id)
+        assert required_keys <= set(summary)
+        assert summary["pipeline_id"] == descriptor.id
+        assert isinstance(summary["eligible_count"], int)
+        assert isinstance(summary["exclusion_reason_counts"], dict)
+        assert isinstance(summary["audio_policy"], dict)
+        assert isinstance(summary["estimated_storage_bytes"], int)
+
+
+def test_catalog_inspect_uses_the_derived_task_adapter_fallback_policy(tmp_path: Path) -> None:
+    _write_catalog(
+        tmp_path,
+        [
+            _catalog_record(
+                tmp_path,
+                "ffffffff",
+                instruments={"bass": ["expert"]},
+                audio_roles=("mix",),
+            )
+        ],
+    )
+    pipeline_id = "strum.instrument-chart/bass/v1"
+    inspection = inspect_catalog(tmp_path, pipeline_id)
+    assert inspection["eligible_count"] == 1
+    assert inspection["audio_policy"] == {
+        "kind": "preferred_with_fallback",
+        "preferred_role": "bass",
+        "fallback_role": "mix",
+        "required": True,
+    }
+
+    request_path = tmp_path / "prepare.json"
+    request_path.write_text(
+        json.dumps(
+            {
+                "catalog_root": str(tmp_path),
+                "pipeline_id": pipeline_id,
+                "output": str(tmp_path / "views" / "bass.json"),
+                "options": {},
+            }
+        )
+    )
+    assert prepare_dataset_request(request_path)["record_count"] == inspection["eligible_count"]
 
 
 def test_drums_pipeline_exposes_a_strict_worker_training_schema() -> None:

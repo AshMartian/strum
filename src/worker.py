@@ -28,17 +28,35 @@ from src.catalog_chart_pairs import CatalogChartPairOptions, prepare_catalog_cha
 from src.catalog_drums_manifest import build_drums_manifest, write_drums_manifest
 from src.catalog_guitar_manifest import build_guitar_manifest, write_guitar_manifest
 from src.catalog_task_manifest import (
+    DEFAULT_AUDIO_ROLES as CATALOG_TASK_DEFAULT_AUDIO_ROLES,
+)
+from src.catalog_task_manifest import (
     PIPELINE_IDS as CATALOG_TASK_PIPELINES,
+)
+from src.catalog_task_manifest import (
+    TASK_INSTRUMENTS as CATALOG_TASK_INSTRUMENTS,
 )
 from src.catalog_task_manifest import (
     build_catalog_task_manifest,
     write_catalog_task_manifest,
 )
 from src.model_bundle import BundleValidationError, InferenceProfile, ModelBundle, load_model_bundle
-from src.song_source_catalog import CatalogValidationError, load_catalog
+from src.song_source_catalog import (
+    TRAINING_ALLOWED,
+    CatalogAsset,
+    CatalogValidationError,
+    SongSourceCatalog,
+    load_catalog,
+    select_training_sources,
+)
 
 PROTOCOL_VERSION = 1
 MODEL_BUNDLE_SCHEMA_VERSIONS = (1,)
+MAX_ESTIMATED_STORAGE_BYTES = (1 << 63) - 1
+CATALOG_STORAGE_ESTIMATE_SEMANTICS = (
+    "sum of distinct catalog input assets selected by the declared policy; "
+    "excludes generated task views, preprocessing caches, checkpoints, and existing catalog storage"
+)
 
 
 @dataclass(frozen=True)
@@ -922,19 +940,272 @@ def _pipeline_by_id(pipeline_id: str) -> PipelineDescriptor:
     raise WorkerRequestError("unknown pipeline_id")
 
 
-def inspect_catalog(catalog_root: str | Path, pipeline_id: str | None = None) -> dict[str, object]:
-    """Validate a catalog and return a path-free capability summary for OCTAVE."""
-    if pipeline_id is not None:
-        _pipeline_by_id(pipeline_id)
-    catalog = load_catalog(catalog_root)
-    allowed = sum(record.training_use == "allowed" for record in catalog.records)
+def _bounded_asset_bytes(assets: list[CatalogAsset]) -> tuple[int, bool]:
+    """Return a bounded, de-duplicated catalog-input estimate.
+
+    Catalog assets are content addressed, so the same source input can be
+    shared across many catalog records.  Counting it once reports the maximum
+    additional input footprint a task view will ask STRUM to read, without
+    implying a total disk estimate for trainer-created artifacts.
+    """
+    distinct = {asset.sha256: asset.byte_length for asset in assets}
+    total = sum(distinct.values())
+    return min(total, MAX_ESTIMATED_STORAGE_BYTES), total > MAX_ESTIMATED_STORAGE_BYTES
+
+
+def _empty_exclusions(*codes: str) -> dict[str, int]:
+    """Keep reason-code output stable without emitting catalog record data."""
+    return dict.fromkeys(codes, 0)
+
+
+def _audio_task_inspection(
+    catalog: SongSourceCatalog,
+    *,
+    instrument: str,
+    preferred_role: str,
+    fallback_role: str | None,
+    required_difficulty: str,
+) -> dict[str, object]:
+    """Inspect the same preferred/fallback selection used by audio manifests."""
+    exclusions = _empty_exclusions(
+        "training_use_not_allowed",
+        "instrument_not_present",
+        "required_difficulty_missing",
+        "audio_unavailable",
+    )
+    selected_roles: dict[str, str] = {}
+    for role in (preferred_role, fallback_role):
+        if role is None:
+            continue
+        for source in select_training_sources(
+            catalog,
+            instrument,
+            required_difficulties=(required_difficulty,),
+            audio_role=role,
+        ):
+            selected_roles.setdefault(source.source_id, role)
+
+    assets: list[CatalogAsset] = []
+    for record in catalog.records:
+        if record.training_use != TRAINING_ALLOWED:
+            exclusions["training_use_not_allowed"] += 1
+            continue
+        coverage = record.instruments.get(instrument)
+        if coverage is None or coverage.status != "present":
+            exclusions["instrument_not_present"] += 1
+            continue
+        if required_difficulty not in coverage.difficulties:
+            exclusions["required_difficulty_missing"] += 1
+            continue
+        role = selected_roles.get(record.source_id)
+        if role is None:
+            exclusions["audio_unavailable"] += 1
+            continue
+        assets.extend((record.notes_midi, record.audio[role]))
+
+    estimated_storage_bytes, storage_estimate_capped = _bounded_asset_bytes(assets)
     return {
+        "eligible_count": len(selected_roles),
+        "exclusion_reason_counts": exclusions,
+        "audio_policy": {
+            "kind": "preferred_with_fallback",
+            "preferred_role": preferred_role,
+            "fallback_role": fallback_role,
+            "required": True,
+        },
+        "estimated_storage_bytes": estimated_storage_bytes,
+        "storage_estimate_capped": storage_estimate_capped,
+        "storage_estimate_semantics": CATALOG_STORAGE_ESTIMATE_SEMANTICS,
+    }
+
+
+def _chart_transform_inspection(
+    catalog: SongSourceCatalog,
+    *,
+    instrument: str | None,
+    target_difficulty: str | None,
+) -> dict[str, object]:
+    """Inspect chart-pair eligibility without parsing or exposing MIDI inputs.
+
+    If an OCTAVE caller has not selected the required chart-transform options
+    yet, the count means records that can support *at least one* declared
+    instrument/target transform.  Once options are supplied it is exactly the
+    selection `dataset prepare` will consider before MIDI parsing.
+    """
+    supported_instruments = (
+        (instrument,) if instrument is not None else ("guitar", "bass", "keys", "drums")
+    )
+    targets = (
+        (target_difficulty.lower(),)
+        if target_difficulty is not None
+        else ("hard", "medium", "easy")
+    )
+    exclusions = _empty_exclusions(
+        "training_use_not_allowed",
+        "instrument_not_present",
+        "source_difficulty_missing",
+        "target_difficulty_missing",
+    )
+    assets: list[CatalogAsset] = []
+    eligible_count = 0
+    for record in catalog.records:
+        if record.training_use != TRAINING_ALLOWED:
+            exclusions["training_use_not_allowed"] += 1
+            continue
+        coverages = [
+            coverage
+            for candidate in supported_instruments
+            if (coverage := record.instruments.get(candidate)) is not None
+            and coverage.status == "present"
+        ]
+        if not coverages:
+            exclusions["instrument_not_present"] += 1
+            continue
+        expert_coverages = [coverage for coverage in coverages if "expert" in coverage.difficulties]
+        if not expert_coverages:
+            exclusions["source_difficulty_missing"] += 1
+            continue
+        if not any(
+            any(target in coverage.difficulties for target in targets)
+            for coverage in expert_coverages
+        ):
+            exclusions["target_difficulty_missing"] += 1
+            continue
+        eligible_count += 1
+        assets.append(record.notes_midi)
+
+    estimated_storage_bytes, storage_estimate_capped = _bounded_asset_bytes(assets)
+    return {
+        "eligible_count": eligible_count,
+        "exclusion_reason_counts": exclusions,
+        "audio_policy": {"kind": "not_required", "required": False},
+        "estimated_storage_bytes": estimated_storage_bytes,
+        "storage_estimate_capped": storage_estimate_capped,
+        "storage_estimate_semantics": CATALOG_STORAGE_ESTIMATE_SEMANTICS,
+        "eligibility_selection": {
+            "mode": "requested_prepare_options"
+            if instrument is not None
+            else "any_declared_chart_transform_option",
+            "instrument": instrument,
+            "target_difficulty": target_difficulty,
+        },
+    }
+
+
+def _read_catalog_inspection_options(raw: str | None) -> dict[str, Any]:
+    """Parse an optional, local-only subset of preparation selection options."""
+    if raw is None:
+        return {}
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise WorkerRequestError("catalog inspection options are not valid JSON") from error
+    if not isinstance(value, dict):
+        raise WorkerRequestError("catalog inspection options must be an object")
+    return value
+
+
+def _inspect_pipeline_catalog(
+    catalog: SongSourceCatalog,
+    descriptor: PipelineDescriptor,
+    options: dict[str, Any],
+) -> dict[str, object]:
+    """Produce one uniform, path-free planning summary for a pipeline."""
+    pipeline_id = descriptor.id
+    if pipeline_id == "guitar.onset-fret/v1":
+        permitted = {"audio_role", "fallback_audio_role", "required_difficulty"}
+        if set(options) - permitted:
+            raise WorkerRequestError("unsupported Guitar catalog inspection option")
+        return _audio_task_inspection(
+            catalog,
+            instrument="guitar",
+            preferred_role=options.get("audio_role", "guitar"),
+            fallback_role=options.get("fallback_audio_role", "mix"),
+            required_difficulty=options.get("required_difficulty", "expert"),
+        )
+    if pipeline_id == "drums.onset-classifier/v1":
+        permitted = {"audio_role", "fallback_audio_role", "required_difficulty"}
+        if set(options) - permitted:
+            raise WorkerRequestError("unsupported Drums catalog inspection option")
+        return _audio_task_inspection(
+            catalog,
+            instrument="drums",
+            preferred_role=options.get("audio_role", "drums"),
+            fallback_role=options.get("fallback_audio_role", "mix"),
+            required_difficulty=options.get("required_difficulty", "expert"),
+        )
+    if pipeline_id == "chart_transform.five_lane/v1":
+        permitted = {"instrument", "target_difficulty"}
+        if set(options) - permitted:
+            raise WorkerRequestError("unsupported chart-transform catalog inspection option")
+        instrument = options.get("instrument")
+        target_difficulty = options.get("target_difficulty")
+        if instrument is None and target_difficulty is None:
+            return _chart_transform_inspection(catalog, instrument=None, target_difficulty=None)
+        if instrument not in {"guitar", "bass", "keys", "drums"} or target_difficulty not in {
+            "Hard",
+            "Medium",
+            "Easy",
+        }:
+            raise WorkerRequestError(
+                "chart-transform catalog inspection requires a supported instrument and target_difficulty"
+            )
+        return _chart_transform_inspection(
+            catalog, instrument=instrument, target_difficulty=target_difficulty
+        )
+
+    task_kind = next(
+        (kind for kind, value in CATALOG_TASK_PIPELINES.items() if value == pipeline_id), None
+    )
+    if task_kind is None:
+        raise WorkerRequestError("pipeline has no catalog task adapter")
+    permitted = {"audio_role", "fallback_audio_role", "disable_fallback", "required_difficulty"}
+    if set(options) - permitted:
+        raise WorkerRequestError("unsupported catalog task inspection option")
+    default_preferred, default_fallback = CATALOG_TASK_DEFAULT_AUDIO_ROLES[task_kind]
+    disable_fallback = options.get("disable_fallback", False)
+    if not isinstance(disable_fallback, bool):
+        raise WorkerRequestError("catalog task disable_fallback must be a boolean")
+    requested_fallback = options.get("fallback_audio_role")
+    return _audio_task_inspection(
+        catalog,
+        instrument=CATALOG_TASK_INSTRUMENTS[task_kind],
+        preferred_role=options.get("audio_role", default_preferred),
+        fallback_role=None
+        if disable_fallback
+        else (default_fallback if requested_fallback is None else requested_fallback),
+        required_difficulty=options.get("required_difficulty", "expert"),
+    )
+
+
+def inspect_catalog(
+    catalog_root: str | Path,
+    pipeline_id: str | None = None,
+    *,
+    options: dict[str, Any] | None = None,
+) -> dict[str, object]:
+    """Validate a catalog and return a path-free, pipeline-aware planning summary.
+
+    The optional options are the subset of a pipeline's preparation controls
+    that changes eligibility.  STRUM intentionally returns neither the
+    options nor source identifiers, records, paths, rights text, or provenance.
+    """
+    if pipeline_id is not None:
+        descriptor = _pipeline_by_id(pipeline_id)
+    else:
+        descriptor = None
+    catalog = load_catalog(catalog_root)
+    allowed = sum(record.training_use == TRAINING_ALLOWED for record in catalog.records)
+    response: dict[str, object] = {
         "status": "ready",
         "catalog_id": catalog.catalog_id,
         "record_count": len(catalog.records),
         "allowed_record_count": allowed,
         "pipeline_id": pipeline_id,
     }
+    if descriptor is not None:
+        response.update(_inspect_pipeline_catalog(catalog, descriptor, options or {}))
+    return response
 
 
 def _read_prepare_request(request_path: Path) -> dict[str, Any]:
@@ -1130,9 +1401,13 @@ def _validated_chart_transform_parent(
         raise WorkerRequestError("fine-tune parent bundle failed verification") from error
     component = bundle.component(component_id)
     if component is None or component.checkpoint is None or component.config is None:
-        raise WorkerRequestError("fine-tune parent does not declare a complete chart-transform component")
+        raise WorkerRequestError(
+            "fine-tune parent does not declare a complete chart-transform component"
+        )
     if component.architecture != "EventTransformMLP/v1":
-        raise WorkerRequestError("fine-tune parent has an incompatible chart-transform architecture")
+        raise WorkerRequestError(
+            "fine-tune parent has an incompatible chart-transform architecture"
+        )
     if component.preprocessing != "midi-five-lane-events/v1":
         raise WorkerRequestError("fine-tune parent has incompatible chart-transform preprocessing")
 
@@ -1221,7 +1496,9 @@ def run_training_request(request_path: Path) -> dict[str, object]:
         except (BundleValidationError, CatalogValidationError):
             raise
         except (GuitarTrainingError, OSError, TypeError, ValueError) as error:
-            raise WorkerRequestError("Guitar training request failed validation or execution") from error
+            raise WorkerRequestError(
+                "Guitar training request failed validation or execution"
+            ) from error
         return {
             "status": "completed",
             "pipeline_id": pipeline_id,
@@ -1297,9 +1574,7 @@ def run_training_request(request_path: Path) -> dict[str, object]:
     parent_bundle = request.get("parent_bundle")
     if checkpoint_mode == "fresh" and (parent_bundle is not None or parent_artifact_id is not None):
         raise WorkerRequestError("fresh chart-transform training must not select a parent artifact")
-    if checkpoint_mode == "fine_tune" and (
-        parent_bundle is None or parent_artifact_id is None
-    ):
+    if checkpoint_mode == "fine_tune" and (parent_bundle is None or parent_artifact_id is None):
         raise WorkerRequestError(
             "fine_tune chart-transform training requires a parent_artifact_id and private parent_bundle"
         )
@@ -1374,6 +1649,10 @@ def _parse_args() -> argparse.Namespace:
     catalog_inspect = catalog_commands.add_parser("inspect", help="inspect one catalog")
     catalog_inspect.add_argument("--catalog-root", type=Path, required=True)
     catalog_inspect.add_argument("--pipeline")
+    catalog_inspect.add_argument(
+        "--options",
+        help="JSON preparation-selection subset; values are used locally and never echoed",
+    )
     catalog_inspect.add_argument("--json", action="store_true")
     dataset = commands.add_parser("dataset", help="prepare STRUM task views")
     dataset_commands = dataset.add_subparsers(dest="dataset_command", required=True)
@@ -1442,7 +1721,13 @@ def main() -> int:
             )
             return 0
         if args.command == "catalog" and args.catalog_command == "inspect":
-            _print_json(inspect_catalog(args.catalog_root, args.pipeline))
+            _print_json(
+                inspect_catalog(
+                    args.catalog_root,
+                    args.pipeline,
+                    options=_read_catalog_inspection_options(args.options),
+                )
+            )
             return 0
         if args.command == "dataset" and args.dataset_command == "prepare":
             if args.json_events:
