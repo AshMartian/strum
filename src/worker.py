@@ -121,6 +121,26 @@ GUITAR_TRAIN_SCHEMA = _object_schema(
     },
     required=("model_id",),
 )
+DRUMS_ONSET_TRAIN_SCHEMA = _object_schema(
+    {
+        "model_id": {"type": "string"},
+        "profile": {
+            "type": "string",
+            "enum": ["onset_classifier_v2"],
+            "default": "onset_classifier_v2",
+        },
+        "seed": {"type": "integer", "default": 20260813},
+        "batch_size": {"type": "integer", "minimum": 1, "default": 256},
+        "epochs": {"type": "integer", "minimum": 1, "default": 100},
+        "learning_rate": {"type": "number", "exclusiveMinimum": 0, "default": 0.001},
+        "max_train_batches": {"type": "integer", "minimum": 1, "default": 2000},
+        "max_test_batches": {"type": "integer", "minimum": 1, "default": 500},
+        "num_workers": {"type": "integer", "minimum": 0, "default": 0},
+        "strum_revision": {"type": "string"},
+    },
+    required=("model_id",),
+)
+)
 
 PIPELINES = (
     PipelineDescriptor(
@@ -172,12 +192,12 @@ PIPELINES = (
             "audio_policy": "prefer:drums,fallback:mix",
         },
         prepare_schema=_object_schema(CATALOG_AUDIO_OPTIONS),
-        train_schema=None,
-        checkpoint_outputs=("drums_onset",),
-        inference_capability="drums.audio_to_chart/v1",
+        train_schema=DRUMS_ONSET_TRAIN_SCHEMA,
+        checkpoint_outputs=("drums_onset_classifier",),
+        inference_capability=None,
         status="catalog_ready",
         preparation_status="available",
-        training_status="script_only",
+        training_status="available",
     ),
     *(
         PipelineDescriptor(
@@ -427,8 +447,13 @@ def preflight_chart_request(request_path: Path) -> dict[str, object]:
         typed = load_drums_v14_expert_profile(bundle, raw["profile_id"])
         profile_configuration_sha256 = typed.configuration_sha256
     elif plan["capability"] == "difficulty.transform/v1":
-        if len(plan["components"]) != 1 or plan["components"][0]["architecture"] != "EventTransformMLP/v1":
-            raise WorkerRequestError("difficulty transform requires exactly one EventTransformMLP/v1")
+        if (
+            len(plan["components"]) != 1
+            or plan["components"][0]["architecture"] != "EventTransformMLP/v1"
+        ):
+            raise WorkerRequestError(
+                "difficulty transform requires exactly one EventTransformMLP/v1"
+            )
         component_id = plan["components"][0]["id"]
         if plan["difficulty_policy"] != f"learned:{component_id}":
             raise WorkerRequestError("difficulty transform policy must name its declared component")
@@ -545,7 +570,9 @@ def _write_five_lane_midi(
     )
 
     if instrument not in FIVE_LANE_INSTRUMENT_TRACKS or difficulty not in DIFFICULTY_BASE_NOTES:
-        raise WorkerRequestError("difficulty transform has unsupported instrument or target difficulty")
+        raise WorkerRequestError(
+            "difficulty transform has unsupported instrument or target difficulty"
+        )
     tempo, ticks_per_beat = 500_000, 480
     messages: list[tuple[int, bool, int]] = []
     for event in events:
@@ -562,7 +589,9 @@ def _write_five_lane_midi(
     midi = mido.MidiFile(ticks_per_beat=ticks_per_beat)
     track = mido.MidiTrack()
     midi.tracks.append(track)
-    track.append(mido.MetaMessage("track_name", name=FIVE_LANE_INSTRUMENT_TRACKS[instrument], time=0))
+    track.append(
+        mido.MetaMessage("track_name", name=FIVE_LANE_INSTRUMENT_TRACKS[instrument], time=0)
+    )
     track.append(mido.MetaMessage("set_tempo", tempo=tempo, time=0))
     previous = 0
     for tick, is_on, note in messages:
@@ -587,14 +616,28 @@ def _write_expert_drums_midi(events: Sequence[Any], output_path: Path) -> None:
     messages: list[tuple[int, bool, int, int]] = []
     for event in events:
         tick = round(float(event.time_ms) / 1000 * ticks_per_beat * 1_000_000 / tempo)
-        messages.extend(((tick, True, event.midi_note, event.velocity), (tick + 120, False, event.midi_note, 0)))
+        messages.extend(
+            ((tick, True, event.midi_note, event.velocity), (tick + 120, False, event.midi_note, 0))
+        )
     messages.sort(key=lambda item: (item[0], item[1], item[2]))
     midi = mido.MidiFile(ticks_per_beat=ticks_per_beat)
-    track = mido.MidiTrack([mido.MetaMessage("track_name", name="PART DRUMS", time=0), mido.MetaMessage("set_tempo", tempo=tempo, time=0)])
+    track = mido.MidiTrack(
+        [
+            mido.MetaMessage("track_name", name="PART DRUMS", time=0),
+            mido.MetaMessage("set_tempo", tempo=tempo, time=0),
+        ]
+    )
     midi.tracks.append(track)
     previous = 0
     for tick, is_on, note, velocity in messages:
-        track.append(mido.Message("note_on" if is_on else "note_off", note=note, velocity=velocity, time=tick - previous))
+        track.append(
+            mido.Message(
+                "note_on" if is_on else "note_off",
+                note=note,
+                velocity=velocity,
+                time=tick - previous,
+            )
+        )
         previous = tick
     output_path.parent.mkdir(parents=True, exist_ok=True)
     midi.save(output_path)
@@ -617,7 +660,10 @@ def _run_without_legacy_output(callback: Any) -> Any:
             sys.stderr.flush()
             for fd in output_fds:
                 os.dup2(sink.fileno(), fd)
-            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            with (
+                contextlib.redirect_stdout(io.StringIO()),
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
                 return callback()
     finally:
         for fd, saved_fd in saved_fds.items():
@@ -629,7 +675,9 @@ def run_chart_request(request_path: Path) -> dict[str, object]:
     """Execute a declared, bundle-backed chart profile with no legacy fallbacks."""
     try:
         raw_request = json.loads(request_path.read_text(encoding="utf-8"))
-        preflight_request = raw_request.get("preflight_request") if isinstance(raw_request, dict) else None
+        preflight_request = (
+            raw_request.get("preflight_request") if isinstance(raw_request, dict) else None
+        )
     except (OSError, json.JSONDecodeError) as error:
         raise WorkerRequestError("chart run request is unreadable or not valid JSON") from error
     if not isinstance(preflight_request, str) or not preflight_request:
@@ -666,8 +714,16 @@ def run_chart_request(request_path: Path) -> dict[str, object]:
             midi_path = output_dir / "notes.mid"
             _write_expert_guitar_midi(chart, midi_path)
             artifacts = {"notes_midi": {"name": midi_path.name, "sha256": _sha256(midi_path)}}
-            stages = {"guitar": {"status": "succeeded", "expert_event_count": len(chart.notes) + len(chart.chords)}}
-            response = {"output_name": midi_path.name, "expert_event_count": len(chart.notes) + len(chart.chords)}
+            stages = {
+                "guitar": {
+                    "status": "succeeded",
+                    "expert_event_count": len(chart.notes) + len(chart.chords),
+                }
+            }
+            response = {
+                "output_name": midi_path.name,
+                "expert_event_count": len(chart.notes) + len(chart.chords),
+            }
         elif plan["capability"] == "drums.v14-expert/v1":
             audio = Path(request["audio_path"])
             if not audio.is_file():
@@ -681,7 +737,14 @@ def run_chart_request(request_path: Path) -> dict[str, object]:
             component = bundle.component(profile.component_id)
             if component is None or component.checkpoint is None:
                 raise WorkerRequestError("drums V14 component is incomplete")
-            events = _run_without_legacy_output(lambda: DrumsV14Runtime.from_profile(profile, checkpoint_path=component.checkpoint, model_parameters=profile.model_parameters, device=plan["device"]).transcribe_audio_file(audio))
+            events = _run_without_legacy_output(
+                lambda: DrumsV14Runtime.from_profile(
+                    profile,
+                    checkpoint_path=component.checkpoint,
+                    model_parameters=profile.model_parameters,
+                    device=plan["device"],
+                ).transcribe_audio_file(audio)
+            )
             midi_path = output_dir / "notes.mid"
             _write_expert_drums_midi(events, midi_path)
             artifacts = {"notes_midi": {"name": midi_path.name, "sha256": _sha256(midi_path)}}
@@ -701,7 +764,9 @@ def run_chart_request(request_path: Path) -> dict[str, object]:
                 raise WorkerRequestError("difficulty transform component is incomplete")
             config = json.loads(component.config.read_text(encoding="utf-8"))
             instrument = config.get("instrument") if isinstance(config, dict) else None
-            target_difficulty = config.get("target_difficulty") if isinstance(config, dict) else None
+            target_difficulty = (
+                config.get("target_difficulty") if isinstance(config, dict) else None
+            )
             if not isinstance(instrument, str) or instrument not in plan["instruments"]:
                 raise WorkerRequestError("difficulty transform component instrument is invalid")
             checkpoint = torch.load(component.checkpoint, map_location="cpu", weights_only=True)
@@ -729,18 +794,27 @@ def run_chart_request(request_path: Path) -> dict[str, object]:
             events_path = output_dir / "events.json"
             events_path.parent.mkdir(parents=True, exist_ok=True)
             events_path.write_text(
-                json.dumps({"instrument": instrument, "difficulty": target_difficulty, "events": events}, indent=2)
+                json.dumps(
+                    {"instrument": instrument, "difficulty": target_difficulty, "events": events},
+                    indent=2,
+                )
                 + "\n",
                 encoding="utf-8",
             )
             midi_path = output_dir / "notes.mid"
-            _write_five_lane_midi(events, instrument=instrument, difficulty=target_difficulty, output_path=midi_path)
+            _write_five_lane_midi(
+                events, instrument=instrument, difficulty=target_difficulty, output_path=midi_path
+            )
             artifacts = {
                 "events": {"name": events_path.name, "sha256": _sha256(events_path)},
                 "notes_midi": {"name": midi_path.name, "sha256": _sha256(midi_path)},
             }
             stages = {"difficulty_transform": {"status": "succeeded", "event_count": len(events)}}
-            response = {"output_name": midi_path.name, "event_count": len(events), "difficulty": target_difficulty}
+            response = {
+                "output_name": midi_path.name,
+                "event_count": len(events),
+                "difficulty": target_difficulty,
+            }
         else:
             raise WorkerRequestError("profile has no worker chart execution handler")
         run_manifest = {
@@ -1039,6 +1113,23 @@ def run_training_request(request_path: Path) -> dict[str, object]:
             "components": preflight["components"],
             "metrics": result["metrics"],
         }
+    if pipeline_id == "drums.onset-classifier/v1":
+        from src.drums_onset_training import (  # noqa: PLC0415
+            DrumsTrainingError,
+            run_drums_onset_training,
+        )
+
+        try:
+            return _run_without_legacy_output(
+                lambda: run_drums_onset_training(
+                    request["task_view"],
+                    request["output"],
+                    request["options"],
+                    catalog_root=request["catalog_root"],
+                )
+            )
+        except DrumsTrainingError as error:
+            raise WorkerRequestError("Drums onset training request failed validation") from error
     if pipeline_id != "chart_transform.five_lane/v1":
         raise WorkerRequestError("pipeline has no worker training handler")
     if "catalog_root" in request:
@@ -1126,7 +1217,9 @@ def _parse_args() -> argparse.Namespace:
     training_run.add_argument("--request", type=Path, required=True)
     training_run.add_argument("--json", action="store_true")
     training_run.add_argument("--json-events", action="store_true")
-    training_start = training_commands.add_parser("start", help="start one OCTAVE-supervised training job")
+    training_start = training_commands.add_parser(
+        "start", help="start one OCTAVE-supervised training job"
+    )
     training_start.add_argument("--request", type=Path, required=True)
     training_start.add_argument("--json-events", action="store_true")
     model = commands.add_parser("model", help="inspect model bundles")
@@ -1183,12 +1276,16 @@ def main() -> int:
             return 0
         if args.command == "dataset" and args.dataset_command == "prepare":
             if args.json_events:
-                return _run_event_stream(args.request, "dataset_prepare", lambda: prepare_dataset_request(args.request))
+                return _run_event_stream(
+                    args.request, "dataset_prepare", lambda: prepare_dataset_request(args.request)
+                )
             _print_json(prepare_dataset_request(args.request))
             return 0
         if args.command == "train" and args.training_command in {"run", "start"}:
             if args.json_events:
-                return _run_event_stream(args.request, "training", lambda: run_training_request(args.request))
+                return _run_event_stream(
+                    args.request, "training", lambda: run_training_request(args.request)
+                )
             _print_json(run_training_request(args.request))
             return 0
         if args.command == "model" and args.model_command == "preflight":

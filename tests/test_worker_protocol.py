@@ -13,6 +13,7 @@ import torch
 from src.model_bundle import MANIFEST_FILENAME, BundleValidationError
 from src.models.chart_transform import EventTransformMLP
 from src.worker import (
+    PIPELINES,
     PROTOCOL_VERSION,
     _run_without_legacy_output,
     _runtime_payload,
@@ -22,6 +23,7 @@ from src.worker import (
     preflight_chart_request,
     prepare_dataset_request,
     run_chart_request,
+    run_training_request,
     validate_inference_profile,
 )
 
@@ -155,6 +157,89 @@ def test_catalog_inspect_and_prepare_emit_path_free_task_view(tmp_path: Path) ->
     assert str(tmp_path) not in output.read_text()
 
 
+def test_drums_pipeline_exposes_a_strict_worker_training_schema() -> None:
+    descriptor = next(item for item in PIPELINES if item.id == "drums.onset-classifier/v1")
+
+    assert descriptor.training_status == "available"
+    assert descriptor.checkpoint_outputs == ("drums_onset_classifier",)
+    assert descriptor.inference_capability is None
+    assert descriptor.train_schema == {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "model_id": {"type": "string"},
+            "catalog_root": {"type": "string"},
+            "profile": {
+                "type": "string",
+                "enum": ["onset_classifier_v2"],
+                "default": "onset_classifier_v2",
+            },
+            "seed": {"type": "integer", "default": 20260813},
+            "batch_size": {"type": "integer", "minimum": 1, "default": 256},
+            "epochs": {"type": "integer", "minimum": 1, "default": 100},
+            "learning_rate": {"type": "number", "exclusiveMinimum": 0, "default": 0.001},
+            "max_train_batches": {"type": "integer", "minimum": 1, "default": 2000},
+            "max_test_batches": {"type": "integer", "minimum": 1, "default": 500},
+            "num_workers": {"type": "integer", "minimum": 0, "default": 0},
+            "strum_revision": {"type": "string"},
+        },
+        "required": ["model_id", "catalog_root"],
+    }
+
+
+def test_drums_training_request_routes_catalog_task_view_to_existing_trainer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
+) -> None:
+    task_view = tmp_path / "drums-task.json"
+    task_view.write_text("{}")
+    request = tmp_path / "train.json"
+    request.write_text(
+        json.dumps(
+            {
+                "pipeline_id": "drums.onset-classifier/v1",
+                "task_view": str(task_view),
+                "output": str(tmp_path / "experiment"),
+                "options": {
+                    "model_id": "curated-drums-v1",
+                    "catalog_root": str(tmp_path / "catalog"),
+                    "epochs": 1,
+                    "max_train_batches": 1,
+                    "max_test_batches": 1,
+                },
+            }
+        )
+    )
+    observed: dict[str, object] = {}
+
+    def fake_train(
+        received_task_view: str | Path, output_dir: str | Path, options: object
+    ) -> dict[str, object]:
+        print(f"legacy trainer input={received_task_view}")
+        observed["task_view"] = received_task_view
+        observed["output_dir"] = output_dir
+        observed["options"] = options
+        return {
+            "status": "completed",
+            "pipeline_id": "drums.onset-classifier/v1",
+            "model_id": "curated-drums-v1",
+            "experiment_name": "experiment.json",
+            "task_view_sha256": "a" * 64,
+            "checkpoint": {"name": "checkpoints/best_f1.pt"},
+            "metrics": {"overall_f1": 0.5},
+        }
+
+    monkeypatch.setattr("src.drums_onset_training.run_drums_onset_training", fake_train)
+
+    result = run_training_request(request)
+
+    assert result["status"] == "completed"
+    assert observed["task_view"] == str(task_view)
+    assert observed["output_dir"] == str(tmp_path / "experiment")
+    assert observed["options"] == json.loads(request.read_text())["options"]
+    captured = capfd.readouterr()
+    assert str(task_view) not in captured.out
+
+
 def test_preflight_requires_hash_and_length_for_deployable_components(tmp_path: Path) -> None:
     root = _bundle(tmp_path, {"architecture": "GuitarOnsetCRNN/v1"})
 
@@ -165,7 +250,9 @@ def test_preflight_requires_hash_and_length_for_deployable_components(tmp_path: 
     assert result["manifest_sha256"]
 
 
-def test_preflight_requires_config_fingerprint_when_component_declares_config(tmp_path: Path) -> None:
+def test_preflight_requires_config_fingerprint_when_component_declares_config(
+    tmp_path: Path,
+) -> None:
     root = _bundle(
         tmp_path,
         {"architecture": "GuitarOnsetCRNN/v1", "config": "configs/guitar.json"},

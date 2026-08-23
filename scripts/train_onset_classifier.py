@@ -63,6 +63,7 @@ def onset_collate_fn(batch):
 
     return tuple(collated)
 
+
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
 
@@ -89,9 +90,7 @@ def focal_bce_with_logits(
         targets = targets * (1.0 - label_smoothing) + 0.5 * label_smoothing
 
     # Standard BCE components
-    bce = nn.functional.binary_cross_entropy_with_logits(
-        logits, targets, reduction='none'
-    )
+    bce = nn.functional.binary_cross_entropy_with_logits(logits, targets, reduction="none")
 
     # p_t = probability of correct class
     probs = torch.sigmoid(logits)
@@ -155,7 +154,7 @@ def asymmetric_loss_with_logits(
         gn = torch.tensor(gamma_neg, device=logits.device, dtype=logits.dtype)
         loss_neg = -(1 - targets) * probs_neg ** gn.unsqueeze(0) * log_neg
     else:
-        loss_neg = -(1 - targets) * probs_neg ** gamma_neg * log_neg
+        loss_neg = -(1 - targets) * probs_neg**gamma_neg * log_neg
 
     loss = (loss_pos + loss_neg) * class_weights.unsqueeze(0)
     return loss.mean()
@@ -269,25 +268,25 @@ def evaluate_streaming(
         total = min(total, max_samples)
 
     # Open files as mmap READ-ONLY just for slicing — we'll copy each chunk
-    mel_fine_mm = np.load(str(cache_path / index["files"]["mel_fine"]), mmap_mode='r')
-    mel_coarse_mm = np.load(str(cache_path / index["files"]["mel_coarse"]), mmap_mode='r')
-    contexts_mm = np.load(str(cache_path / index["files"]["contexts"]), mmap_mode='r')
-    labels_mm = np.load(str(cache_path / index["files"]["labels"]), mmap_mode='r')
+    mel_fine_mm = np.load(str(cache_path / index["files"]["mel_fine"]), mmap_mode="r")
+    mel_coarse_mm = np.load(str(cache_path / index["files"]["mel_coarse"]), mmap_mode="r")
+    contexts_mm = np.load(str(cache_path / index["files"]["contexts"]), mmap_mode="r")
+    labels_mm = np.load(str(cache_path / index["files"]["labels"]), mmap_mode="r")
 
     # CQT or lowfreq
     cqt_file = index["files"].get("cqt")
     lowfreq_file = index["files"].get("mel_lowfreq")
     lowfreq_mm = None
     if cqt_file and (cache_path / cqt_file).exists():
-        lowfreq_mm = np.load(str(cache_path / cqt_file), mmap_mode='r')
+        lowfreq_mm = np.load(str(cache_path / cqt_file), mmap_mode="r")
     elif lowfreq_file and (cache_path / lowfreq_file).exists():
-        lowfreq_mm = np.load(str(cache_path / lowfreq_file), mmap_mode='r')
+        lowfreq_mm = np.load(str(cache_path / lowfreq_file), mmap_mode="r")
 
     # Crash flux (V19+)
     crash_flux_file = index["files"].get("crash_flux")
     crash_flux_mm = None
     if crash_flux_file and (cache_path / crash_flux_file).exists():
-        crash_flux_mm = np.load(str(cache_path / crash_flux_file), mmap_mode='r')
+        crash_flux_mm = np.load(str(cache_path / crash_flux_file), mmap_mode="r")
 
     tp = np.zeros(num_classes)
     fp = np.zeros(num_classes)
@@ -392,13 +391,15 @@ def evaluate_streaming(
 def print_results(results: dict, epoch: int) -> None:
     """Pretty-print evaluation results."""
     print(f"\n  {'Class':<12} {'F1':>6} {'Prec':>6} {'Recall':>6}")
-    print(f"  {'-'*36}")
+    print(f"  {'-' * 36}")
     for name in CLASS_NAMES:
         m = results[name]
         marker = " ✓" if m["f1"] >= 0.9 else ""
-        print(f"  {name:<12} {m['f1']*100:>5.1f}% {m['precision']*100:>5.1f}% "
-              f"{m['recall']*100:>5.1f}%{marker}")
-    print(f"  {'OVERALL':<12} {results['overall_f1']*100:>5.1f}%")
+        print(
+            f"  {name:<12} {m['f1'] * 100:>5.1f}% {m['precision'] * 100:>5.1f}% "
+            f"{m['recall'] * 100:>5.1f}%{marker}"
+        )
+    print(f"  {'OVERALL':<12} {results['overall_f1'] * 100:>5.1f}%")
 
     # Print top confusion pairs
     pairs = results.get("confusion_pairs", {})
@@ -406,20 +407,23 @@ def print_results(results: dict, epoch: int) -> None:
         print(f"\n  Top confusions:")
         sorted_pairs = sorted(pairs.items(), key=lambda x: -x[1])[:5]
         for (tc, pc), rate in sorted_pairs:
-            print(f"    {CLASS_NAMES[tc]} → {CLASS_NAMES[pc]}: {rate*100:.1f}%")
+            print(f"    {CLASS_NAMES[tc]} → {CLASS_NAMES[pc]}: {rate * 100:.1f}%")
 
 
 def save_checkpoint(model, optimizer, scheduler, epoch, best_f1, best_val_loss, config, path):
     """Save training checkpoint."""
-    torch.save({
-        "model_state_dict": model.state_dict(),
-        "optimizer_state_dict": optimizer.state_dict(),
-        "scheduler_state_dict": scheduler.state_dict() if scheduler else None,
-        "epoch": epoch,
-        "best_f1": best_f1,
-        "best_val_loss": best_val_loss,
-        "config": OmegaConf.to_container(config),
-    }, path)
+    torch.save(
+        {
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "scheduler_state_dict": scheduler.state_dict() if scheduler else None,
+            "epoch": epoch,
+            "best_f1": best_f1,
+            "best_val_loss": best_val_loss,
+            "config": OmegaConf.to_container(config),
+        },
+        path,
+    )
 
 
 def train(config):
@@ -501,7 +505,9 @@ def train(config):
     tom_boost = config.get("tom_boost_sampling", {})
     if crash_boost.get("enabled", False):
         crash_fraction = crash_boost.get("crash_fraction", 0.3)
-        tom_fraction = tom_boost.get("tom_fraction", 0.0) if tom_boost.get("enabled", False) else 0.0
+        tom_fraction = (
+            tom_boost.get("tom_fraction", 0.0) if tom_boost.get("enabled", False) else 0.0
+        )
         train_sampler = train_ds.get_crash_boosted_sampler(
             crash_fraction=crash_fraction,
             tom_fraction=tom_fraction,
@@ -510,7 +516,9 @@ def train(config):
         print(f"\nCrash-boosted sampling enabled (crash={crash_fraction}, tom={tom_fraction}):")
     elif tom_boost.get("enabled", False):
         tom_fraction = tom_boost.get("tom_fraction", 0.5)
-        train_sampler = train_ds.get_tom_boosted_sampler(tom_fraction=tom_fraction, num_samples=sampler_num_samples)
+        train_sampler = train_ds.get_tom_boosted_sampler(
+            tom_fraction=tom_fraction, num_samples=sampler_num_samples
+        )
         print(f"\nTom-boosted sampling enabled (tom_fraction={tom_fraction}):")
     else:
         train_sampler = train_ds.get_sampler(num_samples=sampler_num_samples)
@@ -570,8 +578,11 @@ def train(config):
     freeze_backbone = config.get("freeze_backbone", False)
     if freeze_backbone:
         trainable_prefixes = (
-            "classifier.", "common_classifier.", "tom_classifier.",
-            "projection_head.", "aux_head.",
+            "classifier.",
+            "common_classifier.",
+            "tom_classifier.",
+            "projection_head.",
+            "aux_head.",
         )
         frozen = 0
         for name, param in model.named_parameters():
@@ -580,8 +591,10 @@ def train(config):
                 frozen += 1
         trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
         total = sum(p.numel() for p in model.parameters())
-        print(f"  Backbone frozen: {frozen} params frozen, "
-              f"{trainable/1e6:.2f}M/{total/1e6:.2f}M trainable")
+        print(
+            f"  Backbone frozen: {frozen} params frozen, "
+            f"{trainable / 1e6:.2f}M/{total / 1e6:.2f}M trainable"
+        )
 
     # Loss: BCE with per-class weighting to further help rare classes
     class_weights = torch.tensor(
@@ -657,7 +670,9 @@ def train(config):
             start_epoch = ckpt["epoch"] + 1
             best_f1 = ckpt.get("best_f1", 0.0)
             best_val_loss = ckpt.get("best_val_loss", float("inf"))
-            print(f"\n  ★ Resumed from {resume_path} (epoch {start_epoch}, best_f1={best_f1*100:.1f}%)")
+            print(
+                f"\n  ★ Resumed from {resume_path} (epoch {start_epoch}, best_f1={best_f1 * 100:.1f}%)"
+            )
         else:
             print(f"  Warning: resume_from path not found: {resume_path}")
 
@@ -681,7 +696,7 @@ def train(config):
 
         mixup_alpha = config.training.get("mixup_alpha", 0.0)
         total_train = min(max_train, len(train_loader)) if max_train else len(train_loader)
-        pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{tcfg.epochs}", total=total_train)
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{tcfg.epochs}", total=total_train)
         for batch_idx, batch in enumerate(pbar):
             if max_train and batch_idx >= max_train:
                 break
@@ -719,9 +734,18 @@ def train(config):
             # Forward pass — V5 returns extra features for contrastive/aux losses
             need_features = use_contrastive or use_aux_head
             if need_features:
-                logits, extras = model(mel_fine, mel_coarse, context, return_features=True, mel_lowfreq=mel_lowfreq, crash_flux=crash_flux)
+                logits, extras = model(
+                    mel_fine,
+                    mel_coarse,
+                    context,
+                    return_features=True,
+                    mel_lowfreq=mel_lowfreq,
+                    crash_flux=crash_flux,
+                )
             else:
-                logits = model(mel_fine, mel_coarse, context, mel_lowfreq=mel_lowfreq, crash_flux=crash_flux)
+                logits = model(
+                    mel_fine, mel_coarse, context, mel_lowfreq=mel_lowfreq, crash_flux=crash_flux
+                )
 
             # Main classification loss (focal BCE)
             # Loss computation: ASL or focal BCE
@@ -730,12 +754,18 @@ def train(config):
                 asl_gamma_neg = config.loss.get("gamma_neg", 4.0)
                 asl_gamma_pos = config.loss.get("gamma_pos", 1.0)
                 asl_clip = config.loss.get("clip", 0.05)
-                if isinstance(asl_gamma_neg, (list, tuple)) or (hasattr(asl_gamma_neg, '__iter__') and not isinstance(asl_gamma_neg, str)):
+                if isinstance(asl_gamma_neg, (list, tuple)) or (
+                    hasattr(asl_gamma_neg, "__iter__") and not isinstance(asl_gamma_neg, str)
+                ):
                     asl_gamma_neg = list(asl_gamma_neg)
-                if isinstance(asl_gamma_pos, (list, tuple)) or (hasattr(asl_gamma_pos, '__iter__') and not isinstance(asl_gamma_pos, str)):
+                if isinstance(asl_gamma_pos, (list, tuple)) or (
+                    hasattr(asl_gamma_pos, "__iter__") and not isinstance(asl_gamma_pos, str)
+                ):
                     asl_gamma_pos = list(asl_gamma_pos)
                 loss = asymmetric_loss_with_logits(
-                    logits, labels, class_weights,
+                    logits,
+                    labels,
+                    class_weights,
                     gamma_neg=asl_gamma_neg,
                     gamma_pos=asl_gamma_pos,
                     clip=asl_clip,
@@ -745,31 +775,33 @@ def train(config):
                 focal_gamma = config.loss.get("focal_gamma", 2.0)
                 if isinstance(focal_gamma, (list, tuple)):
                     focal_gamma = list(focal_gamma)
-                elif hasattr(focal_gamma, '__iter__') and not isinstance(focal_gamma, str):
+                elif hasattr(focal_gamma, "__iter__") and not isinstance(focal_gamma, str):
                     focal_gamma = list(focal_gamma)  # OmegaConf ListConfig → list
                 label_smooth = config.loss.get("label_smoothing", 0.0)
                 loss = focal_bce_with_logits(
-                    logits, labels, class_weights,
+                    logits,
+                    labels,
+                    class_weights,
                     gamma=focal_gamma,
                     label_smoothing=label_smooth,
                 )
 
             # V5: Supervised contrastive loss on projected embeddings
-            if use_contrastive and 'projection' in extras:
+            if use_contrastive and "projection" in extras:
                 supcon_labels = labels_orig if labels_orig is not None else labels
-                scl = supcon_criterion(extras['projection'], supcon_labels)
+                scl = supcon_criterion(extras["projection"], supcon_labels)
                 loss = loss + lambda_supcon * scl
 
             # V5: Auxiliary "is tom?" binary loss
-            if use_aux_head and 'aux_logits' in extras:
+            if use_aux_head and "aux_logits" in extras:
                 tom_labels = labels[:, TOM_INDICES].max(dim=1).values
                 aux_loss = nn.functional.binary_cross_entropy_with_logits(
-                    extras['aux_logits'], tom_labels
+                    extras["aux_logits"], tom_labels
                 )
                 loss = loss + lambda_aux * aux_loss
 
             if math.isnan(loss.item()):
-                logger.warning(f"NaN loss at epoch {epoch+1} batch {batch_idx}, skipping")
+                logger.warning(f"NaN loss at epoch {epoch + 1} batch {batch_idx}, skipping")
                 optimizer.zero_grad()
                 continue
 
@@ -782,7 +814,10 @@ def train(config):
             num_batches += 1
 
             if batch_idx % 50 == 0:
-                pbar.set_postfix(loss=f"{running_loss/num_batches:.4f}", lr=f"{optimizer.param_groups[0]['lr']:.1e}")
+                pbar.set_postfix(
+                    loss=f"{running_loss / num_batches:.4f}",
+                    lr=f"{optimizer.param_groups[0]['lr']:.1e}",
+                )
 
             # Periodically release mmap page cache to prevent CUDA memory starvation
             # (community cache is 133 GB vs 128.5 GB unified memory — frequent drops needed)
@@ -798,15 +833,21 @@ def train(config):
         if (epoch + 1) % tcfg.eval_interval == 0 or epoch == 0:
             # Streaming eval: reads test data in chunks, no persistent mmaps
             results = evaluate_streaming(
-                model, cache_dir, device,
-                batch_size=tcfg.batch_size, max_samples=max_val * tcfg.batch_size if max_val else 0)
+                model,
+                cache_dir,
+                device,
+                batch_size=tcfg.batch_size,
+                max_samples=max_val * tcfg.batch_size if max_val else 0,
+            )
             gc.collect()
 
             val_loss = results["val_loss"]
             overall_f1 = results["overall_f1"]
 
-            print(f"  Epoch {epoch+1}: train={train_loss:.4f} val={val_loss:.4f} "
-                  f"F1={overall_f1*100:.1f}% lr={lr:.1e} ({elapsed:.0f}s)")
+            print(
+                f"  Epoch {epoch + 1}: train={train_loss:.4f} val={val_loss:.4f} "
+                f"F1={overall_f1 * 100:.1f}% lr={lr:.1e} ({elapsed:.0f}s)"
+            )
             print_results(results, epoch + 1)
 
             # Memory cleanup before sampler rebuild
@@ -823,7 +864,8 @@ def train(config):
                 gc.collect()
                 # Rebuild sampler with hard negative upweighting
                 train_sampler = train_ds.get_hard_negative_sampler(
-                    confusion_pairs, num_samples=sampler_num_samples)
+                    confusion_pairs, num_samples=sampler_num_samples
+                )
                 train_loader = DataLoader(
                     train_ds,
                     batch_size=tcfg.batch_size,
@@ -833,50 +875,89 @@ def train(config):
                     drop_last=True,
                     collate_fn=onset_collate_fn,
                 )
-                print(f"  → Hard negative sampler updated: "
-                      f"{len(new_pairs)} confusion pairs")
+                print(f"  → Hard negative sampler updated: {len(new_pairs)} confusion pairs")
 
             # Save best
             if overall_f1 > best_f1:
                 best_f1 = overall_f1
-                save_checkpoint(model, optimizer, scheduler, epoch, best_f1, best_val_loss, config,
-                                checkpoint_dir / "best_f1.pt")
-                print(f"  ★ New best F1: {best_f1*100:.1f}%")
+                save_checkpoint(
+                    model,
+                    optimizer,
+                    scheduler,
+                    epoch,
+                    best_f1,
+                    best_val_loss,
+                    config,
+                    checkpoint_dir / "best_f1.pt",
+                )
+                print(f"  ★ New best F1: {best_f1 * 100:.1f}%")
                 patience_counter = 0
 
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
-                save_checkpoint(model, optimizer, scheduler, epoch, best_f1, best_val_loss, config,
-                                checkpoint_dir / "best_loss.pt")
+                save_checkpoint(
+                    model,
+                    optimizer,
+                    scheduler,
+                    epoch,
+                    best_f1,
+                    best_val_loss,
+                    config,
+                    checkpoint_dir / "best_loss.pt",
+                )
                 print(f"  ★ New best val_loss: {best_val_loss:.4f}")
 
             # Early stopping
             if overall_f1 <= best_f1:
                 patience_counter += 1
             if patience_counter >= tcfg.early_stop_patience:
-                print(f"\n  Early stopping at epoch {epoch+1} "
-                      f"(no improvement for {tcfg.early_stop_patience} evals)")
+                print(
+                    f"\n  Early stopping at epoch {epoch + 1} "
+                    f"(no improvement for {tcfg.early_stop_patience} evals)"
+                )
                 break
         else:
-            print(f"  Epoch {epoch+1}: train={train_loss:.4f} "
-                  f"lr={lr:.1e} ({elapsed:.0f}s)")
+            print(f"  Epoch {epoch + 1}: train={train_loss:.4f} lr={lr:.1e} ({elapsed:.0f}s)")
 
         # Periodic checkpoint
         if (epoch + 1) % tcfg.checkpoint_every == 0:
-            save_checkpoint(model, optimizer, scheduler, epoch, best_f1, best_val_loss, config,
-                            checkpoint_dir / f"epoch_{epoch+1}.pt")
+            save_checkpoint(
+                model,
+                optimizer,
+                scheduler,
+                epoch,
+                best_f1,
+                best_val_loss,
+                config,
+                checkpoint_dir / f"epoch_{epoch + 1}.pt",
+            )
 
     # Final evaluation
     print("\n" + "=" * 70)
     print("TRAINING COMPLETE — FINAL EVALUATION")
     print("=" * 70)
 
-    # Load best checkpoint
+    # Load best checkpoint.  A first very small experiment can legitimately
+    # score 0.0 F1, which used to leave no `best_f1.pt` at all because the
+    # comparison was strict.  A completed worker run must still have a
+    # reproducible checkpoint, so persist the final state in that case.
     best_path = checkpoint_dir / "best_f1.pt"
+    if not best_path.exists():
+        save_checkpoint(
+            model,
+            optimizer,
+            scheduler,
+            max(start_epoch, tcfg.epochs - 1),
+            best_f1,
+            best_val_loss,
+            config,
+            best_path,
+        )
+        print("  ★ Saved final checkpoint (no earlier best F1 checkpoint)")
     if best_path.exists():
         ckpt = torch.load(best_path, map_location=device, weights_only=False)
         model.load_state_dict(ckpt["model_state_dict"])
-        print(f"Loaded best F1 checkpoint (epoch {ckpt['epoch']+1})")
+        print(f"Loaded best F1 checkpoint (epoch {ckpt['epoch'] + 1})")
 
     # Final eval with streaming (no mmap)
     results = evaluate_streaming(model, cache_dir, device, batch_size=tcfg.batch_size)
@@ -886,10 +967,16 @@ def train(config):
     # V13 comparison
     print(f"\n  V13 Baseline (for reference):")
     print(f"  {'Class':<12} {'V13 F1':>8} {'New F1':>8} {'Delta':>8}")
-    print(f"  {'-'*42}")
+    print(f"  {'-' * 42}")
     v13_f1 = {
-        'Kick': 96.0, 'Snare': 92.9, 'HiHat': 84.2, 'HighTom': 47.0,
-        'Ride': 79.2, 'LowTom': 43.3, 'Crash': 73.1, 'FloorTom': 54.9,
+        "Kick": 96.0,
+        "Snare": 92.9,
+        "HiHat": 84.2,
+        "HighTom": 47.0,
+        "Ride": 79.2,
+        "LowTom": 43.3,
+        "Crash": 73.1,
+        "FloorTom": 54.9,
     }
     for name in CLASS_NAMES:
         old = v13_f1[name]
@@ -899,16 +986,22 @@ def train(config):
         print(f"  {name:<12} {old:>7.1f}% {new:>7.1f}% {delta:>+7.1f}% {marker}")
     old_avg = np.mean(list(v13_f1.values()))
     new_avg = results["overall_f1"] * 100
-    print(f"  {'OVERALL':<12} {old_avg:>7.1f}% {new_avg:>7.1f}% {new_avg-old_avg:>+7.1f}%")
+    print(f"  {'OVERALL':<12} {old_avg:>7.1f}% {new_avg:>7.1f}% {new_avg - old_avg:>+7.1f}%")
 
     # V2 comparison
     v2_f1 = {
-        'Kick': 97.1, 'Snare': 95.8, 'HiHat': 92.0, 'HighTom': 52.4,
-        'Ride': 84.4, 'LowTom': 63.5, 'Crash': 86.1, 'FloorTom': 86.6,
+        "Kick": 97.1,
+        "Snare": 95.8,
+        "HiHat": 92.0,
+        "HighTom": 52.4,
+        "Ride": 84.4,
+        "LowTom": 63.5,
+        "Crash": 86.1,
+        "FloorTom": 86.6,
     }
     print(f"\n  V2 Onset Classifier (for reference):")
     print(f"  {'Class':<12} {'V2 F1':>8} {'New F1':>8} {'Delta':>8}")
-    print(f"  {'-'*42}")
+    print(f"  {'-' * 42}")
     for name in CLASS_NAMES:
         old = v2_f1[name]
         new = results[name]["f1"] * 100
@@ -916,7 +1009,7 @@ def train(config):
         marker = "↑" if delta > 0 else "↓" if delta < 0 else "="
         print(f"  {name:<12} {old:>7.1f}% {new:>7.1f}% {delta:>+7.1f}% {marker}")
     old_avg = np.mean(list(v2_f1.values()))
-    print(f"  {'OVERALL':<12} {old_avg:>7.1f}% {new_avg:>7.1f}% {new_avg-old_avg:>+7.1f}%")
+    print(f"  {'OVERALL':<12} {old_avg:>7.1f}% {new_avg:>7.1f}% {new_avg - old_avg:>+7.1f}%")
 
     # Save confusion matrix
     cm = results.get("confusion", None)
@@ -925,8 +1018,19 @@ def train(config):
         print(f"\n  Confusion matrix saved to {output_dir / 'confusion_matrix.npy'}")
 
     # Save training history
-    print(f"\n  Best F1: {best_f1*100:.1f}%")
+    print(f"\n  Best F1: {best_f1 * 100:.1f}%")
     print(f"  Checkpoint: {best_path}")
+    return {
+        "checkpoint": str(best_path),
+        "metrics": {
+            # The legacy evaluator loads test_index.json.  Keep that fact in
+            # the worker's persisted artifact instead of calling it a
+            # validation result.
+            "test_overall_f1": float(results["overall_f1"]),
+            "test_loss": float(results["val_loss"]),
+            "test_num_samples": int(results["num_samples"]),
+        },
+    }
 
 
 if __name__ == "__main__":

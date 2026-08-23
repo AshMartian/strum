@@ -529,26 +529,28 @@ For example, a Guitar task-view request is:
 }
 ```
 
-`guitar.onset-fret/v1` is worker-trainable from its catalog task view. Its
-renderer-visible schema accepts only bounded `model_id`, `epochs`,
-`batch_size`, `device`, and `limit_songs` options. The private top-level
-`catalog_root` request field is worker-local configuration, not a pipeline
-option or renderer control.
-The worker invokes the established Guitar window-preprocessing and two-stage
-onset/fret trainers; it packages both resulting checkpoints as hash-verified
-`guitar.onset` and `guitar.fret` bundle components and records the task-view
-lineage in `experiment.json`. It does not accept an arbitrary resume or
-checkpoint path. `drums.onset-classifier/v1` remains catalog-ready with its
-existing script-based trainer (`training_status: script_only`). The five-lane
-`chart_transform.five_lane/v1` is also worker-trainable; OCTAVE runs the
-synchronous command below in its own supervised background process. The
-response contains only the bundle/model identity, checksums, and metrics.
+`guitar.onset-fret/v1`, `drums.onset-classifier/v1`, and
+`chart_transform.five_lane/v1` are worker-trainable. Their renderer-visible
+schemas contain only bounded model/training knobs. The private top-level
+`catalog_root` request field is worker-local configuration for Guitar and
+Drums task-view revalidation, never a pipeline option or renderer control.
+
+Guitar invokes the established window-preprocessing and two-stage onset/fret
+trainers, then packages verified `guitar.onset` and `guitar.fret` bundle
+components with task-view lineage. Drums derives its eight-lane labels,
+builds the maintained onset-window cache, and invokes the onset-classifier
+trainer. Its output remains an experiment artifact
+(`deployment_status: requires_profile_packaging`), not a claim that it can
+replace the verified `drums.v14-expert/v1` auto-chart profile. The five-lane
+transform creates a verified learned lower-difficulty component. OCTAVE must
+surface these distinct deployment states rather than selecting a checkpoint
+implicitly.
 
 ```bash
 strum-worker train run --request /path/to/owned-train-request.json --json
 ```
 
-For example, OCTAVE owns all of these locations and does not display them from
+For example, OCTAVE owns these private locations and never displays them from
 worker output:
 
 ```json
