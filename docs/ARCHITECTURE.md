@@ -359,7 +359,7 @@ src/
 | Tom-refinement CNN | `train_tom_refinement.py` | (uses Demucs drum stem) | inline |
 | Five-lane Guitar/Bass onset + fret CRNN (V1) | `train_guitar_v1.py` | revalidated Guitar/Bass catalog task view → `preprocess_guitar_windows.py` | `guitar_v1.yaml` |
 | Pitch→fret mapper (V4) | worker-owned `strum.fret-mapper/{guitar,bass}/v1` → `train_fret_mapper.py` | catalog task view → `build_mapper_dataset.py` | worker bundle config |
-| Section classifier | worker-owned `strum.section-classifier/{guitar,bass}/v1` → `train_section_classifier.py` | revalidated exact `PART GUITAR`/`PART BASS` task track → `build_catalog_section_labels.py` → `preprocess_section_windows.py` | experiment-only bundle with declared `section-logmel-torchaudio-windows/v1`; no router profile |
+| Section classifier | worker-owned `strum.section-classifier/{guitar,bass}/v1` → `train_section_classifier.py` | revalidated exact `PART GUITAR`/`PART BASS` task track → `build_catalog_section_labels.py` → `preprocess_section_windows.py` | experiment-only bundle with declared `section-logmel-librosa-router-windows/v1`; exact legacy router frontend, but no router profile |
 
 All trainers log to W&B (`WANDB_MODE=offline` to disable). The Guitar/Bass
 fret-mapper worker is a narrow exception: it invokes the established builder
@@ -379,13 +379,17 @@ checkpoint safety/evaluation boundary only: it is not a Guitar/Bass chart
 profile, has no worker execution capability, and does not bridge the Basic
 Pitch/Viterbi/held-out chart-evaluation requirements.
 
-Section training is also intentionally experiment-only. The established
-`SectionRouter` uses a librosa frontend, while the catalog worker trains with
-torchaudio features. The runtime must not substitute a worker checkpoint into
-the router by filename. A future composed chart profile must name an exact
-equivalent frontend, load hash-verified tensor weights through a typed profile,
-and pass both held-out section calibration and router-on/off chart-impact
-evaluation before it can change chart output.
+Section training is also intentionally experiment-only. The catalog worker and
+the established `SectionRouter` now import one exact librosa frontend contract
+(decode/resampling, Slaney Mel, constant padding, full-song frame slicing, and
+per-window normalization). The runtime must still not substitute a worker
+checkpoint into the router by filename. A future composed chart profile must
+load hash-verified tensor weights through a typed profile and pass both
+held-out section calibration and router-on/off chart-impact evaluation before
+it can change chart output.
+If a catalog task contains a test split, the trainer reports best-validation
+checkpoint test metrics in the experiment. That report is not a profile
+promotion decision or a substitute for the router-on/off chart-impact gate.
 
 ## 10. Catalog and worker contract
 

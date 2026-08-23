@@ -21,50 +21,23 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from src import section_frontend
+from src.section_frontend import (
+    SAMPLE_RATE,
+    WINDOW_SAMPLES,
+    normalize_router_patches,
+    resample_router_audio,
+    router_patches,
+)
+
 logger = logging.getLogger(__name__)
+
+# Backward-compatible public location for artifact inspection.  The object is
+# defined by the shared executable frontend rather than duplicated here.
+ROUTER_FEATURE_EXTRACTOR = section_frontend.ROUTER_FEATURE_EXTRACTOR
 
 LABELS = ["silence", "constant_strum", "chord_stab", "lead_line", "single_notes", "mixed"]
 LABEL_TO_IDX = {label: index for index, label in enumerate(LABELS)}
-
-# Same audio constants as scripts/preprocess_section_windows.py
-SAMPLE_RATE = 22050
-N_MELS = 128
-N_FFT = 2048
-HOP_LENGTH = 512
-FMIN = 30.0
-FMAX = 8000.0
-WINDOW_S = 2.0
-HOP_S = 1.0
-WINDOW_SAMPLES = int(WINDOW_S * SAMPLE_RATE)
-WINDOW_FRAMES = WINDOW_SAMPLES // HOP_LENGTH + 1  # ~87
-HOP_SAMPLES = int(HOP_S * SAMPLE_RATE)
-
-# Kept as data as well as code so worker artifacts can state precisely why a
-# torchaudio-trained section classifier is not automatically a SectionRouter
-# profile.  These choices differ materially from the catalog worker frontend
-# (notably mel scale, normalization, and STFT padding).  A future typed profile
-# must either use this exact contract during training or introduce an evaluated
-# compatibility adapter; matching tensor shape alone is insufficient.
-ROUTER_FEATURE_EXTRACTOR = {
-    "format": "strum-section-feature-extractor/v1",
-    "backend": "librosa",
-    "sample_rate": SAMPLE_RATE,
-    "channel_mixdown": "caller_provided_mono",
-    "resampler": "librosa.resample/default",
-    "n_mels": N_MELS,
-    "n_fft": N_FFT,
-    "hop_length": HOP_LENGTH,
-    "fmin": FMIN,
-    "fmax": FMAX,
-    "power": 2.0,
-    "window": "hann",
-    "center": True,
-    "pad_mode": "constant",
-    "mel_scale": "slaney",
-    "mel_norm": "slaney",
-    "normalization": "per_window_mean_std_eps_1e-5",
-    "log_offset": 1e-8,
-}
 
 DEFAULT_CKPT = "checkpoints/section_classifier/best.pt"
 
@@ -133,61 +106,15 @@ class SectionRouter:
     @torch.no_grad()
     def predict(self, audio: np.ndarray, sr: int) -> list[Section]:
         """Predict per-1s-hop section labels for an audio array."""
-        # Resample if needed (use librosa to avoid torchaudio NVRTC issue)
-        if sr != SAMPLE_RATE:
-            import librosa
-
-            audio = librosa.resample(audio.astype(np.float32), orig_sr=sr, target_sr=SAMPLE_RATE)
+        # This shared frontend is also used for catalog training.  Keep the
+        # router input behavior stable while making the contract executable.
+        audio = resample_router_audio(audio, sr)
 
         if len(audio) < WINDOW_SAMPLES:
             return [Section(0.0, len(audio) / SAMPLE_RATE, "mixed", np.zeros(len(LABELS)))]
 
-        # Slice into overlapping windows (HOP_S stride)
-        starts: list[int] = list(range(0, len(audio) - WINDOW_SAMPLES + 1, HOP_SAMPLES))
-        if starts[-1] + WINDOW_SAMPLES < len(audio):
-            starts.append(len(audio) - WINDOW_SAMPLES)
-        n = len(starts)
-
-        # Compute one big mel spectrogram via librosa, then slice patches.
-        # Faster than running mel per patch (~5x for typical song lengths).
-        import librosa
-
-        mel_full = librosa.feature.melspectrogram(
-            y=audio,
-            sr=SAMPLE_RATE,
-            n_fft=N_FFT,
-            hop_length=HOP_LENGTH,
-            n_mels=N_MELS,
-            fmin=FMIN,
-            fmax=FMAX,
-            power=2.0,
-            window="hann",
-            center=True,
-            pad_mode="constant",
-            htk=False,
-            norm="slaney",
-        )
-        mel_full = np.log(mel_full + 1e-8).astype(np.float32)  # (n_mels, T_total)
-
-        # Number of mel frames covered by one window
-        frames_per_window = WINDOW_FRAMES
-        patches = np.zeros((n, N_MELS, frames_per_window), dtype=np.float32)
-        for i, s in enumerate(starts):
-            f_start = s // HOP_LENGTH
-            f_end = f_start + frames_per_window
-            if f_end > mel_full.shape[1]:
-                # Right-pad with edge replication
-                slab = mel_full[:, f_start:]
-                pad = frames_per_window - slab.shape[1]
-                slab = np.pad(slab, ((0, 0), (0, pad)), mode="edge")
-                patches[i] = slab
-            else:
-                patches[i] = mel_full[:, f_start:f_end]
-
-        # Z-norm per patch (matches training)
-        mu = patches.mean(axis=(1, 2), keepdims=True)
-        sd = patches.std(axis=(1, 2), keepdims=True) + 1e-5
-        patches = (patches - mu) / sd
+        starts, patches = router_patches(audio)
+        patches = normalize_router_patches(patches)
 
         mel_t = torch.from_numpy(patches).unsqueeze(1).to(self.device)  # (N,1,M,T)
         logits = self.model(mel_t)

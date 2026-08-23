@@ -84,6 +84,12 @@ def main() -> int:
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--num-workers", type=int, default=4)
     ap.add_argument("--device", choices=("auto", "cuda", "mps", "cpu"), default="auto")
+    ap.add_argument(
+        "--evaluate-split",
+        choices=("none", "test"),
+        default="none",
+        help="evaluate the selected best validation checkpoint on a separate cache split",
+    )
     ap.add_argument("--metrics-out", type=Path)
     args = ap.parse_args()
 
@@ -193,6 +199,37 @@ def main() -> int:
             )
             log.info("  ↳ saved best (val_acc=%.4f)", val_acc)
 
+    held_out_evaluation: dict[str, object] = {
+        "status": "not_run",
+        "reason": "no_separate_test_split_requested",
+    }
+    if args.evaluate_split == "test":
+        try:
+            test_ds = SectionDataset(cache_dir, "test")
+        except (OSError, ValueError) as error:
+            ap.error(f"--evaluate-split test requires a valid test cache: {error}")
+        test_loader = DataLoader(
+            test_ds,
+            batch_size=args.batch_size,
+            shuffle=False,
+            num_workers=args.num_workers,
+            pin_memory=device.type == "cuda",
+        )
+        # Selection happened on validation; report test metrics only from the
+        # saved best validation checkpoint so this remains a genuine held-out
+        # measurement rather than a final-epoch convenience statistic.
+        checkpoint = torch.load(ckpt_dir / "best.pt", map_location=device, weights_only=True)
+        model.load_state_dict(checkpoint["state_dict"])
+        test_acc, test_per_class = evaluate(model, test_loader, device)
+        held_out_evaluation = {
+            "status": "completed",
+            "split": "test",
+            "record_count": len(test_ds),
+            "accuracy": test_acc,
+            "per_class_accuracy": test_per_class,
+        }
+        log.info("held-out test accuracy=%.4f", test_acc)
+
     if args.metrics_out is not None:
         args.metrics_out.parent.mkdir(parents=True, exist_ok=True)
         args.metrics_out.write_text(
@@ -204,6 +241,7 @@ def main() -> int:
                     "train_record_count": len(train_ds),
                     "val_record_count": len(val_ds),
                     "device": device.type,
+                    "held_out_evaluation": held_out_evaluation,
                 },
                 indent=2,
                 sort_keys=True,

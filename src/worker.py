@@ -280,14 +280,12 @@ PLANNED_TRAINING_REQUIREMENTS: dict[str, tuple[str, ...]] = {
         "pro_keys_chart_execution/v1",
     ),
     "section_guitar": (
-        "exact_section_feature_extractor_contract",
         "section_router_profile_loader_tensor_only",
         "held_out_section_calibration_evaluation",
         "held_out_chart_impact_ablation",
         "composed_guitar_chart_profile_contract",
     ),
     "section_bass": (
-        "exact_section_feature_extractor_contract",
         "section_router_profile_loader_tensor_only",
         "held_out_section_calibration_evaluation",
         "held_out_chart_impact_ablation",

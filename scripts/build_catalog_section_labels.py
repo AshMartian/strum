@@ -9,8 +9,6 @@ import json
 import sys
 from pathlib import Path
 
-import soundfile as sf
-
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
@@ -18,6 +16,7 @@ if str(REPOSITORY_ROOT) not in sys.path:
 from scripts.build_section_labels import HOP_S, WINDOW_S, label_window  # noqa: E402
 from scripts.preprocess_guitar_windows import parse_onsets_from_manifest  # noqa: E402
 from src.catalog_task_manifest import resolve_catalog_task_manifest_songs  # noqa: E402
+from src.section_frontend import SAMPLE_RATE, load_router_audio  # noqa: E402
 
 
 def _manifest_hash(manifest: object) -> str:
@@ -59,7 +58,11 @@ def build_labels(manifest: dict[str, object], catalog_root: Path) -> dict[str, o
         onsets = _parse_chart_onsets(Path(song["midi_path"]), expected_track)
         if not onsets:
             continue
-        duration = sf.info(song["audio_path"]).duration
+        # Establish training windows from the exact decoded/resampled samples
+        # used by the SectionRouter.  Container metadata duration can differ
+        # from decoded samples, particularly for lossy assets, which would
+        # otherwise make a labeled window unavailable to preprocessing.
+        duration = len(load_router_audio(Path(song["audio_path"]))) / SAMPLE_RATE
         t = 0.0
         while t + WINDOW_S <= duration:
             in_window = [frets for time_ms, frets in onsets if t <= time_ms / 1000.0 < t + WINDOW_S]

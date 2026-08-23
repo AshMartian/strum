@@ -128,7 +128,7 @@ def _fake_section_scripts(commands: list[list[str]]) -> object:
                 records = [record for record in labels["records"] if record["split"] == split]
                 np.save(
                     cache_dir / f"{split}_section_mel.npy",
-                    np.zeros((len(records), 128, 87), np.float16),
+                    np.zeros((len(records), 128, 87), np.float32),
                 )
                 np.save(cache_dir / f"{split}_section_label.npy", np.full(len(records), 4, np.int8))
                 (cache_dir / f"{split}_section_meta.json").write_text(
@@ -214,7 +214,7 @@ def test_section_worker_packages_a_revalidated_catalog_experiment_without_profil
     result = run_training_request(train)
 
     assert result["status"] == "completed"
-    assert result["deployment_status"] == "requires_section_runtime_feature_alignment"
+    assert result["deployment_status"] == "requires_section_profile_evaluation"
     assert [item[1].rsplit("/", 1)[-1] for item in commands] == [
         "build_catalog_section_labels.py",
         "preprocess_section_windows.py",
@@ -230,21 +230,25 @@ def test_section_worker_packages_a_revalidated_catalog_experiment_without_profil
     assert set(model.components) == {component}
     assert model.profiles == {}
     config = json.loads(next((bundle / "configs").glob("*.json")).read_text())
+    packaged_experiment = json.loads((output / "experiment.json").read_text())
     assert config["instrument"] == task_kind.removeprefix("section_")
     assert config["format"] == "strum-section-classifier-model-config/v1"
-    assert config["preprocessing"] == "section-logmel-torchaudio-windows/v1"
-    assert config["feature_extractor"]["backend"] == "torchaudio"
+    assert config["preprocessing"] == "section-logmel-librosa-router-windows/v1"
+    assert config["feature_extractor"]["backend"] == "librosa"
     assert config["runtime_profile"] == {
         "format": "strum-section-router-deployment-requirements/v1",
         "status": "not_packageable",
-        "reason": "section_router_feature_frontend_is_not_equivalent",
+        "reason": "section_router_execution_and_held_out_evaluation_not_proven",
         "requirements": [
-            "exact_section_feature_extractor_contract",
             "section_router_profile_loader_tensor_only",
             "held_out_section_calibration_evaluation",
             "held_out_chart_impact_ablation",
             f"composed_{task_kind.removeprefix('section_')}_chart_profile_contract",
         ],
+    }
+    assert packaged_experiment["held_out_evaluation"] == {
+        "status": "not_run",
+        "reason": "trainer_did_not_report_held_out_evaluation",
     }
 
 
@@ -287,7 +291,6 @@ def test_section_descriptors_expose_private_catalog_training_without_inference(
     assert descriptor.train_schema is not None
     assert "catalog_root" not in descriptor.train_schema["properties"]
     expected = (
-        "exact_section_feature_extractor_contract",
         "section_router_profile_loader_tensor_only",
         "held_out_section_calibration_evaluation",
         "held_out_chart_impact_ablation",

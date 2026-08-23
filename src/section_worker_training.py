@@ -30,44 +30,26 @@ import numpy as np
 from src import PROJECT_ROOT, __version__
 from src.catalog_task_manifest import MANIFEST_FORMAT, resolve_catalog_task_manifest_songs
 from src.model_bundle import MANIFEST_FILENAME
+from src.section_frontend import ROUTER_FEATURE_EXTRACTOR
 from src.song_source_catalog import CatalogValidationError
 
 EXPERIMENT_FORMAT = "strum-experiment/v1"
-# The raw experiment is deliberately named for the actual extractor.  The
-# existing SectionRouter currently uses a different (librosa) frontend, so
-# the generic word "logmel" would overstate runtime compatibility.
-PREPROCESSING_ID = "section-logmel-torchaudio-windows/v1"
+# This is the executable legacy router contract, not an approximation with a
+# matching Mel shape.  Both inference and catalog preprocessing import it from
+# ``src.section_frontend``.
+PREPROCESSING_ID = "section-logmel-librosa-router-windows/v1"
 MODEL_IMPLEMENTATION = "SectionClassifier/v1"
 LABEL_FORMAT = "strum-section-labels/v1"
 LABELS = ("silence", "constant_strum", "chord_stab", "lead_line", "single_notes", "mixed")
-DEPLOYMENT_STATUS = "requires_section_runtime_feature_alignment"
+DEPLOYMENT_STATUS = "requires_section_profile_evaluation"
 RUNTIME_PROFILE_REQUIREMENTS = (
-    "exact_section_feature_extractor_contract",
     "section_router_profile_loader_tensor_only",
     "held_out_section_calibration_evaluation",
     "held_out_chart_impact_ablation",
 )
-SECTION_FEATURE_EXTRACTOR = {
-    "format": "strum-section-feature-extractor/v1",
-    "backend": "torchaudio",
-    "sample_rate": 22050,
-    "channel_mixdown": "arithmetic_mean",
-    "resampler": "torchaudio.functional.resample/default",
-    "n_mels": 128,
-    "n_fft": 2048,
-    "hop_length": 512,
-    "fmin": 30.0,
-    "fmax": 8000.0,
-    "power": 2.0,
-    "window": "hann",
-    "center": True,
-    "pad_mode": "reflect",
-    "mel_scale": "htk",
-    "mel_norm": None,
-    "spectrogram_normalized": False,
-    "normalization": "per_window_mean_std_eps_1e-5",
-    "log_offset": 1e-8,
-}
+# Retain this exported name for callers which inspect worker artifacts.  It is
+# deliberately the same data object exported by the runtime frontend.
+SECTION_FEATURE_EXTRACTOR = ROUTER_FEATURE_EXTRACTOR
 _MODEL_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 _TASKS = {
     "strum.section-classifier/guitar/v1": ("section_guitar", "guitar", "PART GUITAR"),
@@ -268,14 +250,20 @@ def _read_labels(
     return counts
 
 
-def _validate_cache(cache_dir: Path, songs: list[dict[str, object]]) -> dict[str, int]:
+def _validate_cache(
+    cache_dir: Path,
+    songs: list[dict[str, object]],
+    expected_counts: dict[str, int],
+) -> dict[str, int]:
     expected_splits = {
         str(song["source_id"]): str(song["split"])
         for song in songs
         if isinstance(song.get("source_id"), str) and isinstance(song.get("split"), str)
     }
     counts: dict[str, int] = {}
-    for split in ("train", "val"):
+    for split in ("train", "val", "test"):
+        if not expected_counts.get(split, 0):
+            continue
         mel_path = cache_dir / f"{split}_section_mel.npy"
         label_path = cache_dir / f"{split}_section_label.npy"
         meta_path = cache_dir / f"{split}_section_meta.json"
@@ -290,6 +278,7 @@ def _validate_cache(cache_dir: Path, songs: list[dict[str, object]]) -> dict[str
         if (
             mel.ndim != 3
             or mel.shape[1:] != (128, 87)
+            or mel.dtype != np.dtype(np.float32)
             or targets.ndim != 1
             or len(mel) != len(targets)
             or not isinstance(metadata, list)
@@ -308,6 +297,8 @@ def _validate_cache(cache_dir: Path, songs: list[dict[str, object]]) -> dict[str
             if record.get("label") not in LABELS:
                 raise SectionTrainingError("section cache contains unknown labels")
         counts[split] = len(targets)
+        if counts[split] != expected_counts[split]:
+            raise SectionTrainingError("section preprocessing omitted catalog label windows")
     return counts
 
 
@@ -335,7 +326,25 @@ def _read_metrics(path: Path) -> dict[str, object]:
         )
     ) or not isinstance(metrics["best_per_class_accuracy"], dict):
         raise SectionTrainingError("section trainer metrics are invalid")
-    return {key: metrics[key] for key in (*required, "device") if key in metrics}
+    held_out = metrics.get("held_out_evaluation")
+    if held_out is not None:
+        if not isinstance(held_out, dict) or held_out.get("status") not in {
+            "completed",
+            "not_run",
+        }:
+            raise SectionTrainingError("section trainer held-out evaluation is invalid")
+        if held_out["status"] == "completed" and (
+            held_out.get("split") != "test"
+            or not isinstance(held_out.get("record_count"), int)
+            or held_out["record_count"] < 1
+            or not isinstance(held_out.get("accuracy"), (int, float))
+            or isinstance(held_out.get("accuracy"), bool)
+            or not isinstance(held_out.get("per_class_accuracy"), dict)
+        ):
+            raise SectionTrainingError("section trainer held-out evaluation is invalid")
+    return {
+        key: metrics[key] for key in (*required, "device", "held_out_evaluation") if key in metrics
+    }
 
 
 def _component(bundle_dir: Path, checkpoint_path: Path, config_path: Path) -> dict[str, object]:
@@ -399,7 +408,7 @@ def run_catalog_section_training(
             str(cache_dir),
         ]
     )
-    cache_counts = _validate_cache(cache_dir, songs)
+    cache_counts = _validate_cache(cache_dir, songs, label_counts)
     _run_script(
         [
             sys.executable,
@@ -420,6 +429,8 @@ def run_catalog_section_training(
             device,
             "--metrics-out",
             str(metrics_path),
+            "--evaluate-split",
+            "test" if cache_counts.get("test", 0) else "none",
         ]
     )
     checkpoint = checkpoint_dir / "best.pt"
@@ -445,15 +456,14 @@ def run_catalog_section_training(
         "window_seconds": 2.0,
         "hop_seconds": 1.0,
         "mel_shape": [128, 87],
-        # This is intentionally more specific than the legacy router's
-        # constants.  It makes the non-deployable gap visible in the portable
-        # artifact instead of allowing a future caller to assume that two
-        # log-mel frontends are interchangeable.
+        # This is the actual shared runtime frontend.  The remaining
+        # non-deployable gap is profile loading and measured chart utility,
+        # not Mel-feature compatibility.
         "feature_extractor": dict(SECTION_FEATURE_EXTRACTOR),
         "runtime_profile": {
             "format": "strum-section-router-deployment-requirements/v1",
             "status": "not_packageable",
-            "reason": "section_router_feature_frontend_is_not_equivalent",
+            "reason": "section_router_execution_and_held_out_evaluation_not_proven",
             "requirements": list(_runtime_profile_requirements(instrument)),
         },
         "training": options.portable(),
@@ -522,6 +532,10 @@ def run_catalog_section_training(
             "device": device,
         },
         "metrics": metrics,
+        "held_out_evaluation": metrics.get(
+            "held_out_evaluation",
+            {"status": "not_run", "reason": "trainer_did_not_report_held_out_evaluation"},
+        ),
         "deployment_status": DEPLOYMENT_STATUS,
         "deployment_requirements": list(_runtime_profile_requirements(instrument)),
         "bundle": {"name": bundle_dir.name, "manifest": MANIFEST_FILENAME},
