@@ -6,7 +6,9 @@ import json
 from pathlib import Path
 
 import mido
+import numpy as np
 import pytest
+import soundfile as sf
 
 from src.catalog_task_manifest import (
     LEGACY_SPLIT_ALGORITHM,
@@ -18,6 +20,7 @@ from src.catalog_task_manifest import (
     resolve_catalog_task_manifest_songs,
 )
 from src.song_source_catalog import CatalogValidationError
+from src.vocal_audio_compatibility import has_compatible_vocal_audio
 
 
 def _asset(root: Path, payload: bytes, filename: str) -> dict[str, object]:
@@ -61,6 +64,12 @@ def _midi_with_out_of_range_data_byte() -> bytes:
     )
 
 
+def _wav_bytes() -> bytes:
+    stream = io.BytesIO()
+    sf.write(stream, np.full(512, 0.01, dtype=np.float32), 22_050, format="WAV")
+    return stream.getvalue()
+
+
 def _record(root: Path, source_id: str, *, training_use: str = "allowed") -> dict[str, object]:
     track_names = {
         "bass": ["PART BASS"],
@@ -79,6 +88,12 @@ def _record(root: Path, source_id: str, *, training_use: str = "allowed") -> dic
         }
         for instrument, names in track_names.items()
     }
+    audio_payloads = {
+        # The five generic task kinds only need content-addressed bytes here,
+        # but every Vocal task now tests the actual shared decoder boundary.
+        "mix": _wav_bytes(),
+        "vocals": _wav_bytes(),
+    }
     return {
         "source_id": source_id,
         "import": {"kind": "sng", "adapter_version": "octave-sng/1", "warnings": []},
@@ -93,7 +108,11 @@ def _record(root: Path, source_id: str, *, training_use: str = "allowed") -> dic
             "instruments": instruments,
         },
         "audio": {
-            role: _asset(root, f"{source_id}-{role}".encode(), f"{role}.ogg")
+            role: _asset(
+                root,
+                audio_payloads.get(role, f"{source_id}-{role}".encode()),
+                f"{role}.ogg",
+            )
             for role in ("mix", "bass", "guitar", "keys", "vocals")
         },
     }
@@ -111,6 +130,35 @@ def _catalog(root: Path, records: list[dict[str, object]]) -> None:
             }
         )
     )
+
+
+def test_vocal_audio_gate_rejects_decode_failure_after_open_and_initial_frames(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class MiddleDecodeFailure:
+        frames = 12_288
+        samplerate = 22_050
+        channels = 1
+        reads = 0
+
+        def __enter__(self) -> MiddleDecodeFailure:
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+        def read(self, frames: int, **_: object) -> np.ndarray:
+            self.reads += 1
+            if self.reads == 1:
+                return np.ones(frames, dtype=np.float32)
+            raise RuntimeError("synthetic middle-stream decoder failure")
+
+    monkeypatch.setattr(
+        "src.vocal_audio_compatibility.sf.SoundFile",
+        lambda *_args, **_kwargs: MiddleDecodeFailure(),
+    )
+
+    assert has_compatible_vocal_audio(tmp_path / "hash-valid-but-truncated.ogg") is False
 
 
 @pytest.mark.parametrize("task_kind", available_task_kinds())
@@ -238,6 +286,10 @@ def test_vocal_task_views_exclude_midi_targets_mido_cannot_decode(
         "target_compatibility": {
             "format": "mido-standard-midi-exact-part-vocals/v1",
             "excluded_record_count": 1,
+            "audio": {
+                "format": "soundfile-full-stream-decode/v1",
+                "excluded_record_count": 0,
+            },
         },
     }
 
@@ -261,6 +313,72 @@ def test_vocal_task_views_require_one_actual_exact_part_vocals_track(tmp_path: P
 
     assert manifest["songs"] == []
     assert manifest["summary"]["target_compatibility"]["excluded_record_count"] == 1
+
+
+@pytest.mark.parametrize(
+    "task_kind",
+    (
+        "vocals",
+        "vocals_activity",
+        "vocals_phrase_boundaries",
+        "vocals_lyric_alignment",
+        "vocals_talky_activity",
+    ),
+)
+def test_vocal_task_views_exclude_decoder_incompatible_audio_before_training(
+    tmp_path: Path, task_kind: str
+) -> None:
+    record = _record(tmp_path, "octave-src-aaaaaaaa")
+    # A hash-valid catalog asset is not necessarily a libsndfile-decodable
+    # audio stream.  With fallback disabled every lead Vocal target kind must
+    # leave it out rather than letting its later preprocessor abort the job.
+    record["audio"]["vocals"] = _asset(tmp_path, b"not-decodable-audio", "vocals.ogg")
+    _catalog(tmp_path, [record])
+
+    manifest = build_catalog_task_manifest(tmp_path, task_kind, disable_fallback=True)
+
+    assert manifest["songs"] == []
+    assert manifest["summary"]["target_compatibility"] == {
+        "format": "mido-standard-midi-exact-part-vocals/v1",
+        "excluded_record_count": 0,
+        "audio": {
+            "format": "soundfile-full-stream-decode/v1",
+            "excluded_record_count": 1,
+        },
+    }
+    assert str(tmp_path) not in json.dumps(manifest)
+
+
+def test_vocal_decoder_boundary_uses_declared_fallback_before_excluding_source(
+    tmp_path: Path,
+) -> None:
+    record = _record(tmp_path, "octave-src-aaaaaaaa")
+    record["audio"]["vocals"] = _asset(tmp_path, b"not-decodable-audio", "vocals.ogg")
+    _catalog(tmp_path, [record])
+
+    manifest = build_catalog_task_manifest(tmp_path, "vocals_activity")
+
+    assert manifest["songs"][0]["audio_role"] == "mix"
+    assert manifest["summary"]["target_compatibility"]["audio"]["excluded_record_count"] == 0
+    assert resolve_catalog_task_manifest_songs(manifest, tmp_path)[0]["audio_kind"] == "mix"
+
+
+def test_vocal_runtime_rechecks_decoder_compatibility_for_forged_or_stale_view(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    record = _record(tmp_path, "octave-src-aaaaaaaa")
+    record["audio"]["vocals"] = _asset(tmp_path, b"not-decodable-audio", "vocals.ogg")
+    _catalog(tmp_path, [record])
+    # Simulate a task view produced before this strict gate existed (or forged
+    # by a caller).  Catalog identity remains valid, so re-resolution itself
+    # must reject the audio instead of sending it to a late preprocessor.
+    monkeypatch.setattr("src.catalog_task_manifest.has_compatible_vocal_audio", lambda _: True)
+    manifest = build_catalog_task_manifest(tmp_path, "vocals_activity", disable_fallback=True)
+    assert manifest["songs"]
+    monkeypatch.undo()
+
+    with pytest.raises(CatalogValidationError, match="valid approved catalog task input"):
+        resolve_catalog_task_manifest_songs(manifest, tmp_path)
 
 
 @pytest.mark.parametrize(

@@ -29,6 +29,10 @@ from src.song_source_catalog import (
     load_catalog,
     select_training_sources,
 )
+from src.vocal_audio_compatibility import (
+    VOCAL_AUDIO_COMPATIBILITY,
+    has_compatible_vocal_audio,
+)
 
 MANIFEST_FORMAT = "strum-catalog-task-manifest/v1"
 MANIFEST_VERSION = 1
@@ -353,6 +357,30 @@ def _has_exact_lead_vocal_label_source(record: object) -> bool:
     return sum(track.name == "PART VOCALS" for track in midi.tracks) == 1
 
 
+def _select_compatible_vocal_audio_role(
+    record: object, preferred: str, fallback: str | None
+) -> str | None:
+    """Pick the declared Vocal role the implemented preprocessors can decode.
+
+    The order is exactly the task's preferred/fallback contract.  A bad
+    preferred stem therefore does not suppress a usable declared fallback,
+    while a task with fallback disabled has no implicit substitute.
+    """
+    audio = getattr(record, "audio", None)
+    if not isinstance(audio, dict):
+        return None
+    seen_roles: set[str] = set()
+    for role in (preferred, fallback):
+        if role is None or role in seen_roles:
+            continue
+        seen_roles.add(role)
+        asset = audio.get(role)
+        path = getattr(asset, "path", None)
+        if isinstance(path, Path) and has_compatible_vocal_audio(path):
+            return role
+    return None
+
+
 def _canonical_json_hash(value: object) -> str:
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode(
         "utf-8"
@@ -461,7 +489,7 @@ def build_catalog_task_manifest(
     settings = _require_safe_preprocessing(preprocessing)
     catalog = load_catalog(catalog_root)
 
-    selected_roles: dict[str, str] = {}
+    available_roles: dict[str, list[str]] = {}
     for role in (preferred, fallback):
         if role is None:
             continue
@@ -471,14 +499,14 @@ def build_catalog_task_manifest(
             required_difficulties=(required_difficulty,),
             audio_role=role,
         ):
-            selected_roles.setdefault(source.source_id, role)
+            available_roles.setdefault(source.source_id, []).append(role)
 
     records = {record.source_id: record for record in catalog.records}
     songs: list[dict[str, object]] = []
     vocal_target_exclusions = 0
-    for source_id in sorted(selected_roles):
+    vocal_audio_exclusions = 0
+    for source_id in sorted(available_roles):
         record = records[source_id]
-        role = selected_roles[source_id]
         coverage = record.instruments[instrument]
         if task_kind in {"section_guitar", "section_bass"} and not _has_section_label_source(
             record, instrument
@@ -487,6 +515,12 @@ def build_catalog_task_manifest(
         if task_kind in VOCAL_TARGET_TASK_KINDS and not _has_exact_lead_vocal_label_source(record):
             vocal_target_exclusions += 1
             continue
+        role = available_roles[source_id][0]
+        if task_kind in VOCAL_TARGET_TASK_KINDS:
+            role = _select_compatible_vocal_audio_role(record, preferred, fallback)
+            if role is None:
+                vocal_audio_exclusions += 1
+                continue
         songs.append(
             {
                 "source_id": source_id,
@@ -528,6 +562,10 @@ def build_catalog_task_manifest(
         summary["target_compatibility"] = {
             "format": VOCAL_TARGET_COMPATIBILITY,
             "excluded_record_count": vocal_target_exclusions,
+            "audio": {
+                "format": VOCAL_AUDIO_COMPATIBILITY,
+                "excluded_record_count": vocal_audio_exclusions,
+            },
         }
     return {
         "schema_version": MANIFEST_VERSION,
@@ -627,6 +665,11 @@ def resolve_catalog_task_manifest_songs(
             raise CatalogValidationError("manifest song identity is invalid")
         record = records.get(source_id)
         coverage = record.instruments.get(TASK_INSTRUMENTS[task_kind]) if record else None
+        compatible_vocal_role = (
+            _select_compatible_vocal_audio_role(record, preferred, fallback)
+            if task_kind in VOCAL_TARGET_TASK_KINDS and record is not None
+            else None
+        )
         if (
             record is None
             or record.training_use != "allowed"
@@ -642,7 +685,9 @@ def resolve_catalog_task_manifest_songs(
             or not _asset_matches(raw_song.get("notes_midi"), record.notes_midi, catalog)
             or (
                 task_kind in VOCAL_TARGET_TASK_KINDS
-                and not _has_exact_lead_vocal_label_source(record)
+                and (
+                    not _has_exact_lead_vocal_label_source(record) or role != compatible_vocal_role
+                )
             )
         ):
             raise CatalogValidationError("manifest song is not a valid approved catalog task input")

@@ -6,7 +6,9 @@ import json
 from pathlib import Path
 
 import mido
+import numpy as np
 import pytest
+import soundfile as sf
 
 from src.catalog_task_manifest import build_catalog_task_manifest
 from src.vocal_lead_catalog_admission import (
@@ -59,6 +61,12 @@ def _lead_vocals_midi(*, include_talkies: bool = True) -> bytes:
     return output.getvalue()
 
 
+def _vocal_audio() -> bytes:
+    stream = io.BytesIO()
+    sf.write(stream, np.full(512, 0.01, dtype=np.float32), 22_050, format="WAV")
+    return stream.getvalue()
+
+
 def _record(root: Path, source_id: str, *, include_talkies: bool) -> dict[str, object]:
     return {
         "source_id": source_id,
@@ -83,7 +91,7 @@ def _record(root: Path, source_id: str, *, include_talkies: bool) -> dict[str, o
                 }
             },
         },
-        "audio": {"vocals": _asset(root, b"not-decoded-by-admission", "vocals.ogg")},
+        "audio": {"vocals": _asset(root, _vocal_audio(), "vocals.ogg")},
     }
 
 

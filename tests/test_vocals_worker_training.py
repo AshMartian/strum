@@ -119,7 +119,7 @@ def _catalog(root: Path, *, materialize: bool = False) -> None:
 def test_vocals_worker_packages_a_catalog_backed_experiment_without_a_profile(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _catalog(tmp_path)
+    _catalog(tmp_path, materialize=True)
     task_view = tmp_path / "views" / "vocals.json"
     request = tmp_path / "prepare.json"
     request.write_text(
@@ -460,7 +460,7 @@ def test_vocal_descriptor_rederives_report_and_harmony_protocol_at_output_time(
 def test_vocal_lyric_pipeline_packages_exact_part_vocals_experiment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _catalog(tmp_path)
+    _catalog(tmp_path, materialize=True)
     task_view = tmp_path / "views" / "vocals-lyrics.json"
     prepare = tmp_path / "prepare-lyrics.json"
     prepare.write_text(
@@ -609,7 +609,7 @@ def test_vocal_preprocessor_materializes_activity_and_pitch_from_catalog(tmp_pat
 def test_vocal_phrase_worker_packages_a_catalog_backed_experiment_without_a_profile(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _catalog(tmp_path)
+    _catalog(tmp_path, materialize=True)
     task_view = tmp_path / "views" / "vocals-phrases.json"
     prepare = tmp_path / "prepare-phrases.json"
     prepare.write_text(
@@ -718,7 +718,7 @@ def test_vocal_phrase_preprocessor_materializes_observed_boundaries_from_catalog
 def test_vocal_talky_worker_packages_exact_note_96_experiment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _catalog(tmp_path)
+    _catalog(tmp_path, materialize=True)
     task_view = tmp_path / "views" / "vocals-talkies.json"
     prepare = tmp_path / "prepare-talkies.json"
     prepare.write_text(
