@@ -210,6 +210,29 @@ def test_current_like_three_song_view_with_no_test_split_is_not_admitted(tmp_pat
     }
 
 
+def test_resolver_accepts_canonical_lead_selection_when_coverage_mentions_an_alt_track(
+    tmp_path: Path,
+) -> None:
+    records = [
+        _record(tmp_path, source_id, include_talkies=True)
+        for source_id in _source_ids_by_split({"train": 1, "val": 1, "test": 1})
+    ]
+    for record in records:
+        record["chart"]["instruments"]["vocals"]["track_names"] = [
+            "PART VOCALS",
+            "PART VOCALS ALT",
+        ]
+    _write_catalog(tmp_path, records)
+    views = _task_views(tmp_path)
+
+    report = resolve_vocal_lead_catalog_admission(catalog_root=tmp_path, task_view_paths=views)
+
+    assert report["status"] == "not_admitted"
+    for view in views.values():
+        raw = json.loads(view.read_text(encoding="utf-8"))
+        assert all(song["label_tracks"] == ["PART VOCALS"] for song in raw["songs"])
+
+
 def test_missing_required_label_is_a_nonadmitted_fail_closed_result(tmp_path: Path) -> None:
     _write_catalog(
         tmp_path,

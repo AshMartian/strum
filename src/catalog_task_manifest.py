@@ -402,6 +402,17 @@ def _asset_matches(raw: object, asset: CatalogAsset, catalog: SongSourceCatalog)
 
 def _label_tracks(task_kind: str, track_names: tuple[str, ...]) -> list[str]:
     """Select the declared safe MIDI tracks for one immutable task view."""
+    if task_kind in VOCAL_TARGET_TASK_KINDS:
+        # ``vocals_activity`` retains a V1 prefix declaration only so old
+        # manifests can be recognized. The canonical lead target is still one
+        # exact PART VOCALS track; an ALT arrangement cannot become another
+        # component's label source merely because it shares that prefix.
+        selected = [track_name for track_name in track_names if track_name == "PART VOCALS"]
+        if not selected:
+            raise CatalogValidationError(
+                "catalog coverage has no track for the declared label schema"
+            )
+        return selected
     schema = TASK_LABEL_SCHEMAS[task_kind]
     exact_names = schema.get("track_names")
     if exact_names is not None:

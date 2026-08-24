@@ -263,6 +263,37 @@ def test_vocal_task_views_require_one_actual_exact_part_vocals_track(tmp_path: P
     assert manifest["summary"]["target_compatibility"]["excluded_record_count"] == 1
 
 
+@pytest.mark.parametrize(
+    "task_kind",
+    (
+        "vocals",
+        "vocals_activity",
+        "vocals_phrase_boundaries",
+        "vocals_lyric_alignment",
+        "vocals_talky_activity",
+    ),
+)
+def test_vocal_task_views_ignore_prefix_matched_alt_coverage_tracks(
+    tmp_path: Path, task_kind: str
+) -> None:
+    record = _record(tmp_path, "octave-src-aaaaaaaa")
+    # The actual MIDI fixture has only canonical PART VOCALS. Import coverage
+    # may mention an ALT arrangement too, but the task source is never allowed
+    # to merge it through the legacy activity schema's prefix declaration.
+    record["chart"]["instruments"]["vocals"]["track_names"] = [
+        "PART VOCALS",
+        "PART VOCALS ALT",
+    ]
+    _catalog(tmp_path, [record])
+
+    manifest = build_catalog_task_manifest(tmp_path, task_kind)
+
+    assert manifest["songs"][0]["label_tracks"] == ["PART VOCALS"]
+    assert resolve_catalog_task_manifest_songs(manifest, tmp_path)[0]["label_tracks"] == [
+        "PART VOCALS"
+    ]
+
+
 def test_vocal_runtime_rejects_stale_or_forged_incompatible_target(tmp_path: Path) -> None:
     record = _record(tmp_path, "octave-src-aaaaaaaa")
     record["chart"]["notes_midi"] = _asset(
