@@ -54,7 +54,6 @@ from src.chart_transform_calibration import (
     checkpoint_selection_policy_evidence,
 )
 from src.chart_transform_quality_policy import quality_policy_evidence
-from src.profile_quality_policy import profile_quality_policy
 from src.model_bundle import (
     MANIFEST_FILENAME,
     BundleValidationError,
@@ -1166,9 +1165,6 @@ PROFILE_PACKAGE_OPTIONS_SCHEMA = _object_schema(
     required=("profile_id",),
 )
 
-# Deployment policy is owned by STRUM.  Hosts may select a profile name and
-# duration, but never lower quality gates or decoder thresholds.
-PROFILE_PACKAGE_POLICY = profile_quality_policy()
 TRANSFORM_EVALUATE_OPTIONS_SCHEMA = _object_schema(
     {"device": {"type": "string", "enum": ["cpu", "cuda"], "default": "cpu"}}
 )

@@ -7,20 +7,19 @@ import json
 from typing import Final
 
 PROFILE_POLICY_ID: Final = "strum-five-lane-expert-profile/v1"
-_POLICY: Final = {
+_POLICY_JSON: Final = json.dumps({
     "policy_id": PROFILE_POLICY_ID,
     "minimum_onset_f1": 0.5,
     "minimum_fret_f1": 0.5,
     "onset_threshold": 0.4,
     "fret_thresholds": [0.5, 0.5, 0.5, 0.5, 0.5],
     "note_duration_ms": 100.0,
-}
+}, sort_keys=True, separators=(",", ":"))
 
 
 def profile_quality_policy() -> dict[str, object]:
-    return dict(_POLICY)
+    return json.loads(_POLICY_JSON)
 
 
 def profile_quality_policy_sha256() -> str:
-    encoded = json.dumps(_POLICY, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
+    return hashlib.sha256(_POLICY_JSON.encode("utf-8")).hexdigest()
