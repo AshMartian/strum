@@ -75,8 +75,10 @@ presented as a successful OCTAVE auto-chart result.
   duration alignment verified before training, and uses only temporary
   worker-local audio copies.
 - ✅ Transform promotion admission: training produces profile-less raw
-  candidates; a held-out, hash-bound report and an explicit immutable promotion
-  package are required before a transform profile is discoverable as executable.
+  candidates; source-disjoint train/calibration/test lineage, STRUM-owned
+  decoder calibration, a test-only hash-bound report, and an explicit immutable
+  promotion package are required before a transform profile is discoverable as
+  executable. Legacy two-way task views remain raw-only.
 - ✅ Catalog-backed, worker-trainable Guitar/Bass/Keys onset/fret and Drums
   onset classifier experiments. Guitar, Bass, and Keys reuse the same
   five-lane feature extractor only through their instrument-specific,

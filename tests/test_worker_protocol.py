@@ -15,6 +15,7 @@ import pytest
 import soundfile as sf
 
 from scripts.train_chart_transform import TrainingConfig, train
+from src.chart_transform_calibration import calibration_policy_evidence
 from src.chart_transform_profile import (
     evaluate_chart_transform_candidate,
     package_chart_transform_profile,
@@ -346,6 +347,7 @@ def test_chart_transform_schema_exposes_opaque_parent_artifact_selection() -> No
         "type": "string",
         "format": "strum-model-bundle-artifact-id",
     }
+    assert "validation_fraction" not in properties
     assert "parent_bundle" not in properties
     assert descriptor.private_request_fields == ("catalog_root", "parent_bundle")
     assert descriptor.prepare_schema["properties"]["audio_feature_mode"]["enum"] == [
@@ -436,6 +438,7 @@ def test_pipeline_descriptors_advertise_post_training_jobs_without_private_value
     transform = rendered["chart_transform.five_lane/v1"]["promotion_jobs"]
     assert all(job["optional_private_request_fields"] == ["catalog_root"] for job in transform)
     assert all(job["quality_policy"] == quality_policy_evidence() for job in transform)
+    assert all(job["calibration_policy"] == calibration_policy_evidence() for job in transform)
     assert all("minimum_lane_f1" not in job["options_schema"]["properties"] for job in transform)
 
 
@@ -1493,7 +1496,6 @@ def _chart_transform_train_request(
     options: dict[str, object] = {
         "model_id": model_id,
         "checkpoint_mode": checkpoint_mode,
-        "validation_fraction": 0.5,
         "hidden_dim": hidden_dim,
         "epochs": 1,
         "device": "cpu",
@@ -2097,8 +2099,8 @@ def test_chart_transform_profile_runs_from_expert_midi_without_path_leaks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(
-        "src.chart_transform_profile._metrics",
-        lambda *_: {"loss": 0.1, "lane_precision": 0.8, "lane_recall": 0.8, "lane_f1": 0.8},
+        "src.chart_transform_profile.metrics_from_probabilities",
+        lambda *_: {"lane_precision": 0.8, "lane_recall": 0.8, "lane_f1": 0.8},
     )
     component_id = "chart_transform.guitar.expert_to_hard"
     dataset = tmp_path / "dataset"
@@ -2116,15 +2118,26 @@ def test_chart_transform_profile_runs_from_expert_midi_without_path_leaks(
             "target_events": [{"time_ms": 0, "lanes": [0]}],
         },
         {
-            "song_id": "held-out-song",
-            "source_id": "held-out-song",
+            "song_id": "calibration-song",
+            "source_id": "calibration-song",
             "notes_midi_sha256": "b" * 64,
-            "split": "validation",
+            "split": "calibration",
             "instrument": "guitar",
             "source_difficulty": "Expert",
             "target_difficulty": "Hard",
             "source_events": [{"time_ms": 0, "lanes": [1]}],
             "target_events": [{"time_ms": 0, "lanes": [1]}],
+        },
+        {
+            "song_id": "held-out-song",
+            "source_id": "held-out-song",
+            "notes_midi_sha256": "c" * 64,
+            "split": "test",
+            "instrument": "guitar",
+            "source_difficulty": "Expert",
+            "target_difficulty": "Hard",
+            "source_events": [{"time_ms": 0, "lanes": [2]}],
+            "target_events": [{"time_ms": 0, "lanes": [2]}],
         },
     ]
     task_view = {
@@ -2139,9 +2152,10 @@ def test_chart_transform_profile_runs_from_expert_midi_without_path_leaks(
             for pair in pairs
         ],
         "split": {
-            "algorithm": "sha256-source-id-rank/v1",
+            "algorithm": "sha256-source-id-rank/v2-three-way",
             "seed": 7,
-            "validation_fraction": 0.5,
+            "calibration_fraction": 0.2,
+            "test_fraction": 0.2,
             "assignments": {pair["source_id"]: pair["split"] for pair in pairs},
         },
         "preprocessing": {"config_sha256": "e" * 64},
@@ -2221,7 +2235,6 @@ def test_chart_transform_profile_runs_from_expert_midi_without_path_leaks(
                 "source_midi_path": str(source_midi),
                 "song_path": None,
                 "output_dir": str(output),
-                "threshold": 0.01,
             }
         )
     )
@@ -2273,6 +2286,11 @@ def test_chart_transform_profile_runs_from_expert_midi_without_path_leaks(
         if message.type == "note_on" and message.velocity > 0
     }
     assert note_ons <= {84, 85, 86, 87, 88}
+    overridden = json.loads(request.read_text())
+    overridden["threshold"] = 0.01
+    request.write_text(json.dumps(overridden))
+    with pytest.raises(WorkerRequestError, match="unsupported fields"):
+        run_chart_request(request)
 
 
 def test_expert_guitar_export_never_materializes_lower_difficulties(tmp_path: Path) -> None:

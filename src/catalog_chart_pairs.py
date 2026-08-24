@@ -37,7 +37,7 @@ PIPELINE_ID = "chart_transform.five_lane"
 PIPELINE_VERSION = 1
 PREPROCESSING_ID = "midi-five-lane-events"
 PREPROCESSING_VERSION = 1
-SPLIT_ALGORITHM = "sha256-source-id-rank/v1"
+SPLIT_ALGORITHM = "sha256-source-id-rank/v2-three-way"
 
 
 @dataclass(frozen=True)
@@ -47,7 +47,8 @@ class CatalogChartPairOptions:
     instrument: str
     target_difficulty: str
     split_seed: int = 20260814
-    validation_fraction: float = 0.2
+    calibration_fraction: float = 0.1
+    test_fraction: float = 0.1
     dataset_id: str | None = None
     audio_feature_mode: str = "none"
     audio_role: str | None = None
@@ -60,10 +61,19 @@ class CatalogChartPairOptions:
             )
         if self.target_difficulty not in {"Hard", "Medium", "Easy"}:
             raise PreparationError("target_difficulty must be Hard, Medium, or Easy")
-        if not isinstance(self.split_seed, int):
+        if not isinstance(self.split_seed, int) or isinstance(self.split_seed, bool):
             raise PreparationError("split_seed must be an integer")
-        if not 0 < self.validation_fraction < 1:
-            raise PreparationError("validation_fraction must be between 0 and 1")
+        if (
+            not isinstance(self.calibration_fraction, (int, float))
+            or isinstance(self.calibration_fraction, bool)
+            or not isinstance(self.test_fraction, (int, float))
+            or isinstance(self.test_fraction, bool)
+            or not 0 < self.calibration_fraction < 1
+            or not 0 < self.test_fraction < 1
+        ):
+            raise PreparationError("calibration_fraction and test_fraction must be between 0 and 1")
+        if self.calibration_fraction + self.test_fraction >= 1:
+            raise PreparationError("calibration_fraction + test_fraction must leave training data")
         if self.dataset_id is not None and not self.dataset_id.strip():
             raise PreparationError("dataset_id must be non-empty when provided")
         if self.audio_feature_mode not in {"none", "rms_onset_v1"}:
@@ -104,6 +114,11 @@ def pipeline_descriptor() -> dict[str, object]:
             "selection": "task-view-declared catalog audio only",
         },
         "split": {"algorithm": SPLIT_ALGORITHM, "unit": "catalog source_id"},
+        "training_requirements": [
+            "source_disjoint_train_calibration_test/v2",
+            "strum_owned_decoder_calibration/v1",
+            "test_only_transform_promotion/v1",
+        ],
     }
 
 
@@ -133,17 +148,18 @@ def prepare_catalog_chart_pairs(
             parsed_records, catalog, options
         )
         skipped.extend(audio_skipped)
-    if len(parsed_records) < 2:
-        details = "; ".join(skipped) if skipped else "fewer than two eligible catalog records"
+    if len(parsed_records) < 3:
+        details = "; ".join(skipped) if skipped else "fewer than three eligible catalog records"
         raise PreparationError(
-            "catalog task view requires at least two valid song records for song-level validation: "
+            "catalog task view requires at least three valid song records for train/calibration/test: "
             f"{details}"
         )
 
     split_assignments = _split_assignments(
         [record["source_id"] for record in parsed_records],
         options.split_seed,
-        options.validation_fraction,
+        options.calibration_fraction,
+        options.test_fraction,
     )
     for record in parsed_records:
         record["split"] = split_assignments[record["source_id"]]
@@ -257,15 +273,29 @@ def _select_audio_asset(
 
 
 def _split_assignments(
-    source_ids: list[str], seed: int, validation_fraction: float
+    source_ids: list[str], seed: int, calibration_fraction: float, test_fraction: float
 ) -> dict[str, str]:
     if len(set(source_ids)) != len(source_ids):
         raise PreparationError("catalog task view has duplicate source_id values")
     ordered = sorted(source_ids, key=lambda source_id: _split_key(source_id, seed))
-    validation_count = min(len(ordered) - 1, max(1, round(len(ordered) * validation_fraction)))
-    validation = set(ordered[:validation_count])
+    if len(ordered) < 3:
+        # Migration-readable V1 task views remain useful for raw experiments,
+        # but the promotion contract rejects them because they lack test data.
+        return {
+            source_id: "validation" if source_id == ordered[0] else "train"
+            for source_id in source_ids
+        }
+    test_count = max(1, round(len(ordered) * test_fraction))
+    calibration_count = max(1, round(len(ordered) * calibration_fraction))
+    if test_count + calibration_count >= len(ordered):
+        raise PreparationError("three-way split leaves no training songs")
+    test = set(ordered[:test_count])
+    calibration = set(ordered[test_count : test_count + calibration_count])
     return {
-        source_id: "validation" if source_id in validation else "train" for source_id in source_ids
+        source_id: (
+            "test" if source_id in test else "calibration" if source_id in calibration else "train"
+        )
+        for source_id in source_ids
     }
 
 
@@ -305,6 +335,27 @@ def _dataset_manifest(
         "source_difficulty": "Expert",
         "target_difficulty": options.target_difficulty,
     }
+    legacy = "validation" in split_assignments.values()
+    split = (
+        {
+            "algorithm": "sha256-source-id-rank/v1",
+            "seed": options.split_seed,
+            "validation_fraction": options.calibration_fraction + options.test_fraction,
+            "assignments": {
+                source_id: split_assignments[source_id] for source_id in sorted(split_assignments)
+            },
+        }
+        if legacy
+        else {
+            "algorithm": SPLIT_ALGORITHM,
+            "seed": options.split_seed,
+            "calibration_fraction": options.calibration_fraction,
+            "test_fraction": options.test_fraction,
+            "assignments": {
+                source_id: split_assignments[source_id] for source_id in sorted(split_assignments)
+            },
+        }
+    )
     task_view = {
         "pipeline": {"id": PIPELINE_ID, "version": PIPELINE_VERSION},
         "catalog": {
@@ -313,14 +364,7 @@ def _dataset_manifest(
             "records_sha256": _sha256(records_path),
         },
         "source_inputs": source_inputs,
-        "split": {
-            "algorithm": SPLIT_ALGORITHM,
-            "seed": options.split_seed,
-            "validation_fraction": options.validation_fraction,
-            "assignments": {
-                source_id: split_assignments[source_id] for source_id in sorted(split_assignments)
-            },
-        },
+        "split": split,
         "preprocessing": {
             **preprocessing,
             "config_sha256": _canonical_sha256(preprocessing),

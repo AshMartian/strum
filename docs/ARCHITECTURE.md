@@ -444,12 +444,13 @@ a task-view choice: STRUM retains only approved audio roles and hashes,
 excludes tracks whose audio ends before the Expert chart, and builds an
 ephemeral worker-local audio manifest at training time. No local audio path or
 copy belongs in a task view, experiment, bundle, or OCTAVE renderer payload.
-Its training bundle has no inference profile. Promotion first recomputes its
-declared song-disjoint validation split into a hash-bound held-out report, then
-copies weights, configuration, and report into a separate immutable bundle.
-There is intentionally no hard-coded score threshold: OCTAVE can show the
-evidence and request the explicit promotion, but cannot treat a one-epoch
-candidate as deployable.
+Its training bundle has no inference profile. New task views use source-disjoint
+train/calibration/test assignments: STRUM trains only on train, deterministically
+selects immutable per-lane decoder thresholds on calibration, then recomputes
+quality only on test for promotion. Two-way train/validation views remain
+readable as raw experiments but cannot be promoted. The calibrated decoder and
+the STRUM-owned test quality policy are copied into the promoted profile; chart
+runs cannot override those thresholds.
 
 The descriptor map is also STRUM's bundle-admission authority, not advisory
 host metadata. The worker resolves the selected candidate before dispatch, and
@@ -483,8 +484,8 @@ than hard-coding a profile command or exposing a path. The job adapter calls
 the same strict evaluator/packager and cannot bypass its evidence or immutable
 profile gates.
 For `chart_transform.five_lane/v1`, each discoverable promotion job also
-includes STRUM's immutable versioned quality policy. Its V1 song-disjoint
-holdout minima are lane F1 0.50, precision 0.45, and recall 0.45: enough to
+includes STRUM's immutable versioned decoder-calibration and quality policies.
+Its V1 test-set minima are lane F1 0.50, precision 0.45, and recall 0.45: enough to
 exclude the 0.3297 F1 baseline while avoiding precision-only or recall-only
 promotion. Evaluation records the policy's canonical hash and decision;
 packaging and profile validation recompute the same policy and reject absent,

@@ -15,6 +15,7 @@ try:
     from scripts.train_chart_transform import ChartEvent, DatasetValidationError, _resolve_device
 except ModuleNotFoundError:  # Support ``python scripts/infer_chart_transform.py``.
     from train_chart_transform import ChartEvent, DatasetValidationError, _resolve_device
+from src.model_bundle import MANIFEST_FILENAME
 from src.models.chart_audio import (
     AUDIO_FEATURE_DIM,
     AUDIO_FEATURE_MODE,
@@ -63,9 +64,12 @@ def predict(
     *,
     song_path: Path | None,
     device_name: str,
-    threshold: float,
+    threshold: float | tuple[float, ...],
 ) -> list[dict[str, object]]:
-    if not 0 < threshold < 1:
+    thresholds = (threshold,) * 5 if isinstance(threshold, float) else threshold
+    if len(thresholds) != 5 or any(
+        not isinstance(value, float) or not 0 < value < 1 for value in thresholds
+    ):
         raise DatasetValidationError("threshold must be between 0 and 1")
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
     if not isinstance(checkpoint, dict) or checkpoint.get("model_type") != "EventTransformMLP":
@@ -116,9 +120,12 @@ def predict(
             model(torch.tensor(feature_rows, dtype=torch.float32, device=device))
         ).cpu()
     return [
-        {"time_ms": event.time_ms, "lanes": torch.where(row >= threshold)[0].tolist()}
+        {
+            "time_ms": event.time_ms,
+            "lanes": torch.where(row >= torch.tensor(thresholds))[0].tolist(),
+        }
         for event, row in zip(source_events, probabilities, strict=True)
-        if bool(torch.any(row >= threshold))
+        if bool(torch.any(row >= torch.tensor(thresholds)))
     ]
 
 
@@ -141,8 +148,30 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _require_raw_cli_checkpoint(checkpoint_path: Path) -> None:
+    """Keep the threshold-tunable CLI outside promoted-profile execution."""
+    manifest_path = checkpoint_path.parent.parent / MANIFEST_FILENAME
+    if not manifest_path.is_file():
+        return
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise DatasetValidationError("checkpoint bundle manifest is unreadable") from error
+    if not isinstance(manifest, dict) or not isinstance(manifest.get("profiles"), dict):
+        raise DatasetValidationError("checkpoint bundle manifest is invalid")
+    if manifest["profiles"]:
+        raise DatasetValidationError(
+            "promoted transform profiles require strum-worker chart run; "
+            "standalone threshold inference is raw-only"
+        )
+
+
 def main() -> None:
     args = parse_args()
+    try:
+        _require_raw_cli_checkpoint(args.checkpoint)
+    except DatasetValidationError as error:
+        raise SystemExit(str(error)) from error
     checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=True)
     lane_count = checkpoint.get("lane_count") if isinstance(checkpoint, dict) else None
     if not isinstance(lane_count, int):
@@ -152,6 +181,7 @@ def main() -> None:
         "instrument": checkpoint.get("instrument"),
         "source_difficulty": checkpoint.get("source_difficulty"),
         "target_difficulty": checkpoint.get("target_difficulty"),
+        "deployment_status": "raw_checkpoint_inference_not_promotable",
         "events": predict(
             args.checkpoint,
             events,

@@ -24,6 +24,7 @@ import yaml
 from torch.nn import functional as F
 
 from src import __version__
+from src.chart_transform_calibration import calibration_evidence
 from src.model_bundle import MANIFEST_FILENAME, MANIFEST_SCHEMA_VERSION
 from src.models.chart_audio import (
     AUDIO_FEATURE_DIM,
@@ -325,21 +326,44 @@ def _validate_catalog_task_view(manifest: dict[str, Any]) -> dict[str, Any] | No
             raise DatasetValidationError("task_view source input is invalid")
         source_ids.add(source["source_id"])
     split = task_view["split"]
-    if not isinstance(split, dict) or set(split) != {
+    if not isinstance(split, dict):
+        raise DatasetValidationError("task_view split lineage is invalid")
+    legacy = set(split) == {"algorithm", "seed", "validation_fraction", "assignments"}
+    three_way = set(split) == {
         "algorithm",
         "seed",
-        "validation_fraction",
+        "calibration_fraction",
+        "test_fraction",
         "assignments",
-    }:
-        raise DatasetValidationError("task_view split lineage is invalid")
+    }
     if (
-        split["algorithm"] != "sha256-source-id-rank/v1"
-        or not isinstance(split["seed"], int)
-        or not isinstance(split["validation_fraction"], (int, float))
-        or not 0 < split["validation_fraction"] < 1
-        or not isinstance(split["assignments"], dict)
+        not (legacy or three_way)
+        or not isinstance(split.get("seed"), int)
+        or isinstance(split.get("seed"), bool)
+        or not isinstance(split.get("assignments"), dict)
         or set(split["assignments"]) != source_ids
-        or set(split["assignments"].values()) - {"train", "validation"}
+    ):
+        raise DatasetValidationError("task_view split assignments are invalid")
+    if legacy:
+        if (
+            split["algorithm"] != "sha256-source-id-rank/v1"
+            or not isinstance(split["validation_fraction"], (int, float))
+            or isinstance(split["validation_fraction"], bool)
+            or not 0 < split["validation_fraction"] < 1
+            or set(split["assignments"].values()) - {"train", "validation"}
+        ):
+            raise DatasetValidationError("task_view split assignments are invalid")
+    elif (
+        split["algorithm"] != "sha256-source-id-rank/v2-three-way"
+        or not isinstance(split["calibration_fraction"], (int, float))
+        or isinstance(split["calibration_fraction"], bool)
+        or not isinstance(split["test_fraction"], (int, float))
+        or isinstance(split["test_fraction"], bool)
+        or not 0 < split["calibration_fraction"] < 1
+        or not 0 < split["test_fraction"] < 1
+        or split["calibration_fraction"] + split["test_fraction"] >= 1
+        or set(split["assignments"].values()) - {"train", "calibration", "test"}
+        or set(split["assignments"].values()) != {"train", "calibration", "test"}
     ):
         raise DatasetValidationError("task_view split assignments are invalid")
     preprocessing = task_view["preprocessing"]
@@ -372,7 +396,8 @@ def _candidate_lineage(
     dataset_manifest: dict[str, Any],
     dataset_manifest_path: Path,
     train_pairs: list[ChartPair],
-    validation_pairs: list[ChartPair],
+    calibration_pairs: list[ChartPair],
+    test_pairs: list[ChartPair],
     audio_manifest_sha256: str | None,
 ) -> dict[str, Any]:
     """Return the path-free, hash-bound evidence a candidate is trained from.
@@ -384,9 +409,11 @@ def _candidate_lineage(
     become a deployable transform profile.
     """
     records_path = _resolve_dataset_path(dataset_manifest_path.parent, dataset_manifest["records"])
-    assignments = {pair.song_id: "train" for pair in train_pairs} | {
-        pair.song_id: "validation" for pair in validation_pairs
-    }
+    assignments = (
+        {pair.song_id: "train" for pair in train_pairs}
+        | {pair.song_id: "calibration" for pair in calibration_pairs}
+        | {pair.song_id: "test" for pair in test_pairs}
+    )
     task_view = dataset_manifest.get("task_view")
     task_lineage: dict[str, Any] | None = None
     if isinstance(task_view, dict):
@@ -397,21 +424,41 @@ def _candidate_lineage(
             "catalog": task_view["catalog"],
         }
         split = task_view["split"]
-        split_lineage = {
-            "unit": "song_id",
-            "algorithm": split["algorithm"],
-            "seed": split["seed"],
-            "validation_fraction": split["validation_fraction"],
-            "assignments_sha256": _canonical_sha256(assignments),
-            "train_song_ids": sorted(
-                assignments_id for assignments_id, value in assignments.items() if value == "train"
-            ),
-            "validation_song_ids": sorted(
-                assignments_id
-                for assignments_id, value in assignments.items()
-                if value == "validation"
-            ),
-        }
+        if "test_fraction" in split:
+            split_lineage = {
+                "unit": "song_id",
+                "algorithm": split["algorithm"],
+                "seed": split["seed"],
+                "calibration_fraction": split["calibration_fraction"],
+                "test_fraction": split["test_fraction"],
+                "assignments_sha256": _canonical_sha256(assignments),
+                "train_song_ids": sorted(
+                    key for key, value in assignments.items() if value == "train"
+                ),
+                "calibration_song_ids": sorted(
+                    key for key, value in assignments.items() if value == "calibration"
+                ),
+                "test_song_ids": sorted(
+                    key for key, value in assignments.items() if value == "test"
+                ),
+            }
+        else:
+            assignments = {pair.song_id: "train" for pair in train_pairs} | {
+                pair.song_id: "validation" for pair in calibration_pairs
+            }
+            split_lineage = {
+                "unit": "song_id",
+                "algorithm": split["algorithm"],
+                "seed": split["seed"],
+                "validation_fraction": split["validation_fraction"],
+                "assignments_sha256": _canonical_sha256(assignments),
+                "train_song_ids": sorted(
+                    key for key, value in assignments.items() if value == "train"
+                ),
+                "validation_song_ids": sorted(
+                    key for key, value in assignments.items() if value == "validation"
+                ),
+            }
     else:
         split_lineage = {
             "unit": "song_id",
@@ -655,6 +702,22 @@ def split_by_song(
     return train, validation
 
 
+def split_by_song_three_way(
+    pairs: list[ChartPair], seed: int, validation_fraction: float
+) -> tuple[list[ChartPair], list[ChartPair], list[ChartPair]]:
+    """Return immutable train/calibration/test groups; legacy views remain readable only."""
+    declared_splits = {pair.split for pair in pairs}
+    if declared_splits == {"train", "calibration", "test"}:
+        groups = {name: [pair for pair in pairs if pair.split == name] for name in declared_splits}
+        if not all(groups.values()):
+            raise DatasetValidationError(
+                "catalog task view requires train, calibration, and test songs"
+            )
+        return groups["train"], groups["calibration"], groups["test"]
+    train, validation = split_by_song(pairs, seed, validation_fraction)
+    return train, validation, []
+
+
 def _examples_for_pair(
     pair: ChartPair, config: TrainingConfig
 ) -> tuple[list[list[float]], list[list[float]], int]:
@@ -765,15 +828,17 @@ def train(config: TrainingConfig) -> dict[str, Any]:
             )
     audio_assets, audio_manifest_sha256 = _load_audio_assets(config, pairs)
     pairs = [replace(pair, audio_path=audio_assets.get(pair.song_id)) for pair in pairs]
-    train_pairs, validation_pairs = split_by_song(pairs, config.seed, config.validation_fraction)
+    train_pairs, calibration_pairs, test_pairs = split_by_song_three_way(
+        pairs, config.seed, config.validation_fraction
+    )
     train_features, train_targets, train_unmatched = _make_tensors(train_pairs, config)
-    validation_features, validation_targets, validation_unmatched = _make_tensors(
-        validation_pairs, config
+    calibration_features, calibration_targets, calibration_unmatched = _make_tensors(
+        calibration_pairs, config
     )
     train_features = train_features.to(device)
     train_targets = train_targets.to(device)
-    validation_features = validation_features.to(device)
-    validation_targets = validation_targets.to(device)
+    calibration_features = calibration_features.to(device)
+    calibration_targets = calibration_targets.to(device)
 
     audio_feature_dim = AUDIO_FEATURE_DIM if config.audio_feature_mode != "none" else 0
     model = EventTransformMLP(
@@ -825,9 +890,10 @@ def train(config: TrainingConfig) -> dict[str, Any]:
         loss.backward()
         optimizer.step()
 
+    split_label = "calibration" if test_pairs else "validation"
     metrics = {
         "train": _metrics(model, train_features, train_targets),
-        "validation": _metrics(model, validation_features, validation_targets),
+        split_label: _metrics(model, calibration_features, calibration_targets),
     }
     output_dir = Path(config.output_dir).expanduser().resolve()
     weights_path = output_dir / "weights" / "chart_transform.pt"
@@ -853,16 +919,31 @@ def train(config: TrainingConfig) -> dict[str, Any]:
         },
         weights_path,
     )
+    decoder_calibration = None
+    if test_pairs:
+        with torch.inference_mode():
+            probabilities = torch.sigmoid(model(calibration_features))
+        decoder_calibration = calibration_evidence(
+            probabilities=probabilities,
+            targets=calibration_targets,
+            component_sha256=_sha256(weights_path),
+            calibration_song_ids=sorted({pair.song_id for pair in calibration_pairs}),
+            split_assignments_sha256=_canonical_sha256(
+                {pair.song_id: pair.split for pair in pairs}
+            ),
+        )
     portable_config = asdict(config)
     for local_field in ("dataset_manifest", "output_dir", "audio_manifest", "init_checkpoint"):
         portable_config[local_field] = None
     portable_config["instrument"] = dataset_manifest["instrument"]
+    portable_config["decoder_calibration"] = decoder_calibration
     portable_config["lineage"] = _candidate_lineage(
         config=config,
         dataset_manifest=dataset_manifest,
         dataset_manifest_path=Path(config.dataset_manifest).expanduser().resolve(),
         train_pairs=train_pairs,
-        validation_pairs=validation_pairs,
+        calibration_pairs=calibration_pairs,
+        test_pairs=test_pairs,
         audio_manifest_sha256=audio_manifest_sha256,
     )
     model_config_path.write_text(
@@ -906,6 +987,20 @@ def train(config: TrainingConfig) -> dict[str, Any]:
         json.dumps(bundle_manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
     task_view = dataset_manifest.get("task_view")
+    split_metadata: dict[str, Any] = {
+        "unit": "song_id",
+        "seed": config.seed,
+        "train_song_ids": sorted({pair.song_id for pair in train_pairs}),
+    }
+    if test_pairs:
+        split_metadata.update(
+            {
+                "calibration_song_ids": sorted({pair.song_id for pair in calibration_pairs}),
+                "test_song_ids": sorted({pair.song_id for pair in test_pairs}),
+            }
+        )
+    else:
+        split_metadata["validation_song_ids"] = sorted({pair.song_id for pair in calibration_pairs})
     metadata = {
         "dataset": {
             "dataset_id": dataset_manifest["dataset_id"],
@@ -915,17 +1010,12 @@ def train(config: TrainingConfig) -> dict[str, Any]:
             "instrument": dataset_manifest.get("instrument"),
             "task_view": task_view,
         },
-        "split": {
-            "unit": "song_id",
-            "seed": config.seed,
-            "train_song_ids": sorted({pair.song_id for pair in train_pairs}),
-            "validation_song_ids": sorted({pair.song_id for pair in validation_pairs}),
-        },
+        "split": split_metadata,
         "alignment": {
             "tolerance_ms": config.alignment_tolerance_ms,
             "unmatched_target_events": {
                 "train": train_unmatched,
-                "validation": validation_unmatched,
+                split_label: calibration_unmatched,
             },
         },
         "runtime": {"device": _device_metadata(config.device, device)},
@@ -1043,11 +1133,14 @@ def main() -> None:
         if value is not None
     }
     result = train(replace(config, **overrides))
+    metrics = result["metrics"]
+    evaluation_split = "calibration" if "calibration" in metrics else "validation"
     print(
         json.dumps(
             {
                 "bundle_dir": str(result["bundle_dir"]),
-                "validation": result["metrics"]["validation"],
+                "evaluation_split": evaluation_split,
+                "evaluation": metrics[evaluation_split],
             },
             indent=2,
         )

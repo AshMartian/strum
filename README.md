@@ -478,7 +478,7 @@ enter task views, experiment metadata, model bundles, or worker results.
 
 `ffmpeg` decodes local audio to bounded mono PCM for this prototype. The
 checkpoint records the feature schema and requires the same `--song` during
-inference:
+raw-checkpoint inference:
 
 ```bash
 python scripts/infer_chart_transform.py \
@@ -487,6 +487,11 @@ python scripts/infer_chart_transform.py \
   --song /path/to/local/song.ogg \
   --output /path/to/hard-events.json
 ```
+
+This direct CLI is explicitly raw/non-promotable and may tune `--threshold` for
+experimentation. It refuses any checkpoint inside a promoted profile bundle;
+production transforms must use `strum-worker chart run`, which uses the
+profile's calibrated thresholds.
 
 This is an audio-conditioned event baseline, not a learned audio encoder. It
 is useful for validating the data contract and song alignment; the next model
@@ -595,8 +600,10 @@ and each packager's immutable-copy gate; it is not a way to turn a raw
 checkpoint into a profile.
 
 The five-lane chart-transform evaluation and package jobs additionally publish
-STRUM's versioned `quality_policy`. It is an immutable, song-disjoint held-out
-gate: V1 requires `lane_f1 >= 0.50`, `lane_precision >= 0.45`, and
+STRUM's versioned `calibration_policy` and `quality_policy`. The calibration
+policy selects the bound per-lane decoder only on the source-disjoint
+calibration split; the quality policy is an immutable test-only gate: V1
+requires `lane_f1 >= 0.50`, `lane_precision >= 0.45`, and
 `lane_recall >= 0.45`. The evaluator persists the policy identity/hash and its
 pass/fail result; package and inference-profile validation recompute them. The
 renderer can show this contract but cannot submit replacement thresholds.
@@ -925,12 +932,15 @@ strum-worker transform profile package \
   --profile difficulty-transform-guitar-promoted --json
 ```
 
-The report records verifiable held-out metrics and hashes; it deliberately
-does not invent a universal quality threshold. The raw candidate embeds a
-path-free catalog task-view, dataset, and song-split lineage. Packaging reruns
-the held-out evaluation from that exact supplied task view and rejects any
-report whose complete evidence (including metrics) differs, then binds the
-recomputed report to copied tensor weights and configuration. Only the
+The report records verifiable test metrics and hashes. A new chart-transform
+task view is source-disjoint train/calibration/test: STRUM trains on train,
+uses its fixed per-lane threshold search only on calibration, and evaluates
+promotion quality only on test. The raw candidate embeds that path-free split
+lineage and immutable decoder calibration evidence. Packaging recomputes the
+calibration and test evidence from that exact task view and rejects any report
+whose complete evidence differs, then binds the calibrated decoder and copied
+tensor weights into the profile. Two-way legacy views remain raw experiments
+and have no promotion authority. Only the
 promoted profile can be checked with `strum-worker inference profile validate`
 or executed through `strum-worker chart run`: it consumes an
 explicit Expert five-lane `notes.mid` and writes only its declared learned
@@ -943,8 +953,7 @@ downgrade. A transform request is private to the supervising process:
   "preflight_request": "/private/transform-preflight.json",
   "source_midi_path": "/private/expert-notes.mid",
   "song_path": null,
-  "output_dir": "/private/transform-run",
-  "threshold": 0.5
+  "output_dir": "/private/transform-run"
 }
 ```
 

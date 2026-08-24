@@ -11,6 +11,7 @@ import pytest
 # ruff: noqa: E402
 mido = pytest.importorskip("mido")
 
+from scripts.prepare_guitar_chart_pairs import PreparationError
 from scripts.train_chart_transform import TrainingConfig, load_dataset, train
 from src.catalog_chart_pairs import (
     CatalogChartPairOptions,
@@ -123,7 +124,7 @@ def test_builds_path_free_catalog_task_view_for_each_five_lane_instrument(
         [
             _record(tmp_path, "octave-src-11111111", track_name, 0),
             _record(tmp_path, "octave-src-22222222", track_name, 1),
-            _record(tmp_path, "octave-src-33333333", track_name, 2, rights="review_required"),
+            _record(tmp_path, "octave-src-33333333", track_name, 2),
         ],
     )
 
@@ -139,7 +140,7 @@ def test_builds_path_free_catalog_task_view_for_each_five_lane_instrument(
         json.loads(line) for line in (manifest_path.parent / "pairs.jsonl").read_text().splitlines()
     ]
 
-    assert result["record_count"] == 2
+    assert result["record_count"] == 3
     assert manifest["task_view"]["pipeline"] == {
         "id": "chart_transform.five_lane",
         "version": 1,
@@ -148,8 +149,9 @@ def test_builds_path_free_catalog_task_view_for_each_five_lane_instrument(
     assert {record["source_id"] for record in records} == {
         "octave-src-11111111",
         "octave-src-22222222",
+        "octave-src-33333333",
     }
-    assert {record["split"] for record in records} == {"train", "validation"}
+    assert {record["split"] for record in records} == {"train", "calibration", "test"}
     serialized = json.dumps({"manifest": manifest, "records": records})
     assert str(tmp_path) not in serialized
 
@@ -164,11 +166,11 @@ def test_builds_path_free_catalog_task_view_for_each_five_lane_instrument(
         device="cpu",
     )
     pairs, loaded_manifest = load_dataset(config)
-    assert len(pairs) == 2
+    assert len(pairs) == 3
     assert loaded_manifest["task_view"]["task_view_id"] == result["task_view_id"]
     training = train(config)
     assert training["metadata"]["dataset"]["task_view"]["task_view_id"] == result["task_view_id"]
-    assert training["metadata"]["split"]["algorithm"] == "sha256-source-id-rank/v1"
+    assert training["metadata"]["split"]["algorithm"] == "sha256-source-id-rank/v2-three-way"
 
 
 def test_rejects_pair_that_no_longer_matches_catalog_task_view(tmp_path: Path) -> None:
@@ -177,6 +179,7 @@ def test_rejects_pair_that_no_longer_matches_catalog_task_view(tmp_path: Path) -
         [
             _record(tmp_path, "octave-src-11111111", "PART GUITAR", 0),
             _record(tmp_path, "octave-src-22222222", "PART GUITAR", 1),
+            _record(tmp_path, "octave-src-33333333", "PART GUITAR", 2),
         ],
     )
     result = prepare_catalog_chart_pairs(
@@ -204,12 +207,40 @@ def test_rejects_pair_that_no_longer_matches_catalog_task_view(tmp_path: Path) -
         )
 
 
+def test_new_catalog_preparation_requires_three_source_disjoint_records(tmp_path: Path) -> None:
+    _catalog(
+        tmp_path,
+        [
+            _record(tmp_path, "octave-src-11111111", "PART GUITAR", 0),
+            _record(tmp_path, "octave-src-22222222", "PART GUITAR", 1),
+        ],
+    )
+    with pytest.raises(PreparationError, match="at least three valid song records"):
+        prepare_catalog_chart_pairs(
+            tmp_path,
+            tmp_path / "task-view",
+            CatalogChartPairOptions(instrument="guitar", target_difficulty="Hard"),
+        )
+
+
+@pytest.mark.parametrize("field", ["split_seed", "calibration_fraction", "test_fraction"])
+def test_catalog_three_way_split_options_reject_booleans(field: str) -> None:
+    values: dict[str, object] = {
+        "instrument": "guitar",
+        "target_difficulty": "Hard",
+        field: True,
+    }
+    with pytest.raises(PreparationError, match="split_seed|calibration_fraction|test_fraction"):
+        CatalogChartPairOptions(**values)  # type: ignore[arg-type]
+
+
 def test_worker_trains_audio_conditioned_transform_from_private_catalog_assets(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     records = [
         _record(tmp_path, "octave-src-11111111", "PART GUITAR", 0),
         _record(tmp_path, "octave-src-22222222", "PART GUITAR", 1),
+        _record(tmp_path, "octave-src-33333333", "PART GUITAR", 2),
     ]
     for record in records:
         record["audio"] = {"guitar": _asset(tmp_path, _wav_bytes(), "guitar.wav")}
@@ -241,7 +272,6 @@ def test_worker_trains_audio_conditioned_transform_from_private_catalog_assets(
                     "model_id": "audio-conditioned-catalog-transform",
                     "epochs": 1,
                     "hidden_dim": 4,
-                    "validation_fraction": 0.5,
                     "device": "cpu",
                 },
             }
@@ -258,7 +288,7 @@ def test_worker_trains_audio_conditioned_transform_from_private_catalog_assets(
     assert metadata["audio_conditioning"]["mode"] == "rms_onset_v1"
     catalog_audio = metadata["audio_conditioning"]["catalog"]
     assert catalog_audio["format"] == "strum-catalog-audio-conditioning/v1"
-    assert [asset["audio_role"] for asset in catalog_audio["assets"]] == ["guitar", "guitar"]
+    assert [asset["audio_role"] for asset in catalog_audio["assets"]] == ["guitar"] * 3
     assert experiment["catalog_audio_conditioning"] == catalog_audio
     assert model_config["audio_manifest"] is None
     assert str(tmp_path) not in json.dumps({"metadata": metadata, "experiment": experiment})
@@ -275,12 +305,13 @@ def test_worker_promotes_audio_transform_from_private_catalog_assets(
     # This verifies catalog-private audio materialization, not convergence on
     # the deliberately tiny fixture. Keep promotion evidence otherwise valid.
     monkeypatch.setattr(
-        "src.chart_transform_profile._metrics",
-        lambda *_: {"loss": 0.1, "lane_precision": 0.8, "lane_recall": 0.8, "lane_f1": 0.8},
+        "src.chart_transform_profile.metrics_from_probabilities",
+        lambda *_: {"lane_precision": 0.8, "lane_recall": 0.8, "lane_f1": 0.8},
     )
     records = [
         _record(tmp_path, "octave-src-11111111", "PART GUITAR", 0),
         _record(tmp_path, "octave-src-22222222", "PART GUITAR", 1),
+        _record(tmp_path, "octave-src-33333333", "PART GUITAR", 2),
     ]
     for record in records:
         record["audio"] = {"guitar": _asset(tmp_path, _wav_bytes(), "guitar.wav")}
@@ -315,7 +346,6 @@ def test_worker_promotes_audio_transform_from_private_catalog_assets(
                     "model_id": "audio-conditioned-catalog-transform",
                     "epochs": 1,
                     "hidden_dim": 4,
-                    "validation_fraction": 0.5,
                     "seed": 11,
                     "device": "cpu",
                 },
@@ -350,7 +380,7 @@ def test_worker_promotes_audio_transform_from_private_catalog_assets(
     assert main() == 0
     evaluation_result = json.loads(capsys.readouterr().out)
     report = json.loads(evaluation.read_text())
-    assert evaluation_result["split"] == "validation"
+    assert evaluation_result["split"] == "test"
     assert report["audio_manifest_sha256"]
     assert str(tmp_path) not in json.dumps(report)
     assert not list(tmp_path.glob(".strum-chart-audio-*"))
@@ -392,6 +422,7 @@ def test_worker_catalog_audio_promotion_rejects_tampered_candidate_or_catalog(
     records = [
         _record(tmp_path, "octave-src-11111111", "PART GUITAR", 0),
         _record(tmp_path, "octave-src-22222222", "PART GUITAR", 1),
+        _record(tmp_path, "octave-src-33333333", "PART GUITAR", 2),
     ]
     for record in records:
         record["audio"] = {"guitar": _asset(tmp_path, _wav_bytes(), "guitar.wav")}
@@ -424,7 +455,6 @@ def test_worker_catalog_audio_promotion_rejects_tampered_candidate_or_catalog(
                     "model_id": "audio-conditioned-catalog-transform",
                     "epochs": 1,
                     "hidden_dim": 4,
-                    "validation_fraction": 0.5,
                     "device": "cpu",
                 },
             }
@@ -463,4 +493,9 @@ def test_pipeline_descriptor_declares_catalog_and_preprocessing_contract() -> No
 
     assert descriptor["pipeline_id"] == "chart_transform.five_lane"
     assert descriptor["required_catalog"]["training_use"] == "allowed"
-    assert descriptor["split"]["algorithm"] == "sha256-source-id-rank/v1"
+    assert descriptor["split"]["algorithm"] == "sha256-source-id-rank/v2-three-way"
+    assert descriptor["training_requirements"] == [
+        "source_disjoint_train_calibration_test/v2",
+        "strum_owned_decoder_calibration/v1",
+        "test_only_transform_promotion/v1",
+    ]

@@ -49,6 +49,7 @@ from src.catalog_task_manifest import (
     select_compatible_vocal_audio_role,
     write_catalog_task_manifest,
 )
+from src.chart_transform_calibration import calibration_policy_evidence
 from src.chart_transform_quality_policy import quality_policy_evidence
 from src.model_bundle import (
     MANIFEST_FILENAME,
@@ -197,6 +198,7 @@ class PromotionJobDescriptor:
     deployment_scope: str
     optional_private_request_fields: tuple[str, ...] = ()
     quality_policy: dict[str, object] | None = None
+    calibration_policy: dict[str, object] | None = None
 
     def as_json(self) -> dict[str, object]:
         data: dict[str, object] = {
@@ -218,6 +220,12 @@ class PromotionJobDescriptor:
                 quality_policy_evidence()
                 if self.id.startswith("chart-transform.")
                 else self.quality_policy
+            )
+        if self.calibration_policy is not None:
+            data["calibration_policy"] = (
+                calibration_policy_evidence()
+                if self.id.startswith("chart-transform.")
+                else self.calibration_policy
             )
         return data
 
@@ -244,7 +252,13 @@ CHART_TRANSFORM_PREPARE_SCHEMA = _object_schema(
         "instrument": {"type": "string", "enum": ["guitar", "bass", "keys", "drums"]},
         "target_difficulty": {"type": "string", "enum": ["Hard", "Medium", "Easy"]},
         "split_seed": {"type": "integer", "default": 20260814},
-        "validation_fraction": {"type": "number", "minimum": 0, "maximum": 1, "default": 0.2},
+        "calibration_fraction": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "maximum": 1,
+            "default": 0.1,
+        },
+        "test_fraction": {"type": "number", "exclusiveMinimum": 0, "maximum": 1, "default": 0.1},
         "dataset_id": {"type": "string"},
         "overwrite": {"type": "boolean", "default": False},
         "audio_feature_mode": {"type": "string", "enum": ["none", "rms_onset_v1"]},
@@ -269,7 +283,6 @@ CHART_TRANSFORM_TRAIN_SCHEMA = _object_schema(
             "format": "strum-model-bundle-artifact-id",
         },
         "seed": {"type": "integer", "default": 20260813},
-        "validation_fraction": {"type": "number", "minimum": 0, "maximum": 1, "default": 0.2},
         "lane_count": {"type": "integer", "minimum": 1, "default": 5},
         "alignment_tolerance_ms": {"type": "number", "minimum": 0, "default": 50},
         "hidden_dim": {"type": "integer", "minimum": 1, "default": 32},
@@ -1218,6 +1231,7 @@ TRANSFORM_PROMOTION_JOBS = (
         output_kind="chart_transform_held_out_evaluation_report",
         deployment_scope="evaluation_evidence_only",
         quality_policy=quality_policy_evidence(),
+        calibration_policy=calibration_policy_evidence(),
     ),
     PromotionJobDescriptor(
         id="chart-transform.profile-package/v1",
@@ -1230,6 +1244,7 @@ TRANSFORM_PROMOTION_JOBS = (
         output_kind="learned_difficulty_transform_profile_bundle",
         deployment_scope="deployable_after_profile_validation",
         quality_policy=quality_policy_evidence(),
+        calibration_policy=calibration_policy_evidence(),
     ),
 )
 
@@ -1392,6 +1407,11 @@ PIPELINES = (
             "fallback_audio_role",
         ),
         promotion_jobs=TRANSFORM_PROMOTION_JOBS,
+        training_requirements=(
+            "source_disjoint_train_calibration_test/v2",
+            "strum_owned_decoder_calibration/v1",
+            "test_only_transform_promotion/v1",
+        ),
     ),
     PipelineDescriptor(
         id="vocals.harmony-source-policy/v1",
@@ -2730,18 +2750,18 @@ def _read_chart_run_request(request_path: Path, capability: str) -> dict[str, An
         raw = json.loads(request_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise WorkerRequestError("chart run request is unreadable or not valid JSON") from error
-    expected = (
-        {"preflight_request", "audio_path", "output_dir"}
-        if capability
-        in {
-            "guitar.hybrid-v2-rule/v1",
-            "guitar.neural-v1-expert/v1",
-            "bass.neural-v1-expert/v1",
-            "keys.neural-v1-expert/v1",
-            "drums.v14-expert/v1",
-        }
-        else {"preflight_request", "source_midi_path", "song_path", "output_dir", "threshold"}
-    )
+    if capability in {
+        "guitar.hybrid-v2-rule/v1",
+        "guitar.neural-v1-expert/v1",
+        "bass.neural-v1-expert/v1",
+        "keys.neural-v1-expert/v1",
+        "drums.v14-expert/v1",
+    }:
+        expected = {"preflight_request", "audio_path", "output_dir"}
+    elif capability == "difficulty.transform/v1":
+        expected = {"preflight_request", "source_midi_path", "song_path", "output_dir"}
+    else:
+        expected = {"preflight_request", "source_midi_path", "song_path", "output_dir", "threshold"}
     if not isinstance(raw, dict) or set(raw) != expected:
         raise WorkerRequestError("chart run request has unsupported fields")
     required_locations = expected - {"song_path", "threshold"}
@@ -2752,12 +2772,6 @@ def _read_chart_run_request(request_path: Path, capability: str) -> dict[str, An
             not isinstance(raw["song_path"], str) or not raw["song_path"]
         ):
             raise WorkerRequestError("difficulty transform song_path must be a location or null")
-        if (
-            not isinstance(raw["threshold"], (int, float))
-            or isinstance(raw["threshold"], bool)
-            or not 0 < raw["threshold"] < 1
-        ):
-            raise WorkerRequestError("difficulty transform threshold must be between 0 and 1")
     return raw
 
 
@@ -3264,13 +3278,17 @@ def run_chart_request(request_path: Path) -> dict[str, object]:
             song_path = Path(request["song_path"]) if request["song_path"] else None
             if song_path is not None and not song_path.is_file():
                 raise WorkerRequestError("difficulty transform song input is unavailable")
+            from src.chart_transform_profile import (  # noqa: PLC0415
+                promoted_chart_transform_thresholds,
+            )
+
             events = _run_without_legacy_output(
                 lambda: predict(
                     component.checkpoint,
                     source_events,
                     song_path=song_path,
                     device_name=plan["device"],
-                    threshold=float(request["threshold"]),
+                    threshold=promoted_chart_transform_thresholds(bundle, plan["profile_id"]),
                 )
             )
             events_path = output_dir / "events.json"
@@ -3988,7 +4006,8 @@ def prepare_dataset_request(request_path: Path) -> dict[str, object]:
             "instrument",
             "target_difficulty",
             "split_seed",
-            "validation_fraction",
+            "calibration_fraction",
+            "test_fraction",
             "dataset_id",
             "overwrite",
             "audio_feature_mode",
@@ -5038,7 +5057,6 @@ def run_training_request(request_path: Path) -> dict[str, object]:
         "checkpoint_mode",
         "parent_artifact_id",
         "seed",
-        "validation_fraction",
         "lane_count",
         "alignment_tolerance_ms",
         "hidden_dim",
@@ -5169,6 +5187,8 @@ def run_training_request(request_path: Path) -> dict[str, object]:
         raise
     except (KeyError, OSError, TypeError, ValueError, DatasetValidationError) as error:
         raise WorkerRequestError("chart-transform training request failed validation") from error
+    metrics = result["metrics"]
+    evaluation_split = "calibration" if "calibration" in metrics else "validation"
     return {
         "status": "completed",
         "pipeline_id": pipeline_id,
@@ -5176,7 +5196,8 @@ def run_training_request(request_path: Path) -> dict[str, object]:
         "bundle_name": Path(result["bundle_dir"]).name,
         "manifest_sha256": preflight["manifest_sha256"],
         "components": preflight["components"],
-        "validation": result["metrics"]["validation"],
+        "evaluation_split": evaluation_split,
+        "evaluation": metrics[evaluation_split],
         "deployment_status": "requires_transform_profile_evaluation_and_promotion",
     }
 

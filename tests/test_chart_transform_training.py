@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 import torch
 
-from scripts.infer_chart_transform import load_source_events, predict
+from scripts.infer_chart_transform import _require_raw_cli_checkpoint, load_source_events, predict
 from scripts.train_chart_transform import (
     ChartEvent,
     DatasetValidationError,
@@ -17,6 +17,7 @@ from scripts.train_chart_transform import (
     _parse_events,
     train,
 )
+from src.chart_transform_calibration import calibrate_thresholds
 from src.chart_transform_profile import (
     ChartTransformPromotionError,
     evaluate_chart_transform_candidate,
@@ -72,15 +73,26 @@ def _catalog_task_dataset(path: Path) -> Path:
             "target_events": [{"time_ms": 0, "lanes": [0]}],
         },
         {
-            "song_id": "held-out-song",
-            "source_id": "held-out-song",
+            "song_id": "calibration-song",
+            "source_id": "calibration-song",
             "notes_midi_sha256": "b" * 64,
-            "split": "validation",
+            "split": "calibration",
             "instrument": "guitar",
             "source_difficulty": "Expert",
             "target_difficulty": "Hard",
             "source_events": [{"time_ms": 0, "lanes": [1]}],
             "target_events": [{"time_ms": 0, "lanes": [1]}],
+        },
+        {
+            "song_id": "held-out-song",
+            "source_id": "held-out-song",
+            "notes_midi_sha256": "c" * 64,
+            "split": "test",
+            "instrument": "guitar",
+            "source_difficulty": "Expert",
+            "target_difficulty": "Hard",
+            "source_events": [{"time_ms": 0, "lanes": [2]}],
+            "target_events": [{"time_ms": 0, "lanes": [2]}],
         },
     ]
     task_view = {
@@ -95,9 +107,10 @@ def _catalog_task_dataset(path: Path) -> Path:
             for item in records
         ],
         "split": {
-            "algorithm": "sha256-source-id-rank/v1",
+            "algorithm": "sha256-source-id-rank/v2-three-way",
             "seed": 7,
-            "validation_fraction": 0.5,
+            "calibration_fraction": 0.2,
+            "test_fraction": 0.2,
             "assignments": {item["source_id"]: item["split"] for item in records},
         },
         "preprocessing": {"config_sha256": "e" * 64},
@@ -130,8 +143,8 @@ def test_transform_requires_held_out_evaluation_and_immutable_promotion(
     # The fixture is intentionally too small to assert training quality.  Keep
     # this immutable-packaging test independent of model convergence.
     monkeypatch.setattr(
-        "src.chart_transform_profile._metrics",
-        lambda *_: {"loss": 0.1, "lane_precision": 0.8, "lane_recall": 0.8, "lane_f1": 0.8},
+        "src.chart_transform_profile.metrics_from_probabilities",
+        lambda *_: {"lane_precision": 0.8, "lane_recall": 0.8, "lane_f1": 0.8},
     )
     dataset = tmp_path / "dataset"
     dataset.mkdir()
@@ -150,16 +163,21 @@ def test_transform_requires_held_out_evaluation_and_immutable_promotion(
         )
     )
     candidate_config = json.loads((candidate / "configs" / "training-config.json").read_text())
+    metadata = json.loads((candidate / "training-metadata.json").read_text())
     assert candidate_config["lineage"]["dataset"]["dataset_id"] == "promotion-fixture"
     assert candidate_config["lineage"]["task_view"]["task_view_id"]
-    assert candidate_config["lineage"]["split"]["validation_song_ids"] == ["held-out-song"]
+    assert candidate_config["lineage"]["split"]["test_song_ids"] == ["held-out-song"]
+    assert metadata["split"]["calibration_song_ids"] == ["calibration-song"]
+    assert metadata["split"]["test_song_ids"] == ["held-out-song"]
+    assert "validation_song_ids" not in metadata["split"]
+    assert set(metadata["metrics"]) == {"train", "calibration"}
     assert str(dataset) not in json.dumps(candidate_config["lineage"])
     assert inspect_model_bundle(candidate)["deployment_status"] == "not_deployable"
     report = tmp_path / "held-out.json"
     result = evaluate_chart_transform_candidate(
         bundle_root=candidate, dataset_manifest=manifest, output_path=report
     )
-    assert result["split"] == "validation"
+    assert result["split"] == "test"
     assert result["records_evaluated"] == 1
     assert result["quality_policy_id"] == quality_policy_evidence()["policy_id"]
     assert result["quality_policy_sha256"] == quality_policy_evidence()["policy_sha256"]
@@ -303,6 +321,46 @@ def test_transform_requires_held_out_evaluation_and_immutable_promotion(
     with pytest.raises(BundleValidationError, match="promotion configuration"):
         preflight_chart_request(request)
 
+    calibration_forged = tmp_path / "altered-calibration-profile"
+    shutil.copytree(promoted, calibration_forged)
+    calibration_evaluation = calibration_forged / "evaluations" / "held-out.json"
+    calibration_report = json.loads(calibration_evaluation.read_text())
+    altered_calibration = dict(calibration_report["decoder_calibration"])
+    altered_calibration["thresholds"] = [0.05] * 5
+    calibration_report["decoder_calibration"] = altered_calibration
+    calibration_evaluation.write_text(json.dumps(calibration_report))
+    calibration_profile = (
+        calibration_forged / "profiles" / "difficulty-transform-guitar-promoted.json"
+    )
+    calibration_config = json.loads(calibration_profile.read_text())
+    calibration_config["decoder_calibration"] = altered_calibration
+    calibration_config["evaluation"]["sha256"] = hashlib.sha256(
+        calibration_evaluation.read_bytes()
+    ).hexdigest()
+    calibration_config["evaluation"]["byte_length"] = calibration_evaluation.stat().st_size
+    calibration_profile.write_text(json.dumps(calibration_config))
+    calibration_manifest_path = calibration_forged / MANIFEST_FILENAME
+    calibration_manifest = json.loads(calibration_manifest_path.read_text())
+    calibration_entry = calibration_manifest["profiles"]["difficulty-transform-guitar-promoted"]
+    calibration_entry["configuration_sha256"] = hashlib.sha256(
+        calibration_profile.read_bytes()
+    ).hexdigest()
+    calibration_entry["configuration_byte_length"] = calibration_profile.stat().st_size
+    calibration_manifest_path.write_text(json.dumps(calibration_manifest))
+    request.write_text(
+        json.dumps(
+            {
+                "model_root": str(calibration_forged),
+                "profile_id": "difficulty-transform-guitar-promoted",
+                "difficulty_policy": "learned:chart_transform.guitar.expert_to_hard",
+                "instruments": ["guitar"],
+                "device": "cpu",
+            }
+        )
+    )
+    with pytest.raises(BundleValidationError, match="promotion configuration"):
+        preflight_chart_request(request)
+
     bool_forged = tmp_path / "boolean-metrics-profile"
     shutil.copytree(promoted, bool_forged)
     bool_evaluation = bool_forged / "evaluations" / "held-out.json"
@@ -339,6 +397,109 @@ def test_transform_requires_held_out_evaluation_and_immutable_promotion(
     )
     with pytest.raises(BundleValidationError, match="evaluation evidence"):
         preflight_chart_request(request)
+
+
+def test_calibration_tiebreak_is_strum_owned_and_deterministic() -> None:
+    probabilities = torch.full((2, 5), 0.5)
+    targets = torch.zeros((2, 5))
+
+    thresholds, metrics = calibrate_thresholds(probabilities, targets)
+
+    # Every candidate threshold yields F1 0; the canonical policy chooses the
+    # higher threshold, never a caller-selected default.
+    assert thresholds == (0.95,) * 5
+    assert metrics == {"lane_precision": 0.0, "lane_recall": 0.0, "lane_f1": 0.0}
+
+
+def test_standalone_threshold_cli_rejects_promoted_profile_checkpoint(tmp_path: Path) -> None:
+    checkpoint = tmp_path / "weights" / "chart_transform.pt"
+    checkpoint.parent.mkdir()
+    checkpoint.write_bytes(b"not opened before profile check")
+    (tmp_path / MANIFEST_FILENAME).write_text(json.dumps({"profiles": {"promoted": {}}}))
+
+    with pytest.raises(DatasetValidationError, match="promoted transform profiles"):
+        _require_raw_cli_checkpoint(checkpoint)
+
+
+def test_legacy_two_way_catalog_candidate_can_train_but_cannot_promote(tmp_path: Path) -> None:
+    dataset = tmp_path / "dataset"
+    dataset.mkdir()
+    manifest_path = _catalog_task_dataset(dataset)
+    manifest = json.loads(manifest_path.read_text())
+    pairs_path = dataset / "pairs.jsonl"
+    pairs = [json.loads(line) for line in pairs_path.read_text().splitlines()]
+    for pair in pairs:
+        pair["split"] = "train" if pair["song_id"] == "train-song" else "validation"
+    pairs_path.write_text("\n".join(json.dumps(pair) for pair in pairs) + "\n")
+    task_view = manifest["task_view"]
+    task_view["split"] = {
+        "algorithm": "sha256-source-id-rank/v1",
+        "seed": 7,
+        "validation_fraction": 0.4,
+        "assignments": {pair["source_id"]: pair["split"] for pair in pairs},
+    }
+    task_without_id = dict(task_view)
+    task_without_id.pop("task_view_id")
+    task_view["task_view_id"] = hashlib.sha256(
+        json.dumps(task_without_id, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    manifest_path.write_text(json.dumps(manifest))
+    candidate = tmp_path / "legacy-candidate"
+    train(
+        TrainingConfig(
+            dataset_manifest=str(manifest_path),
+            output_dir=str(candidate),
+            model_id="legacy-promotion-fixture",
+            source_difficulty="Expert",
+            target_difficulty="Hard",
+            hidden_dim=4,
+            epochs=1,
+            device="cpu",
+        )
+    )
+    config = json.loads((candidate / "configs" / "training-config.json").read_text())
+    assert config["decoder_calibration"] is None
+    with pytest.raises(ChartTransformPromotionError, match="lineage"):
+        evaluate_chart_transform_candidate(
+            bundle_root=candidate,
+            dataset_manifest=manifest_path,
+            output_path=tmp_path / "legacy-evaluation.json",
+        )
+
+
+def test_candidate_rejects_rehashed_calibration_threshold_tamper(tmp_path: Path) -> None:
+    dataset = tmp_path / "dataset"
+    dataset.mkdir()
+    manifest = _catalog_task_dataset(dataset)
+    candidate = tmp_path / "candidate"
+    train(
+        TrainingConfig(
+            dataset_manifest=str(manifest),
+            output_dir=str(candidate),
+            model_id="calibration-tamper-fixture",
+            source_difficulty="Expert",
+            target_difficulty="Hard",
+            hidden_dim=4,
+            epochs=1,
+            device="cpu",
+        )
+    )
+    config_path = candidate / "configs" / "training-config.json"
+    config = json.loads(config_path.read_text())
+    config["decoder_calibration"]["thresholds"] = [0.05] * 5
+    config_path.write_text(json.dumps(config))
+    bundle_manifest_path = candidate / MANIFEST_FILENAME
+    bundle_manifest = json.loads(bundle_manifest_path.read_text())
+    component = next(iter(bundle_manifest["components"].values()))
+    component["config_sha256"] = hashlib.sha256(config_path.read_bytes()).hexdigest()
+    component["config_byte_length"] = config_path.stat().st_size
+    bundle_manifest_path.write_text(json.dumps(bundle_manifest))
+    with pytest.raises(ChartTransformPromotionError, match="calibration evidence"):
+        evaluate_chart_transform_candidate(
+            bundle_root=candidate,
+            dataset_manifest=manifest,
+            output_path=tmp_path / "tampered-evaluation.json",
+        )
 
 
 @pytest.mark.parametrize("time_ms", [-1, float("nan"), float("inf")])
