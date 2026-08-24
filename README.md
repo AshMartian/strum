@@ -664,6 +664,15 @@ configuration hashes. Shared `vocals` and `mix` assets have no Harmony
 fallback. Existing catalogs without that policy are intentionally ineligible;
 no Harmony trainer, profile, or chart execution is claimed.
 
+Lead-Vocal task preparation also independently decodes every selected managed
+MIDI target with the `mido-standard-midi-exact-part-vocals/v1` compatibility
+rule. A record declared as Vocal-covered by an importer is excluded when its
+MIDI cannot be decoded by STRUM or does not contain exactly one `PART VOCALS`
+track. The private task-view summary publishes only the aggregate exclusion
+count. The same predicate is enforced while resolving a task view, so a stale
+or forged incompatible source cannot cause the activity, phrase, lyric, and
+talky components to train from different source partitions.
+
 Before a future lead-only held-out evaluator can consume the four component
 task views, `strum-worker vocal lead-admission` recomputes the catalog-owned
 lead data boundary. Its private inputs are the catalog root plus one task view

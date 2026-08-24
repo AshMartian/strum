@@ -43,9 +43,22 @@ def _five_lane_midi() -> bytes:
         track.append(mido.MetaMessage("track_name", name=track_name, time=0))
         track.append(mido.Message("note_on", note=96, velocity=100, time=0))
         track.append(mido.Message("note_off", note=96, velocity=0, time=480))
+    vocals = mido.MidiTrack()
+    midi.tracks.append(vocals)
+    vocals.append(mido.MetaMessage("track_name", name="PART VOCALS", time=0))
+    vocals.append(mido.Message("note_on", note=60, velocity=100, time=0))
+    vocals.append(mido.Message("note_off", note=60, velocity=0, time=480))
     output = io.BytesIO()
     midi.save(file=output)
     return output.getvalue()
+
+
+def _midi_with_out_of_range_data_byte() -> bytes:
+    """Return a chunk-layout-valid MIDI whose note velocity violates SMF."""
+    return (
+        b"MThd\x00\x00\x00\x06\x00\x00\x00\x01\x00\x60"
+        b"MTrk\x00\x00\x00\x08\x00\x90\x3c\xc8\x00\xff\x2f\x00"
+    )
 
 
 def _record(root: Path, source_id: str, *, training_use: str = "allowed") -> dict[str, object]:
@@ -191,6 +204,89 @@ def test_section_task_views_exclude_malformed_midi_sources(tmp_path: Path, task_
 
     assert manifest["songs"] == []
     assert manifest["summary"]["record_count"] == 0
+
+
+@pytest.mark.parametrize(
+    "task_kind",
+    (
+        "vocals",
+        "vocals_activity",
+        "vocals_phrase_boundaries",
+        "vocals_lyric_alignment",
+        "vocals_talky_activity",
+    ),
+)
+def test_vocal_task_views_exclude_midi_targets_mido_cannot_decode(
+    tmp_path: Path, task_kind: str
+) -> None:
+    record = _record(tmp_path, "octave-src-aaaaaaaa")
+    # OCTAVE's import-time chunk check can accept this payload, but its velocity
+    # byte is outside the Standard MIDI File 0..127 data-byte range. A correct
+    # STRUM task view must not defer that failure to one component preprocessor.
+    malformed = _midi_with_out_of_range_data_byte()
+    with pytest.raises(OSError, match="data byte"):
+        mido.MidiFile(file=io.BytesIO(malformed))
+    record["chart"]["notes_midi"] = _asset(tmp_path, malformed, "notes.mid")
+    _catalog(tmp_path, [record])
+
+    manifest = build_catalog_task_manifest(tmp_path, task_kind)
+
+    assert manifest["songs"] == []
+    assert manifest["summary"] == {
+        "record_count": 0,
+        "by_split": {},
+        "target_compatibility": {
+            "format": "mido-standard-midi-exact-part-vocals/v1",
+            "excluded_record_count": 1,
+        },
+    }
+
+
+def test_vocal_task_views_require_one_actual_exact_part_vocals_track(tmp_path: Path) -> None:
+    record = _record(tmp_path, "octave-src-aaaaaaaa")
+    # Import-time coverage cannot override STRUM's exact target semantics: a
+    # chart with only guitar events is not a Vocal label source.
+    midi = mido.MidiFile()
+    guitar = mido.MidiTrack()
+    midi.tracks.append(guitar)
+    guitar.append(mido.MetaMessage("track_name", name="PART GUITAR", time=0))
+    guitar.append(mido.Message("note_on", note=96, velocity=100, time=0))
+    guitar.append(mido.Message("note_off", note=96, velocity=0, time=1))
+    output = io.BytesIO()
+    midi.save(file=output)
+    record["chart"]["notes_midi"] = _asset(tmp_path, output.getvalue(), "notes.mid")
+    _catalog(tmp_path, [record])
+
+    manifest = build_catalog_task_manifest(tmp_path, "vocals_activity")
+
+    assert manifest["songs"] == []
+    assert manifest["summary"]["target_compatibility"]["excluded_record_count"] == 1
+
+
+def test_vocal_runtime_rejects_stale_or_forged_incompatible_target(tmp_path: Path) -> None:
+    record = _record(tmp_path, "octave-src-aaaaaaaa")
+    record["chart"]["notes_midi"] = _asset(
+        tmp_path, _midi_with_out_of_range_data_byte(), "notes.mid"
+    )
+    _catalog(tmp_path, [record])
+    manifest = build_catalog_task_manifest(tmp_path, "vocals_activity")
+    asset = record["chart"]["notes_midi"]
+    assert isinstance(asset, dict)
+    manifest["songs"] = [
+        {
+            "source_id": "octave-src-aaaaaaaa",
+            "instrument": "vocals",
+            "required_difficulty": "expert",
+            "split": deterministic_split("octave-src-aaaaaaaa", seed="catalog-source-id/v1"),
+            "audio_role": "vocals",
+            "label_tracks": ["PART VOCALS"],
+            "audio": record["audio"]["vocals"],
+            "notes_midi": asset,
+        }
+    ]
+
+    with pytest.raises(CatalogValidationError, match="valid approved catalog task input"):
+        resolve_catalog_task_manifest_songs(manifest, tmp_path)
 
 
 def test_pro_task_views_keep_exact_real_track_semantics(tmp_path: Path) -> None:

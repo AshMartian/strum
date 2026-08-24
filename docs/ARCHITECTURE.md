@@ -581,6 +581,15 @@ exact `PART VOCALS` track. The preprocessor produces 22.05 kHz / 128-mel
 windows with two frame targets: pitched lead-vocal activity and MIDI pitch
 36--84.
 
+Before any lead-Vocal task view is written, STRUM applies its shared
+`mido-standard-midi-exact-part-vocals/v1` predicate to every selected managed
+MIDI asset. It excludes a record if mido cannot decode it or its decoded MIDI
+does not contain exactly one `PART VOCALS` track. This is stricter than
+import-time catalog coverage, is repeated during task-view resolution, and is
+shared by the activity, phrase, lyric, and talky task kinds. The task view
+records only the aggregate number excluded—never paths or source IDs—so the
+four components cannot acquire incompatible target partitions silently.
+
 `strum-owned-lead-catalog-task-admission-resolver/v1` is a separate,
 pre-model admission boundary. It receives a private catalog root and all four
 lead task views, revalidates each immutable view against catalog assets, then

@@ -16,6 +16,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+import mido
+
 from src.preprocessing.parsers.guitar_parser import GuitarParser
 from src.song_source_catalog import (
     AUDIO_ROLES,
@@ -36,6 +38,22 @@ MANIFEST_VERSION = 1
 LEGACY_SPLIT_ALGORITHM = "sha256-source-id-mod-100/v1"
 SPLIT_ALGORITHM = "sha256-source-id-seed-mod-100/v2"
 DEFAULT_SPLIT_RATIOS = (80, 10, 10)
+
+# OCTAVE catalog coverage is intentionally a lightweight import-time summary.
+# Lead-Vocal training derives four distinct targets from one exact MIDI track,
+# so it needs a stricter, STRUM-owned admission predicate. Keeping this set
+# together guarantees that the activity, phrase, lyric, and talky task views
+# begin from the same subset when they use the same catalog/audio/split options.
+VOCAL_TARGET_TASK_KINDS = frozenset(
+    {
+        "vocals",
+        "vocals_activity",
+        "vocals_phrase_boundaries",
+        "vocals_lyric_alignment",
+        "vocals_talky_activity",
+    }
+)
+VOCAL_TARGET_COMPATIBILITY = "mido-standard-midi-exact-part-vocals/v1"
 
 # The catalog's instrument coverage is the ground-truth label source.  These
 # descriptors only define task eligibility; task-specific preprocessing derives
@@ -314,6 +332,27 @@ def _has_section_label_source(record: object, instrument: str) -> bool:
     return bool(chart.notes)
 
 
+def _has_exact_lead_vocal_label_source(record: object) -> bool:
+    """Return whether a managed MIDI target is safe for all lead Vocal tasks.
+
+    OCTAVE can record an imported package as having Vocal coverage without
+    claiming that every byte sequence its permissive importer accepts is a
+    standard MIDI file mido can decode. STRUM's four lead components must
+    never quietly disagree on that boundary: they train from one exact
+    ``PART VOCALS`` event stream and therefore share this one fail-closed
+    compatibility predicate.
+    """
+    notes_midi = getattr(record, "notes_midi", None)
+    path = getattr(notes_midi, "path", None)
+    if not isinstance(path, Path):
+        return False
+    try:
+        midi = mido.MidiFile(path)
+    except (EOFError, OSError, ValueError):
+        return False
+    return sum(track.name == "PART VOCALS" for track in midi.tracks) == 1
+
+
 def _canonical_json_hash(value: object) -> str:
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode(
         "utf-8"
@@ -425,6 +464,7 @@ def build_catalog_task_manifest(
 
     records = {record.source_id: record for record in catalog.records}
     songs: list[dict[str, object]] = []
+    vocal_target_exclusions = 0
     for source_id in sorted(selected_roles):
         record = records[source_id]
         role = selected_roles[source_id]
@@ -432,6 +472,9 @@ def build_catalog_task_manifest(
         if task_kind in {"section_guitar", "section_bass"} and not _has_section_label_source(
             record, instrument
         ):
+            continue
+        if task_kind in VOCAL_TARGET_TASK_KINDS and not _has_exact_lead_vocal_label_source(record):
+            vocal_target_exclusions += 1
             continue
         songs.append(
             {
@@ -463,6 +506,18 @@ def build_catalog_task_manifest(
         # module-level canonical declaration by reference.
         "label_schema": copy.deepcopy(TASK_LABEL_SCHEMAS[task_kind]),
     }
+    summary: dict[str, object] = {
+        "record_count": len(songs),
+        "by_split": dict(sorted(counts.items())),
+    }
+    if task_kind in VOCAL_TARGET_TASK_KINDS:
+        # The task view remains private and contains no source locations. An
+        # aggregate lets OCTAVE explain why approved catalog records did not
+        # become lead-training examples without revealing source identities.
+        summary["target_compatibility"] = {
+            "format": VOCAL_TARGET_COMPATIBILITY,
+            "excluded_record_count": vocal_target_exclusions,
+        }
     return {
         "schema_version": MANIFEST_VERSION,
         "format": MANIFEST_FORMAT,
@@ -476,7 +531,7 @@ def build_catalog_task_manifest(
         },
         "task": task,
         "songs": songs,
-        "summary": {"record_count": len(songs), "by_split": dict(sorted(counts.items()))},
+        "summary": summary,
     }
 
 
@@ -574,6 +629,10 @@ def resolve_catalog_task_manifest_songs(
             or label_tracks != _label_tracks(task_kind, coverage.track_names)
             or not _asset_matches(raw_song.get("audio"), record.audio[role], catalog)
             or not _asset_matches(raw_song.get("notes_midi"), record.notes_midi, catalog)
+            or (
+                task_kind in VOCAL_TARGET_TASK_KINDS
+                and not _has_exact_lead_vocal_label_source(record)
+            )
         ):
             raise CatalogValidationError("manifest song is not a valid approved catalog task input")
         seen_source_ids.add(source_id)
