@@ -1162,7 +1162,6 @@ PROFILE_EVALUATE_OPTIONS_SCHEMA = _object_schema(
 PROFILE_PACKAGE_OPTIONS_SCHEMA = _object_schema(
     {
         "profile_id": {"type": "string"},
-        "note_duration_ms": {"type": "number", "minimum": 1, "maximum": 10000, "default": 100},
     },
     required=("profile_id",),
 )
@@ -5410,11 +5409,6 @@ def run_promotion_request(request_path: Path) -> dict[str, object]:
                 evaluation_path=Path(request["evaluation"]),
                 output_dir=Path(request["output"]),
                 profile_id=options["profile_id"],
-                minimum_onset_f1=PROFILE_PACKAGE_POLICY["minimum_onset_f1"],
-                minimum_fret_f1=PROFILE_PACKAGE_POLICY["minimum_fret_f1"],
-                onset_threshold=PROFILE_PACKAGE_POLICY["onset_threshold"],
-                fret_thresholds=PROFILE_PACKAGE_POLICY["fret_thresholds"],
-                note_duration_ms=options["note_duration_ms"],
             )
         elif job.id == "chart-transform.profile-evaluate/v1":
             if "catalog_root" in request:
