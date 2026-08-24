@@ -594,6 +594,13 @@ locations in its main process, and starts the selected action through
 and each packager's immutable-copy gate; it is not a way to turn a raw
 checkpoint into a profile.
 
+The five-lane chart-transform evaluation and package jobs additionally publish
+STRUM's versioned `quality_policy`. It is an immutable, song-disjoint held-out
+gate: V1 requires `lane_f1 >= 0.50`, `lane_precision >= 0.45`, and
+`lane_recall >= 0.45`. The evaluator persists the policy identity/hash and its
+pass/fail result; package and inference-profile validation recompute them. The
+renderer can show this contract but cannot submit replacement thresholds.
+
 The request is a main-process-only file; paths are not echoed in the response.
 For example, a Guitar task-view request is:
 

@@ -4,9 +4,8 @@ The training script intentionally writes a *candidate* bundle with no profile.
 This module is the only bridge from that candidate to the executable
 ``difficulty.transform/v1`` capability.  It recomputes metrics against the
 candidate's declared song-disjoint validation split and copies the exact
-weights, configuration, and report into a separate bundle.  No score threshold
-is invented here: promotion remains an explicit release decision, while the
-report gives OCTAVE the evidence needed to make that decision.
+weights, configuration, and report into a separate bundle.  Promotion is gated
+by STRUM's versioned quality policy; callers cannot choose score thresholds.
 """
 
 from __future__ import annotations
@@ -31,6 +30,11 @@ from scripts.train_chart_transform import (
     _metrics,
     load_dataset,
     split_by_song,
+)
+from src.chart_transform_quality_policy import (
+    evaluate_quality_policy,
+    quality_policy_evidence,
+    validate_quality_policy_evidence,
 )
 from src.model_bundle import (
     MANIFEST_FILENAME,
@@ -407,12 +411,21 @@ def evaluate_chart_transform_candidate(
         "held_out_song_ids": sorted({pair.song_id for pair in validation_pairs}),
         "records_evaluated": len(validation_pairs),
         "metrics": metrics,
+        "quality_policy": quality_policy_evidence(),
+        "quality_gate": evaluate_quality_policy(metrics),
         "audio_manifest_sha256": audio_manifest_sha256,
     }
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    return {key: value for key, value in report.items() if key not in {"held_out_song_ids"}}
+    result = {key: value for key, value in report.items() if key not in {"held_out_song_ids"}}
+    policy = report["quality_policy"]
+    gate = report["quality_gate"]
+    assert isinstance(policy, dict) and isinstance(gate, dict)
+    result["quality_policy_id"] = policy["policy_id"]
+    result["quality_policy_sha256"] = policy["policy_sha256"]
+    result["quality_gate_status"] = gate["status"]
+    return result
 
 
 def _require_report(
@@ -445,6 +458,8 @@ def _require_report(
         "held_out_song_ids",
         "records_evaluated",
         "metrics",
+        "quality_policy",
+        "quality_gate",
         "audio_manifest_sha256",
     }
     metrics = report.get("metrics")
@@ -476,8 +491,13 @@ def _require_report(
         or not isinstance(metrics, dict)
         or set(metrics) != {"loss", "lane_precision", "lane_recall", "lane_f1"}
         or not all(
-            isinstance(value, (int, float)) and math.isfinite(float(value))
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(float(value))
             for value in metrics.values()
+        )
+        or not validate_quality_policy_evidence(
+            report.get("quality_policy"), report.get("quality_gate"), metrics
         )
     ):
         raise ChartTransformPromotionError("transform held-out evaluation report is invalid")
@@ -507,6 +527,10 @@ def package_chart_transform_profile(
     bundle, component_id, config = _candidate(experiment_dir)
     report_path = Path(evaluation_path)
     report = _require_report(report_path, bundle, component_id, config)
+    if report["quality_gate"]["status"] != "passed":
+        raise ChartTransformPromotionError(
+            "transform held-out evaluation does not meet STRUM promotion quality policy"
+        )
     component = bundle.component(component_id)
     assert (
         component is not None and component.checkpoint is not None and component.config is not None
@@ -529,6 +553,10 @@ def package_chart_transform_profile(
             audio_manifest=audio_manifest,
         )
         recomputed_report = _require_report(evaluation, bundle, component_id, config)
+        if recomputed_report["quality_gate"]["status"] != "passed":
+            raise ChartTransformPromotionError(
+                "transform independently recomputed evaluation does not meet STRUM promotion quality policy"
+            )
         if _canonical_sha256(report) != _canonical_sha256(recomputed_report):
             raise ChartTransformPromotionError(
                 "transform held-out evaluation report does not match independently recomputed evidence"
@@ -548,6 +576,7 @@ def package_chart_transform_profile(
             "component_configuration_sha256": _sha256(model_config),
             "candidate_lineage_sha256": report["candidate_lineage_sha256"],
             "lineage": config["lineage"],
+            "quality_policy": report["quality_policy"],
             "evaluation": {
                 "path": "evaluations/held-out.json",
                 "sha256": _sha256(evaluation),
@@ -642,6 +671,7 @@ def validate_promoted_chart_transform_profile(bundle: ModelBundle, profile_id: s
             "component_configuration_sha256",
             "candidate_lineage_sha256",
             "lineage",
+            "quality_policy",
             "evaluation",
         }
         or config.get("schema_version") != 1
@@ -651,6 +681,7 @@ def validate_promoted_chart_transform_profile(bundle: ModelBundle, profile_id: s
         or config.get("component_configuration_sha256") != component.config_sha256
         or config.get("candidate_lineage_sha256") != _canonical_sha256(lineage)
         or config.get("lineage") != lineage
+        or config.get("quality_policy") != quality_policy_evidence()
         or set(evaluation) != {"path", "sha256", "byte_length"}
         or not isinstance(evaluation.get("path"), str)
         or Path(evaluation["path"]).is_absolute()
@@ -697,6 +728,8 @@ def validate_promoted_chart_transform_profile(bundle: ModelBundle, profile_id: s
         "held_out_song_ids",
         "records_evaluated",
         "metrics",
+        "quality_policy",
+        "quality_gate",
         "audio_manifest_sha256",
     }
     metrics = report.get("metrics")
@@ -723,8 +756,15 @@ def validate_promoted_chart_transform_profile(bundle: ModelBundle, profile_id: s
         or not isinstance(metrics, dict)
         or set(metrics) != {"loss", "lane_precision", "lane_recall", "lane_f1"}
         or not all(
-            isinstance(value, (int, float)) and math.isfinite(float(value))
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(float(value))
             for value in metrics.values()
         )
+        or not validate_quality_policy_evidence(
+            report.get("quality_policy"), report.get("quality_gate"), metrics
+        )
+        or report.get("quality_policy") != config.get("quality_policy")
+        or report.get("quality_gate", {}).get("status") != "passed"
     ):
         raise BundleValidationError("difficulty transform evaluation evidence is invalid")

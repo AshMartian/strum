@@ -22,6 +22,10 @@ from src.chart_transform_profile import (
     evaluate_chart_transform_candidate,
     package_chart_transform_profile,
 )
+from src.chart_transform_quality_policy import (
+    evaluate_quality_policy,
+    quality_policy_evidence,
+)
 from src.model_bundle import MANIFEST_FILENAME, BundleValidationError, load_model_bundle
 from src.models.chart_audio import AudioFeatureError, event_audio_features
 from src.models.chart_transform import EventTransformMLP
@@ -120,7 +124,15 @@ def _catalog_task_dataset(path: Path) -> Path:
     return manifest
 
 
-def test_transform_requires_held_out_evaluation_and_immutable_promotion(tmp_path: Path) -> None:
+def test_transform_requires_held_out_evaluation_and_immutable_promotion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The fixture is intentionally too small to assert training quality.  Keep
+    # this immutable-packaging test independent of model convergence.
+    monkeypatch.setattr(
+        "src.chart_transform_profile._metrics",
+        lambda *_: {"loss": 0.1, "lane_precision": 0.8, "lane_recall": 0.8, "lane_f1": 0.8},
+    )
     dataset = tmp_path / "dataset"
     dataset.mkdir()
     manifest = _catalog_task_dataset(dataset)
@@ -149,6 +161,9 @@ def test_transform_requires_held_out_evaluation_and_immutable_promotion(tmp_path
     )
     assert result["split"] == "validation"
     assert result["records_evaluated"] == 1
+    assert result["quality_policy_id"] == quality_policy_evidence()["policy_id"]
+    assert result["quality_policy_sha256"] == quality_policy_evidence()["policy_sha256"]
+    assert result["quality_gate_status"] == "passed"
     promoted = tmp_path / "promoted"
     packaged = package_chart_transform_profile(
         experiment_dir=candidate,
@@ -173,6 +188,38 @@ def test_transform_requires_held_out_evaluation_and_immutable_promotion(tmp_path
     )
     assert preflight_chart_request(request)["execution"] == "available"
     report_data = json.loads(report.read_text())
+    failed_report = dict(report_data)
+    failed_report["metrics"] = {**report_data["metrics"], "lane_f1": 0.3297}
+    failed_report["quality_gate"] = evaluate_quality_policy(failed_report["metrics"])
+    failed = tmp_path / "failed-quality.json"
+    failed.write_text(json.dumps(failed_report))
+    with pytest.raises(ChartTransformPromotionError, match="quality policy"):
+        package_chart_transform_profile(
+            experiment_dir=candidate,
+            evaluation_path=failed,
+            dataset_manifest=manifest,
+            output_dir=tmp_path / "failed-quality",
+            profile_id="failed-quality",
+        )
+    bool_report = dict(report_data)
+    bool_report["metrics"] = {
+        "loss": True,
+        "lane_precision": True,
+        "lane_recall": True,
+        "lane_f1": True,
+    }
+    bool_report["quality_gate"] = evaluate_quality_policy(bool_report["metrics"])
+    assert bool_report["quality_gate"]["status"] == "failed"
+    bool_path = tmp_path / "boolean-quality.json"
+    bool_path.write_text(json.dumps(bool_report))
+    with pytest.raises(ChartTransformPromotionError, match="invalid"):
+        package_chart_transform_profile(
+            experiment_dir=candidate,
+            evaluation_path=bool_path,
+            dataset_manifest=manifest,
+            output_dir=tmp_path / "boolean-quality",
+            profile_id="boolean-quality",
+        )
     report_data["metrics"]["loss"] += 1.0
     report.write_text(json.dumps(report_data))
     with pytest.raises(ChartTransformPromotionError, match="independently recomputed"):
@@ -234,7 +281,7 @@ def test_transform_requires_held_out_evaluation_and_immutable_promotion(tmp_path
     shutil.copytree(promoted, forged)
     forged_profile = forged / "profiles" / "difficulty-transform-guitar-promoted.json"
     forged_config = json.loads(forged_profile.read_text())
-    forged_config.pop("lineage")
+    forged_config["quality_policy"]["policy_id"] = "forged-policy"
     forged_profile.write_text(json.dumps(forged_config))
     forged_manifest_path = forged / MANIFEST_FILENAME
     forged_manifest = json.loads(forged_manifest_path.read_text())
@@ -254,6 +301,43 @@ def test_transform_requires_held_out_evaluation_and_immutable_promotion(tmp_path
         )
     )
     with pytest.raises(BundleValidationError, match="promotion configuration"):
+        preflight_chart_request(request)
+
+    bool_forged = tmp_path / "boolean-metrics-profile"
+    shutil.copytree(promoted, bool_forged)
+    bool_evaluation = bool_forged / "evaluations" / "held-out.json"
+    bool_evidence = json.loads(bool_evaluation.read_text())
+    bool_evidence["metrics"] = {
+        "loss": True,
+        "lane_precision": True,
+        "lane_recall": True,
+        "lane_f1": True,
+    }
+    bool_evidence["quality_gate"] = evaluate_quality_policy(bool_evidence["metrics"])
+    bool_evaluation.write_text(json.dumps(bool_evidence))
+    bool_profile = bool_forged / "profiles" / "difficulty-transform-guitar-promoted.json"
+    bool_config = json.loads(bool_profile.read_text())
+    bool_config["evaluation"]["sha256"] = hashlib.sha256(bool_evaluation.read_bytes()).hexdigest()
+    bool_config["evaluation"]["byte_length"] = bool_evaluation.stat().st_size
+    bool_profile.write_text(json.dumps(bool_config))
+    bool_manifest_path = bool_forged / MANIFEST_FILENAME
+    bool_manifest = json.loads(bool_manifest_path.read_text())
+    bool_entry = bool_manifest["profiles"]["difficulty-transform-guitar-promoted"]
+    bool_entry["configuration_sha256"] = hashlib.sha256(bool_profile.read_bytes()).hexdigest()
+    bool_entry["configuration_byte_length"] = bool_profile.stat().st_size
+    bool_manifest_path.write_text(json.dumps(bool_manifest))
+    request.write_text(
+        json.dumps(
+            {
+                "model_root": str(bool_forged),
+                "profile_id": "difficulty-transform-guitar-promoted",
+                "difficulty_policy": "learned:chart_transform.guitar.expert_to_hard",
+                "instruments": ["guitar"],
+                "device": "cpu",
+            }
+        )
+    )
+    with pytest.raises(BundleValidationError, match="evaluation evidence"):
         preflight_chart_request(request)
 
 

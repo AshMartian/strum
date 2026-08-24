@@ -19,6 +19,7 @@ from src.chart_transform_profile import (
     evaluate_chart_transform_candidate,
     package_chart_transform_profile,
 )
+from src.chart_transform_quality_policy import quality_policy_evidence
 from src.model_bundle import MANIFEST_FILENAME, BundleValidationError
 from src.pro_candidate_contract import (
     FREE_RUNNING_PROPOSAL_CANDIDATE_KIND,
@@ -434,6 +435,8 @@ def test_pipeline_descriptors_advertise_post_training_jobs_without_private_value
         assert all(job["options_schema"]["additionalProperties"] is False for job in jobs)
     transform = rendered["chart_transform.five_lane/v1"]["promotion_jobs"]
     assert all(job["optional_private_request_fields"] == ["catalog_root"] for job in transform)
+    assert all(job["quality_policy"] == quality_policy_evidence() for job in transform)
+    assert all("minimum_lane_f1" not in job["options_schema"]["properties"] for job in transform)
 
 
 def test_probe_advertises_training_and_mapper_pitch_dependency() -> None:
@@ -2090,7 +2093,13 @@ def test_direct_chart_profiles_declare_the_omitted_difficulty_stage(
     }
 
 
-def test_chart_transform_profile_runs_from_expert_midi_without_path_leaks(tmp_path: Path) -> None:
+def test_chart_transform_profile_runs_from_expert_midi_without_path_leaks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "src.chart_transform_profile._metrics",
+        lambda *_: {"loss": 0.1, "lane_precision": 0.8, "lane_recall": 0.8, "lane_f1": 0.8},
+    )
     component_id = "chart_transform.guitar.expert_to_hard"
     dataset = tmp_path / "dataset"
     dataset.mkdir()

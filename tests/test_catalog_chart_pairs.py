@@ -272,6 +272,12 @@ def test_worker_promotes_audio_transform_from_private_catalog_assets(
     request: pytest.FixtureRequest,
 ) -> None:
     """Audio candidates can be admitted without retaining their train scratch manifest."""
+    # This verifies catalog-private audio materialization, not convergence on
+    # the deliberately tiny fixture. Keep promotion evidence otherwise valid.
+    monkeypatch.setattr(
+        "src.chart_transform_profile._metrics",
+        lambda *_: {"loss": 0.1, "lane_precision": 0.8, "lane_recall": 0.8, "lane_f1": 0.8},
+    )
     records = [
         _record(tmp_path, "octave-src-11111111", "PART GUITAR", 0),
         _record(tmp_path, "octave-src-22222222", "PART GUITAR", 1),

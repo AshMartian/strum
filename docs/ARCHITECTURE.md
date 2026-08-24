@@ -482,6 +482,13 @@ OCTAVE invokes the selected one through `promotion start --json-events` rather
 than hard-coding a profile command or exposing a path. The job adapter calls
 the same strict evaluator/packager and cannot bypass its evidence or immutable
 profile gates.
+For `chart_transform.five_lane/v1`, each discoverable promotion job also
+includes STRUM's immutable versioned quality policy. Its V1 song-disjoint
+holdout minima are lane F1 0.50, precision 0.45, and recall 0.45: enough to
+exclude the 0.3297 F1 baseline while avoiding precision-only or recall-only
+promotion. Evaluation records the policy's canonical hash and decision;
+packaging and profile validation recompute the same policy and reject absent,
+failed, or altered evidence. It is intentionally not an OCTAVE option.
 OCTAVE owns cancellation by terminating the supervised process group, rather
 than requiring STRUM to retain a private-path job. A model folder is validated
 separately from a STRUM runtime with `checkpoint discover`, `checkpoint

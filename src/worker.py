@@ -49,6 +49,7 @@ from src.catalog_task_manifest import (
     select_compatible_vocal_audio_role,
     write_catalog_task_manifest,
 )
+from src.chart_transform_quality_policy import quality_policy_evidence
 from src.model_bundle import (
     MANIFEST_FILENAME,
     BundleValidationError,
@@ -195,9 +196,10 @@ class PromotionJobDescriptor:
     output_kind: str
     deployment_scope: str
     optional_private_request_fields: tuple[str, ...] = ()
+    quality_policy: dict[str, object] | None = None
 
     def as_json(self) -> dict[str, object]:
-        return {
+        data: dict[str, object] = {
             "id": self.id,
             "display_name": self.display_name,
             "kind": self.kind,
@@ -208,6 +210,16 @@ class PromotionJobDescriptor:
             "output_kind": self.output_kind,
             "deployment_scope": self.deployment_scope,
         }
+        if self.quality_policy is not None:
+            # Re-derive canonical bytes for the only current policy-bearing
+            # jobs. A caller that mutates a previously rendered descriptor
+            # must not influence later discovery output.
+            data["quality_policy"] = (
+                quality_policy_evidence()
+                if self.id.startswith("chart-transform.")
+                else self.quality_policy
+            )
+        return data
 
 
 def _object_schema(
@@ -1205,6 +1217,7 @@ TRANSFORM_PROMOTION_JOBS = (
         optional_private_request_fields=("catalog_root",),
         output_kind="chart_transform_held_out_evaluation_report",
         deployment_scope="evaluation_evidence_only",
+        quality_policy=quality_policy_evidence(),
     ),
     PromotionJobDescriptor(
         id="chart-transform.profile-package/v1",
@@ -1216,6 +1229,7 @@ TRANSFORM_PROMOTION_JOBS = (
         optional_private_request_fields=("catalog_root",),
         output_kind="learned_difficulty_transform_profile_bundle",
         deployment_scope="deployable_after_profile_validation",
+        quality_policy=quality_policy_evidence(),
     ),
 )
 
@@ -5247,6 +5261,8 @@ def _promotion_result_summary(
         "source_difficulty",
         "target_difficulty",
         "dataset_id",
+        "quality_policy_id",
+        "quality_gate_status",
         "task_view_id",
         "bundle_name",
         "execution_scope",
@@ -5267,6 +5283,7 @@ def _promotion_result_summary(
         "dataset_manifest_sha256",
         "dataset_records_sha256",
         "manifest_sha256",
+        "quality_policy_sha256",
         "task_view_sha256",
     ):
         value = result.get(key)
