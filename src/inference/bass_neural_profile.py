@@ -235,6 +235,9 @@ def load_bass_neural_expert_profile(
         for key in ("minimum_onset_f1", "minimum_fret_f1")
     ):
         raise BundleValidationError("Bass evaluation thresholds are invalid")
+    policy = profile_quality_policy()
+    if evaluation["minimum_onset_f1"] != policy["minimum_onset_f1"] or evaluation["minimum_fret_f1"] != policy["minimum_fret_f1"]:
+        raise BundleValidationError("Bass evaluation thresholds do not match canonical policy")
     report = _read_json(evaluation_path, "Bass evaluation artifact")
     metrics = report.get("metrics") if isinstance(report.get("metrics"), dict) else {}
     required_report = {
@@ -272,8 +275,8 @@ def load_bass_neural_expert_profile(
             and 0 <= metrics[key] <= 1
             for key in ("onset_f1", "fret_f1", "event_f1")
         )
-        or metrics["onset_f1"] < evaluation["minimum_onset_f1"]
-        or metrics["fret_f1"] < evaluation["minimum_fret_f1"]
+        or metrics["onset_f1"] < policy["minimum_onset_f1"]
+        or metrics["fret_f1"] < policy["minimum_fret_f1"]
     ):
         raise BundleValidationError("Bass evaluation artifact does not satisfy the deployment gate")
     return BassNeuralExpertProfile(

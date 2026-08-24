@@ -171,8 +171,6 @@ def _package(tmp_path: Path) -> Path:
         evaluation_path=_evaluation(bundle, tmp_path / "evaluation.json"),
         output_dir=output,
         profile_id="keys-v1-expert",
-        minimum_onset_f1=0.5,
-        minimum_fret_f1=0.5,
     )
     assert result["capability"] == CAPABILITY
     return output
@@ -275,7 +273,5 @@ def test_keys_packaging_rejects_wrong_experiment_or_report(tmp_path: Path) -> No
             evaluation_path=_evaluation(bundle, tmp_path / "evaluation.json"),
             output_dir=tmp_path / "deployable",
             profile_id="keys-v1-expert",
-            minimum_onset_f1=0.5,
-            minimum_fret_f1=0.5,
         )
     assert not (tmp_path / "deployable").exists()

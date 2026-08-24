@@ -283,24 +283,13 @@ def package_bass_profile(
     evaluation_path: Path,
     output_dir: Path,
     profile_id: str,
-    minimum_onset_f1: float,
-    minimum_fret_f1: float,
-    onset_threshold: float | None = None,
-    fret_thresholds: tuple[float, ...] | None = None,
-    note_duration_ms: float = 100.0,
 ) -> dict[str, object]:
     """Copy an evaluated Bass experiment into an immutable Expert profile."""
     if not _PROFILE_ID.fullmatch(profile_id):
         raise BassProfilePackagingError("Bass profile_id is invalid")
     if output_dir.exists():
         raise BassProfilePackagingError("Bass profile output must not already exist")
-    if not all(
-        isinstance(value, (int, float)) and not isinstance(value, bool) and 0 < value <= 1
-        for value in (minimum_onset_f1, minimum_fret_f1)
-    ):
-        raise BassProfilePackagingError("Bass deployment metric gates must be between zero and one")
-    if not isinstance(note_duration_ms, (int, float)) or not 1 <= note_duration_ms <= 10_000:
-        raise BassProfilePackagingError("Bass note_duration_ms is invalid")
+    note_duration_ms = 100.0
     bundle_root, experiment = _require_candidate_experiment(experiment_dir)
     bundle = load_model_bundle(bundle_root, check_files=True)
     candidate = load_bass_neural_candidate(bundle)
@@ -353,8 +342,8 @@ def package_bass_profile(
             "artifact": "evaluations/validation.json",
             "sha256": _sha256(evaluation_destination),
             "source_bundle_manifest_sha256": _sha256(bundle.manifest_path),
-            "minimum_onset_f1": float(minimum_onset_f1),
-            "minimum_fret_f1": float(minimum_fret_f1),
+            "minimum_onset_f1": float(policy["minimum_onset_f1"]),
+            "minimum_fret_f1": float(policy["minimum_fret_f1"]),
             "quality_policy": profile_quality_policy(),
             "quality_policy_sha256": profile_quality_policy_sha256(),
         },

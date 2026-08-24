@@ -172,8 +172,6 @@ def test_worker_experiment_requires_evaluation_before_deployable_profile(tmp_pat
             evaluation_path=tmp_path / "missing.json",
             output_dir=tmp_path / "deployable",
             profile_id="guitar-v1",
-            minimum_onset_f1=0.5,
-            minimum_fret_f1=0.5,
         )
     assert not (bundle / "profiles").exists()
 
@@ -188,8 +186,6 @@ def test_packaged_profile_loads_real_worker_components_and_preflights(tmp_path: 
         evaluation_path=evaluation,
         output_dir=output,
         profile_id="guitar-v1-expert",
-        minimum_onset_f1=0.5,
-        minimum_fret_f1=0.5,
     )
 
     assert result["deployment_status"] == "deployable"
@@ -225,8 +221,6 @@ def test_profile_runtime_rejects_non_tensor_checkpoint_state(tmp_path: Path) -> 
         evaluation_path=evaluation,
         output_dir=output,
         profile_id="guitar-v1-expert",
-        minimum_onset_f1=0.5,
-        minimum_fret_f1=0.5,
     )
     bad_checkpoint = output / "weights" / "guitar-onset.pt"
     torch.save({"state_dict": {"not-a-tensor": "unsafe"}}, bad_checkpoint)
@@ -250,8 +244,6 @@ def test_chart_run_uses_only_typed_neural_profile(
         evaluation_path=_evaluation(bundle, tmp_path / "evaluation.json"),
         output_dir=output_bundle,
         profile_id="guitar-v1-expert",
-        minimum_onset_f1=0.5,
-        minimum_fret_f1=0.5,
     )
     audio = tmp_path / "song.wav"
     audio.write_bytes(b"safe-audio-input")

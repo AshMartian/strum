@@ -5612,11 +5612,6 @@ def _parse_args() -> argparse.Namespace:
     guitar_package.add_argument("--evaluation", type=Path, required=True)
     guitar_package.add_argument("--output", type=Path, required=True)
     guitar_package.add_argument("--profile", required=True)
-    guitar_package.add_argument("--minimum-onset-f1", type=float, required=True)
-    guitar_package.add_argument("--minimum-fret-f1", type=float, required=True)
-    guitar_package.add_argument("--onset-threshold", type=float)
-    guitar_package.add_argument("--fret-thresholds", help="JSON array of exactly five values")
-    guitar_package.add_argument("--note-duration-ms", type=float, default=100.0)
     guitar_package.add_argument("--json", action="store_true")
     bass = commands.add_parser("bass", help="evaluate and package Bass V1 profiles")
     bass_commands = bass.add_subparsers(dest="bass_command", required=True)
@@ -5640,11 +5635,6 @@ def _parse_args() -> argparse.Namespace:
     bass_package.add_argument("--evaluation", type=Path, required=True)
     bass_package.add_argument("--output", type=Path, required=True)
     bass_package.add_argument("--profile", required=True)
-    bass_package.add_argument("--minimum-onset-f1", type=float, required=True)
-    bass_package.add_argument("--minimum-fret-f1", type=float, required=True)
-    bass_package.add_argument("--onset-threshold", type=float)
-    bass_package.add_argument("--fret-thresholds", help="JSON array of exactly five values")
-    bass_package.add_argument("--note-duration-ms", type=float, default=100.0)
     bass_package.add_argument("--json", action="store_true")
     keys = commands.add_parser("keys", help="evaluate and package Keys V1 profiles")
     keys_commands = keys.add_subparsers(dest="keys_command", required=True)
@@ -5668,11 +5658,6 @@ def _parse_args() -> argparse.Namespace:
     keys_package.add_argument("--evaluation", type=Path, required=True)
     keys_package.add_argument("--output", type=Path, required=True)
     keys_package.add_argument("--profile", required=True)
-    keys_package.add_argument("--minimum-onset-f1", type=float, required=True)
-    keys_package.add_argument("--minimum-fret-f1", type=float, required=True)
-    keys_package.add_argument("--onset-threshold", type=float)
-    keys_package.add_argument("--fret-thresholds", help="JSON array of exactly five values")
-    keys_package.add_argument("--note-duration-ms", type=float, default=100.0)
     keys_package.add_argument("--json", action="store_true")
     section = commands.add_parser(
         "section", help="calibrate and package SectionClassifier evaluation profiles"
@@ -5857,25 +5842,12 @@ def main() -> int:
                     ) from error
                 return 0
             try:
-                fret_thresholds = (
-                    tuple(json.loads(args.fret_thresholds))
-                    if args.fret_thresholds is not None
-                    else None
-                )
-            except json.JSONDecodeError as error:
-                raise WorkerRequestError("Guitar fret thresholds are invalid JSON") from error
-            try:
                 _print_json(
                     package_guitar_profile(
                         experiment_dir=args.experiment,
                         evaluation_path=args.evaluation,
                         output_dir=args.output,
                         profile_id=args.profile,
-                        minimum_onset_f1=args.minimum_onset_f1,
-                        minimum_fret_f1=args.minimum_fret_f1,
-                        onset_threshold=args.onset_threshold,
-                        fret_thresholds=fret_thresholds,
-                        note_duration_ms=args.note_duration_ms,
                     )
                 )
             except GuitarProfilePackagingError as error:
@@ -5907,25 +5879,12 @@ def main() -> int:
                     ) from error
                 return 0
             try:
-                fret_thresholds = (
-                    tuple(json.loads(args.fret_thresholds))
-                    if args.fret_thresholds is not None
-                    else None
-                )
-            except json.JSONDecodeError as error:
-                raise WorkerRequestError("Bass fret thresholds are invalid JSON") from error
-            try:
                 _print_json(
                     package_bass_profile(
                         experiment_dir=args.experiment,
                         evaluation_path=args.evaluation,
                         output_dir=args.output,
                         profile_id=args.profile,
-                        minimum_onset_f1=args.minimum_onset_f1,
-                        minimum_fret_f1=args.minimum_fret_f1,
-                        onset_threshold=args.onset_threshold,
-                        fret_thresholds=fret_thresholds,
-                        note_duration_ms=args.note_duration_ms,
                     )
                 )
             except BassProfilePackagingError as error:
@@ -5957,25 +5916,12 @@ def main() -> int:
                     ) from error
                 return 0
             try:
-                fret_thresholds = (
-                    tuple(json.loads(args.fret_thresholds))
-                    if args.fret_thresholds is not None
-                    else None
-                )
-            except json.JSONDecodeError as error:
-                raise WorkerRequestError("Keys fret thresholds are invalid JSON") from error
-            try:
                 _print_json(
                     package_keys_profile(
                         experiment_dir=args.experiment,
                         evaluation_path=args.evaluation,
                         output_dir=args.output,
                         profile_id=args.profile,
-                        minimum_onset_f1=args.minimum_onset_f1,
-                        minimum_fret_f1=args.minimum_fret_f1,
-                        onset_threshold=args.onset_threshold,
-                        fret_thresholds=fret_thresholds,
-                        note_duration_ms=args.note_duration_ms,
                     )
                 )
             except KeysProfilePackagingError as error:

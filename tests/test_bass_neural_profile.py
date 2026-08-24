@@ -165,8 +165,6 @@ def _package(tmp_path: Path) -> Path:
         evaluation_path=_evaluation(bundle, tmp_path / "evaluation.json"),
         output_dir=output,
         profile_id="bass-v1-expert",
-        minimum_onset_f1=0.5,
-        minimum_fret_f1=0.5,
     )
     assert result["capability"] == CAPABILITY
     return output
@@ -270,8 +268,6 @@ def test_bass_packaging_rejects_wrong_experiment_semantics(tmp_path: Path) -> No
             evaluation_path=_evaluation(bundle, tmp_path / "evaluation.json"),
             output_dir=tmp_path / "deployable",
             profile_id="bass-v1-expert",
-            minimum_onset_f1=0.5,
-            minimum_fret_f1=0.5,
         )
 
 
@@ -289,7 +285,5 @@ def test_bass_packaging_rejects_malformed_held_out_report_before_copying(tmp_pat
             evaluation_path=evaluation,
             output_dir=output,
             profile_id="bass-v1-expert",
-            minimum_onset_f1=0.5,
-            minimum_fret_f1=0.5,
         )
     assert not output.exists()
