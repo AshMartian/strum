@@ -2,7 +2,7 @@
 """Fine-tune a chart transform from paired charts and optional local songs.
 
 Records are split by ``song_id`` before event expansion, preventing the same
-song from leaking between train and validation.  An optional local-only audio
+song from leaking between train, calibration, and test. An optional local-only audio
 manifest supplies song-aligned features without copying audio paths or source
 music into the resulting model bundle.
 """
@@ -24,7 +24,13 @@ import yaml
 from torch.nn import functional as F
 
 from src import __version__
-from src.chart_transform_calibration import calibration_evidence
+from src.chart_transform_calibration import (
+    calibrate_thresholds,
+    calibration_checkpoint_is_better,
+    calibration_evidence,
+    checkpoint_selection_evidence,
+    state_dict_sha256,
+)
 from src.model_bundle import MANIFEST_FILENAME, MANIFEST_SCHEMA_VERSION
 from src.models.chart_audio import (
     AUDIO_FEATURE_DIM,
@@ -883,18 +889,69 @@ def train(config: TrainingConfig) -> dict[str, Any]:
         if config.parent_provenance is not None:
             initialization["parent"] = config.parent_provenance
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate)
-    model.train()
-    for _ in range(config.epochs):
+    best_selection_candidate: dict[str, object] | None = None
+    best_state: dict[str, torch.Tensor] | None = None
+    calibration_trace: list[dict[str, object]] = []
+    for epoch in range(1, config.epochs + 1):
+        model.train()
         optimizer.zero_grad()
         loss = F.binary_cross_entropy_with_logits(model(train_features), train_targets)
         loss.backward()
         optimizer.step()
+        if test_pairs:
+            model.eval()
+            with torch.inference_mode():
+                probabilities = torch.sigmoid(model(calibration_features))
+            thresholds, calibration_metrics = calibrate_thresholds(
+                probabilities, calibration_targets
+            )
+            state = {
+                name: tensor.detach().cpu().clone() for name, tensor in model.state_dict().items()
+            }
+            candidate = {
+                "epoch": epoch,
+                "thresholds": thresholds,
+                "metrics": calibration_metrics,
+                "state": state,
+                "state_sha256": state_dict_sha256(state),
+            }
+            calibration_trace.append(
+                {
+                    "epoch": epoch,
+                    "state_sha256": candidate["state_sha256"],
+                    "thresholds": list(thresholds),
+                    "metrics": calibration_metrics,
+                }
+            )
+            if calibration_checkpoint_is_better(candidate, best_selection_candidate):
+                best_selection_candidate = candidate
+                best_state = state
+
+    checkpoint_selection = None
+    if test_pairs:
+        assert best_selection_candidate is not None and best_state is not None
+        model.load_state_dict(best_state)
+        checkpoint_selection = checkpoint_selection_evidence(
+            epoch=best_selection_candidate["epoch"],
+            epochs_evaluated=config.epochs,
+            selected_state_sha256=best_selection_candidate["state_sha256"],
+            thresholds=best_selection_candidate["thresholds"],
+            metrics=best_selection_candidate["metrics"],
+            calibration_trace=calibration_trace,
+        )
 
     split_label = "calibration" if test_pairs else "validation"
     metrics = {
         "train": _metrics(model, train_features, train_targets),
-        split_label: _metrics(model, calibration_features, calibration_targets),
     }
+    if checkpoint_selection is None:
+        metrics[split_label] = _metrics(model, calibration_features, calibration_targets)
+    else:
+        selected_calibration = _metrics(model, calibration_features, calibration_targets)
+        metrics[split_label] = {
+            "loss": selected_calibration["loss"],
+            **checkpoint_selection["metrics"],
+        }
     output_dir = Path(config.output_dir).expanduser().resolve()
     weights_path = output_dir / "weights" / "chart_transform.pt"
     model_config_path = output_dir / "configs" / "training-config.json"
@@ -916,11 +973,13 @@ def train(config: TrainingConfig) -> dict[str, Any]:
             "instrument": dataset_manifest.get("instrument"),
             "source_difficulty": config.source_difficulty,
             "target_difficulty": config.target_difficulty,
+            "checkpoint_selection": checkpoint_selection,
         },
         weights_path,
     )
     decoder_calibration = None
     if test_pairs:
+        assert checkpoint_selection is not None
         with torch.inference_mode():
             probabilities = torch.sigmoid(model(calibration_features))
         decoder_calibration = calibration_evidence(
@@ -931,6 +990,7 @@ def train(config: TrainingConfig) -> dict[str, Any]:
             split_assignments_sha256=_canonical_sha256(
                 {pair.song_id: pair.split for pair in pairs}
             ),
+            checkpoint_selection=checkpoint_selection,
         )
     portable_config = asdict(config)
     for local_field in ("dataset_manifest", "output_dir", "audio_manifest", "init_checkpoint"):
@@ -1027,6 +1087,7 @@ def train(config: TrainingConfig) -> dict[str, Any]:
             "window_ms": config.audio_window_ms if audio_feature_dim else None,
         },
         "metrics": metrics,
+        "checkpoint_selection": checkpoint_selection,
         "deployment_status": "requires_transform_profile_evaluation_and_promotion",
     }
     if task_view is not None:

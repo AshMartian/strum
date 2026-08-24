@@ -935,9 +935,10 @@ strum-worker transform profile package \
 
 The report records verifiable test metrics and hashes. A new chart-transform
 task view is source-disjoint train/calibration/test: STRUM trains on train,
-uses its fixed per-lane threshold search only on calibration, and evaluates
+uses calibration each epoch to select its fixed best checkpoint (lane F1, then
+precision, recall, then earlier epoch) and per-lane decoder, and evaluates
 promotion quality only on test. The raw candidate embeds that path-free split
-lineage and immutable decoder calibration evidence. Packaging recomputes the
+lineage, calibration trace, selected-state hash/epoch, and immutable decoder calibration evidence. Packaging recomputes the
 calibration and test evidence from that exact task view and rejects any report
 whose complete evidence differs, then binds the calibrated decoder and copied
 tensor weights into the profile. Two-way legacy views remain raw experiments

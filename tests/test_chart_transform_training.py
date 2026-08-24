@@ -23,7 +23,12 @@ from scripts.train_chart_transform import (
     _parse_events,
     train,
 )
-from src.chart_transform_calibration import calibrate_thresholds
+from src.chart_transform_calibration import (
+    calibrate_thresholds,
+    calibration_checkpoint_is_better,
+    state_dict_sha256,
+    validate_checkpoint_selection_evidence,
+)
 from src.chart_transform_profile import (
     ChartTransformPromotionError,
     evaluate_chart_transform_candidate,
@@ -415,6 +420,150 @@ def test_calibration_tiebreak_is_strum_owned_and_deterministic() -> None:
     # higher threshold, never a caller-selected default.
     assert thresholds == (0.95,) * 5
     assert metrics == {"lane_precision": 0.0, "lane_recall": 0.0, "lane_f1": 0.0}
+    later_equal_checkpoint = {
+        "epoch": 2,
+        "metrics": {"lane_precision": 0.8, "lane_recall": 0.7, "lane_f1": 0.75},
+    }
+    earlier_equal_checkpoint = {**later_equal_checkpoint, "epoch": 1}
+    assert calibration_checkpoint_is_better(earlier_equal_checkpoint, later_equal_checkpoint)
+    assert not calibration_checkpoint_is_better(later_equal_checkpoint, earlier_equal_checkpoint)
+
+
+def test_v2_training_persists_calibration_best_checkpoint_not_final_epoch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Checkpoint choice uses only the calibration result at each epoch."""
+    dataset = tmp_path / "dataset"
+    dataset.mkdir()
+    manifest = _catalog_task_dataset(dataset)
+    candidate = tmp_path / "candidate"
+    thresholds = (0.5,) * 5
+    first_metrics = {"lane_precision": 0.9, "lane_recall": 0.9, "lane_f1": 0.9}
+    final_metrics = {"lane_precision": 0.1, "lane_recall": 0.1, "lane_f1": 0.1}
+    per_epoch = iter(((thresholds, first_metrics), (thresholds, final_metrics)))
+    checkpoint_hashes: list[str] = []
+
+    monkeypatch.setattr(
+        "scripts.train_chart_transform.calibrate_thresholds", lambda *_: next(per_epoch)
+    )
+    monkeypatch.setattr(
+        "src.chart_transform_calibration.calibrate_thresholds",
+        lambda *_: (thresholds, first_metrics),
+    )
+
+    def record_hash(state: dict[str, torch.Tensor]) -> str:
+        resolved = state_dict_sha256(state)
+        checkpoint_hashes.append(resolved)
+        return resolved
+
+    monkeypatch.setattr("scripts.train_chart_transform.state_dict_sha256", record_hash)
+    train(
+        TrainingConfig(
+            dataset_manifest=str(manifest),
+            output_dir=str(candidate),
+            model_id="checkpoint-selection-fixture",
+            source_difficulty="Expert",
+            target_difficulty="Hard",
+            hidden_dim=4,
+            epochs=2,
+            device="cpu",
+        )
+    )
+
+    config = json.loads((candidate / "configs" / "training-config.json").read_text())
+    selection = config["decoder_calibration"]["checkpoint_selection"]
+    payload = torch.load(
+        candidate / "weights" / "chart_transform.pt", map_location="cpu", weights_only=True
+    )
+    assert len(checkpoint_hashes) == 2
+    assert checkpoint_hashes[0] != checkpoint_hashes[1]
+    assert selection["selected_epoch"] == 1
+    assert selection["epochs_evaluated"] == 2
+    assert selection["selected_state_sha256"] == checkpoint_hashes[0]
+    assert [entry["epoch"] for entry in selection["calibration_trace"]] == [1, 2]
+    assert payload["checkpoint_selection"] == selection
+    assert state_dict_sha256(payload["model_state_dict"]) == checkpoint_hashes[0]
+
+    # Rehashing an in-range alternate epoch and its trace fields cannot make
+    # that non-winning checkpoint look policy-selected.
+    forged_selection = json.loads(json.dumps(selection))
+    alternate = forged_selection["calibration_trace"][1]
+    forged_selection.update(
+        {
+            "selected_epoch": alternate["epoch"],
+            "selected_state_sha256": alternate["state_sha256"],
+            "thresholds": alternate["thresholds"],
+            "metrics": alternate["metrics"],
+        }
+    )
+    forged_selection["calibration_trace_sha256"] = hashlib.sha256(
+        json.dumps(
+            forged_selection["calibration_trace"], sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+    ).hexdigest()
+    assert not validate_checkpoint_selection_evidence(forged_selection)
+
+
+def test_promoted_profile_rejects_rehashed_checkpoint_epoch_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "src.chart_transform_profile.metrics_from_probabilities",
+        lambda *_: {"lane_precision": 0.8, "lane_recall": 0.8, "lane_f1": 0.8},
+    )
+    dataset = tmp_path / "dataset"
+    dataset.mkdir()
+    manifest = _catalog_task_dataset(dataset)
+    candidate = tmp_path / "candidate"
+    train(
+        TrainingConfig(
+            dataset_manifest=str(manifest),
+            output_dir=str(candidate),
+            model_id="checkpoint-epoch-tamper-fixture",
+            source_difficulty="Expert",
+            target_difficulty="Hard",
+            hidden_dim=4,
+            epochs=1,
+            device="cpu",
+        )
+    )
+    report = tmp_path / "held-out.json"
+    evaluate_chart_transform_candidate(
+        bundle_root=candidate, dataset_manifest=manifest, output_path=report
+    )
+    promoted = tmp_path / "promoted"
+    package_chart_transform_profile(
+        experiment_dir=candidate,
+        evaluation_path=report,
+        dataset_manifest=manifest,
+        output_dir=promoted,
+        profile_id="checkpoint-epoch-tamper",
+    )
+
+    config_path = promoted / "configs" / "training-config.json"
+    candidate_config = json.loads(config_path.read_text())
+    candidate_config["epochs"] = 2
+    config_path.write_text(json.dumps(candidate_config))
+    manifest_path = promoted / MANIFEST_FILENAME
+    bundle_manifest = json.loads(manifest_path.read_text())
+    component = next(iter(bundle_manifest["components"].values()))
+    component["config_sha256"] = hashlib.sha256(config_path.read_bytes()).hexdigest()
+    component["config_byte_length"] = config_path.stat().st_size
+    manifest_path.write_text(json.dumps(bundle_manifest))
+    request = tmp_path / "preflight.json"
+    request.write_text(
+        json.dumps(
+            {
+                "model_root": str(promoted),
+                "profile_id": "checkpoint-epoch-tamper",
+                "difficulty_policy": "learned:chart_transform.guitar.expert_to_hard",
+                "instruments": ["guitar"],
+                "device": "cpu",
+            }
+        )
+    )
+    with pytest.raises(BundleValidationError, match="checkpoint selection"):
+        preflight_chart_request(request)
 
 
 def test_standalone_threshold_cli_rejects_promoted_profile_checkpoint(tmp_path: Path) -> None:

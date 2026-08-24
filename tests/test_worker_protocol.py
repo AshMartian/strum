@@ -15,7 +15,10 @@ import pytest
 import soundfile as sf
 
 from scripts.train_chart_transform import TrainingConfig, train
-from src.chart_transform_calibration import calibration_policy_evidence
+from src.chart_transform_calibration import (
+    calibration_policy_evidence,
+    checkpoint_selection_policy_evidence,
+)
 from src.chart_transform_profile import (
     evaluate_chart_transform_candidate,
     package_chart_transform_profile,
@@ -439,6 +442,10 @@ def test_pipeline_descriptors_advertise_post_training_jobs_without_private_value
     assert all(job["optional_private_request_fields"] == ["catalog_root"] for job in transform)
     assert all(job["quality_policy"] == quality_policy_evidence() for job in transform)
     assert all(job["calibration_policy"] == calibration_policy_evidence() for job in transform)
+    assert all(
+        job["checkpoint_selection_policy"] == checkpoint_selection_policy_evidence()
+        for job in transform
+    )
     assert all("minimum_lane_f1" not in job["options_schema"]["properties"] for job in transform)
 
 

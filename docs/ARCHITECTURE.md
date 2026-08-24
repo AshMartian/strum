@@ -445,9 +445,11 @@ excludes tracks whose audio ends before the Expert chart, and builds an
 ephemeral worker-local audio manifest at training time. No local audio path or
 copy belongs in a task view, experiment, bundle, or OCTAVE renderer payload.
 Its training bundle has no inference profile. New task views use source-disjoint
-train/calibration/test assignments: STRUM trains only on train, deterministically
-selects immutable per-lane decoder thresholds on calibration, then recomputes
-quality only on test for promotion. Two-way train/validation views remain
+train/calibration/test assignments: STRUM trains only on train, evaluates
+calibration after each epoch, and deterministically retains the calibration-best
+checkpoint (lane F1, then precision, recall, then earlier epoch) with its
+complete calibration trace, state hash, and per-lane decoder thresholds. It then recomputes quality only on
+test for promotion. Two-way train/validation views remain
 readable as raw experiments but cannot be promoted. The calibrated decoder and
 the STRUM-owned test quality policy are copied into the promoted profile; chart
 runs cannot override those thresholds.
@@ -484,7 +486,8 @@ than hard-coding a profile command or exposing a path. The job adapter calls
 the same strict evaluator/packager and cannot bypass its evidence or immutable
 profile gates.
 For `chart_transform.five_lane/v1`, each discoverable promotion job also
-includes STRUM's immutable versioned decoder-calibration and quality policies.
+includes STRUM's immutable versioned checkpoint-selection, decoder-calibration,
+and quality policies.
 Its V1 test-set minima are lane F1 0.50, precision 0.45, and recall 0.45: enough to
 exclude the 0.3297 F1 baseline while avoiding precision-only or recall-only
 promotion. Evaluation records the policy's canonical hash and decision;

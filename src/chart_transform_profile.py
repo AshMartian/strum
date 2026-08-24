@@ -34,7 +34,9 @@ from scripts.train_chart_transform import (
 from src.chart_transform_calibration import (
     calibration_evidence,
     metrics_from_probabilities,
+    state_dict_sha256,
     validate_calibration_evidence,
+    validate_checkpoint_selection_evidence,
 )
 from src.chart_transform_quality_policy import (
     evaluate_quality_policy,
@@ -282,6 +284,18 @@ def _candidate_state(
         )
     ):
         raise ChartTransformPromotionError("transform candidate checkpoint is incompatible")
+    calibration = config.get("decoder_calibration")
+    selection = calibration.get("checkpoint_selection") if isinstance(calibration, dict) else None
+    if (
+        not isinstance(selection, dict)
+        or not validate_checkpoint_selection_evidence(selection)
+        or not isinstance(config.get("epochs"), int)
+        or isinstance(config["epochs"], bool)
+        or selection.get("epochs_evaluated") != config["epochs"]
+        or payload.get("checkpoint_selection") != selection
+        or state_dict_sha256(state) != selection.get("selected_state_sha256")
+    ):
+        raise ChartTransformPromotionError("transform candidate checkpoint selection is invalid")
     model = EventTransformMLP(
         lane_count=config["lane_count"],
         hidden_dim=config["hidden_dim"],
@@ -434,6 +448,7 @@ def evaluate_chart_transform_candidate(
         component_sha256=component.sha256,
         calibration_song_ids=sorted({pair.song_id for pair in calibration_pairs}),
         split_assignments_sha256=lineage["split"]["assignments_sha256"],
+        checkpoint_selection=calibration["checkpoint_selection"],
     )
     if calibration != recomputed_calibration:
         raise ChartTransformPromotionError(
@@ -728,6 +743,12 @@ def validate_promoted_chart_transform_profile(bundle: ModelBundle, profile_id: s
     except ChartTransformPromotionError as error:
         raise BundleValidationError(
             "difficulty transform profile has invalid candidate lineage"
+        ) from error
+    try:
+        _candidate_state(bundle, component.name, candidate_config)
+    except ChartTransformPromotionError as error:
+        raise BundleValidationError(
+            "difficulty transform profile has invalid candidate checkpoint selection"
         ) from error
     if (
         set(config)

@@ -497,5 +497,6 @@ def test_pipeline_descriptor_declares_catalog_and_preprocessing_contract() -> No
     assert descriptor["training_requirements"] == [
         "source_disjoint_train_calibration_test/v2",
         "strum_owned_decoder_calibration/v1",
+        "strum_owned_calibration_checkpoint_selection/v1",
         "test_only_transform_promotion/v1",
     ]

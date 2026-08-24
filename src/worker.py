@@ -49,7 +49,10 @@ from src.catalog_task_manifest import (
     select_compatible_vocal_audio_role,
     write_catalog_task_manifest,
 )
-from src.chart_transform_calibration import calibration_policy_evidence
+from src.chart_transform_calibration import (
+    calibration_policy_evidence,
+    checkpoint_selection_policy_evidence,
+)
 from src.chart_transform_quality_policy import quality_policy_evidence
 from src.model_bundle import (
     MANIFEST_FILENAME,
@@ -199,6 +202,7 @@ class PromotionJobDescriptor:
     optional_private_request_fields: tuple[str, ...] = ()
     quality_policy: dict[str, object] | None = None
     calibration_policy: dict[str, object] | None = None
+    checkpoint_selection_policy: dict[str, object] | None = None
 
     def as_json(self) -> dict[str, object]:
         data: dict[str, object] = {
@@ -226,6 +230,12 @@ class PromotionJobDescriptor:
                 calibration_policy_evidence()
                 if self.id.startswith("chart-transform.")
                 else self.calibration_policy
+            )
+        if self.checkpoint_selection_policy is not None:
+            data["checkpoint_selection_policy"] = (
+                checkpoint_selection_policy_evidence()
+                if self.id.startswith("chart-transform.")
+                else self.checkpoint_selection_policy
             )
         return data
 
@@ -1232,6 +1242,7 @@ TRANSFORM_PROMOTION_JOBS = (
         deployment_scope="evaluation_evidence_only",
         quality_policy=quality_policy_evidence(),
         calibration_policy=calibration_policy_evidence(),
+        checkpoint_selection_policy=checkpoint_selection_policy_evidence(),
     ),
     PromotionJobDescriptor(
         id="chart-transform.profile-package/v1",
@@ -1245,6 +1256,7 @@ TRANSFORM_PROMOTION_JOBS = (
         deployment_scope="deployable_after_profile_validation",
         quality_policy=quality_policy_evidence(),
         calibration_policy=calibration_policy_evidence(),
+        checkpoint_selection_policy=checkpoint_selection_policy_evidence(),
     ),
 )
 
@@ -1410,6 +1422,7 @@ PIPELINES = (
         training_requirements=(
             "source_disjoint_train_calibration_test/v2",
             "strum_owned_decoder_calibration/v1",
+            "strum_owned_calibration_checkpoint_selection/v1",
             "test_only_transform_promotion/v1",
         ),
     ),
