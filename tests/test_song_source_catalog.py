@@ -6,6 +6,8 @@ import pytest
 
 from src.song_source_catalog import CatalogValidationError, load_catalog, select_training_sources
 
+_NO_CURATION = object()
+
 
 def _asset(root: Path, content: bytes, filename: str) -> dict[str, object]:
     sha256 = hashlib.sha256(content).hexdigest()
@@ -46,18 +48,19 @@ def _record(root: Path, source_id: str, training_use: str = "allowed") -> dict[s
     }
 
 
-def _catalog(root: Path, records: list[dict[str, object]]) -> None:
+def _catalog(
+    root: Path, records: list[dict[str, object]], *, curation: object = _NO_CURATION
+) -> None:
+    manifest: dict[str, object] = {
+        "schema_version": 1,
+        "format": "octave-song-source-catalog/v1",
+        "catalog_id": "local-test",
+        "records": "records.jsonl",
+    }
+    if curation is not _NO_CURATION:
+        manifest["curation"] = curation
     (root / "records.jsonl").write_text("\n".join(json.dumps(record) for record in records) + "\n")
-    (root / "catalog.json").write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "format": "octave-song-source-catalog/v1",
-                "catalog_id": "local-test",
-                "records": "records.jsonl",
-            }
-        )
-    )
+    (root / "catalog.json").write_text(json.dumps(manifest))
 
 
 def test_loads_allowed_instrument_sources_without_exposing_import_locations(tmp_path: Path) -> None:
@@ -134,3 +137,43 @@ def test_allows_normal_metadata_with_a_non_path_slash(tmp_path: Path) -> None:
     _catalog(tmp_path, [record])
 
     assert load_catalog(tmp_path).records[0].source_id == "octave-src-12345678"
+
+
+def test_accepts_safe_catalog_curation_without_exposing_it_to_training(tmp_path: Path) -> None:
+    _catalog(
+        tmp_path,
+        [_record(tmp_path, "octave-src-12345678")],
+        curation={
+            "provenance": "Curated in OCTAVE",
+            "license": "Permission recorded by catalog owner",
+        },
+    )
+
+    catalog = load_catalog(tmp_path)
+
+    assert catalog.records[0].training_use == "allowed"
+    assert not hasattr(catalog, "curation")
+    assert not hasattr(catalog.records[0], "curation")
+
+
+@pytest.mark.parametrize(
+    "curation",
+    [
+        {"provenance": "Curated in OCTAVE"},
+        {
+            "provenance": "Curated in OCTAVE",
+            "license": "Permission recorded by catalog owner",
+            "source_path": "/tmp/private",
+        },
+        {"provenance": "/tmp/private", "license": "Permission recorded by catalog owner"},
+        {"provenance": "private/source.sng", "license": "Permission recorded by catalog owner"},
+        {"provenance": "Curated in OCTAVE", "license": "x" * 513},
+        ["Curated in OCTAVE", "Permission recorded by catalog owner"],
+        None,
+    ],
+)
+def test_rejects_unsafe_or_noncanonical_catalog_curation(tmp_path: Path, curation: object) -> None:
+    _catalog(tmp_path, [_record(tmp_path, "octave-src-12345678")], curation=curation)
+
+    with pytest.raises(CatalogValidationError, match="curation"):
+        load_catalog(tmp_path)

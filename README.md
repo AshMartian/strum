@@ -577,12 +577,22 @@ instead of parsing human output:
 ```bash
 strum-worker dataset prepare --request /path/to/owned-prepare-request.json --json-events
 strum-worker train start --request /path/to/owned-train-request.json --json-events
+strum-worker promotion start --request /path/to/owned-post-train-request.json --json-events
 ```
 
 Each stream has an opaque request-derived job ID, monotonic sequence numbers,
 stage/progress, and a `succeeded` or `failed` terminal state. OCTAVE owns the
 child process group and cancellation; STRUM does not run a separate mutable
 job daemon that could retain private paths after the supervising process exits.
+
+Each pipeline descriptor can additionally publish `promotion_jobs`: typed
+post-training evaluation/package operations with an options-only renderer
+schema, declared private request fields, output kind, and deployment scope.
+OCTAVE obtains this list from `pipeline list --json`, resolves all private
+locations in its main process, and starts the selected action through
+`promotion start`. This preserves each evaluator's held-out and lineage checks
+and each packager's immutable-copy gate; it is not a way to turn a raw
+checkpoint into a profile.
 
 The request is a main-process-only file; paths are not echoed in the response.
 For example, a Guitar task-view request is:
@@ -755,10 +765,10 @@ execution.
 STRUM also publishes a distinct `lead_only_candidate_contract` under the
 planned Vocal descriptor. It is deliberately **not** a reduced Vocal profile:
 it accepts and could eventually emit only `PART VOCALS`, contains no Harmony
-inputs or outputs, and remains `not_deployable`. Its current public report
-checker is schema-only: caller-provided 40/10/10 counts and source-hash strings
-are not admission evidence, so its aggregate result is always non-admitting
-until STRUM implements a private catalog/task-view resolver.
+inputs or outputs, and remains `not_deployable`. The private
+`strum-worker vocal lead-admission` resolver now recomputes catalog/task-view
+coverage and source disjointness; caller-provided 40/10/10 counts and
+source-hash strings remain insufficient evidence.
 It records the smallest honest route for developing the lead event composer
 before OCTAVE has isolated Harmony material.
 
@@ -1203,6 +1213,10 @@ The `chart_transform.five_lane/v1` pipeline learns Expert → Hard, Medium, or
 Easy chart pairs for Guitar, Bass, Keys, or Drums. It consumes only `allowed`
 catalog records containing both Expert and the requested target difficulty;
 OCTAVE remains the importer and curation boundary.
+STRUM accepts OCTAVE's optional catalog-wide `catalog.json.curation` editor
+metadata only after strict shape and path-free text validation, then discards
+it: per-record `rights.training_use: "allowed"` remains the sole training
+authorization.
 
 ```bash
 python scripts/prepare_catalog_chart_pairs.py \
@@ -1215,8 +1229,8 @@ python scripts/train_chart_transform.py \
   --dataset-manifest /run/media/ash/portable-ai/strum/tasks/guitar-expert-hard-v1/dataset-manifest.json
 ```
 
-`--describe-pipeline` prints the stable pipeline descriptor for an OCTAVE
-worker. Each task view records its pipeline ID/version, catalog manifest and
+`strum-worker pipeline list --json` prints the stable pipeline descriptors for
+an OCTAVE worker. Each task view records its pipeline ID/version, catalog manifest and
 records hashes, source IDs with `notes.mid` hashes, deterministic source-ID
 split assignments, and preprocessing configuration hash. Training revalidates
 that lineage and preserves it in `training-metadata.json`; neither artifact

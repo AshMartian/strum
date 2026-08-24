@@ -15,7 +15,9 @@ import hashlib
 import importlib.util
 import io
 import json
+import math
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -154,6 +156,10 @@ class PipelineDescriptor:
     # path.  This lets a host explain why a catalog-ready task cannot train or
     # chart yet without guessing from a prose status string.
     training_contract: dict[str, object] | None = None
+    # Explicit post-training operations are part of the worker protocol, not
+    # an OCTAVE-side table of legacy subcommands.  Their private inputs are
+    # resolved by the host main process; renderer schemas contain options only.
+    promotion_jobs: tuple[PromotionJobDescriptor, ...] = ()
 
     def as_json(self) -> dict[str, object]:
         data = asdict(self)
@@ -172,7 +178,36 @@ class PipelineDescriptor:
             data["training_contract"] = _vocal_training_contract_for_output(
                 data["training_contract"]
             )
+        data["promotion_jobs"] = [job.as_json() for job in self.promotion_jobs]
         return data
+
+
+@dataclass(frozen=True)
+class PromotionJobDescriptor:
+    """One typed, worker-owned post-training evaluation or package action."""
+
+    id: str
+    display_name: str
+    kind: str
+    status: str
+    options_schema: dict[str, object]
+    private_request_fields: tuple[str, ...]
+    output_kind: str
+    deployment_scope: str
+    optional_private_request_fields: tuple[str, ...] = ()
+
+    def as_json(self) -> dict[str, object]:
+        return {
+            "id": self.id,
+            "display_name": self.display_name,
+            "kind": self.kind,
+            "status": self.status,
+            "options_schema": self.options_schema,
+            "private_request_fields": list(self.private_request_fields),
+            "optional_private_request_fields": list(self.optional_private_request_fields),
+            "output_kind": self.output_kind,
+            "deployment_scope": self.deployment_scope,
+        }
 
 
 def _object_schema(
@@ -1081,6 +1116,149 @@ VOCALS_ACTIVITY_PREPARE_SCHEMA = _object_schema(
     }
 )
 
+PROFILE_EVALUATE_OPTIONS_SCHEMA = _object_schema(
+    {
+        "device": {"type": "string", "enum": ["cpu", "cuda", "mps"], "default": "cpu"},
+        "tolerance_ms": {"type": "number", "minimum": 1, "maximum": 1000, "default": 50},
+        "limit_songs": {"type": "integer", "minimum": 0, "default": 0},
+    }
+)
+PROFILE_PACKAGE_OPTIONS_SCHEMA = _object_schema(
+    {
+        "profile_id": {"type": "string"},
+        "minimum_onset_f1": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
+        "minimum_fret_f1": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
+        "onset_threshold": {"type": ["number", "null"], "exclusiveMinimum": 0, "maximum": 1},
+        "fret_thresholds": {
+            "type": ["array", "null"],
+            "items": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
+            "minItems": 5,
+            "maxItems": 5,
+        },
+        "note_duration_ms": {"type": "number", "minimum": 1, "maximum": 10000, "default": 100},
+    },
+    required=("profile_id", "minimum_onset_f1", "minimum_fret_f1"),
+)
+TRANSFORM_EVALUATE_OPTIONS_SCHEMA = _object_schema(
+    {"device": {"type": "string", "enum": ["cpu", "cuda"], "default": "cpu"}}
+)
+TRANSFORM_PACKAGE_OPTIONS_SCHEMA = _object_schema(
+    {
+        "profile_id": {"type": "string"},
+        "device": {"type": "string", "enum": ["cpu", "cuda"], "default": "cpu"},
+    },
+    required=("profile_id",),
+)
+SECTION_EVALUATE_OPTIONS_SCHEMA = _object_schema(
+    {"device": {"type": "string", "enum": ["cpu", "cuda", "mps"], "default": "cpu"}}
+)
+SECTION_PACKAGE_OPTIONS_SCHEMA = _object_schema(
+    {
+        "profile_id": {"type": "string"},
+        "minimum_accuracy": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
+        "maximum_expected_calibration_error": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+        },
+    },
+    required=("profile_id", "minimum_accuracy", "maximum_expected_calibration_error"),
+)
+EMPTY_PROMOTION_OPTIONS_SCHEMA = _object_schema({})
+
+
+def _profile_promotion_jobs(instrument: str) -> tuple[PromotionJobDescriptor, ...]:
+    """Return the identical strict V1 evaluation/package surface per instrument."""
+    label = instrument.title()
+    return (
+        PromotionJobDescriptor(
+            id=f"{instrument}.profile-evaluate/v1",
+            display_name=f"Evaluate {label} candidate",
+            kind="evaluation",
+            status="available",
+            options_schema=PROFILE_EVALUATE_OPTIONS_SCHEMA,
+            private_request_fields=("bundle_root", "task_view", "catalog_root", "output"),
+            output_kind=f"{instrument}_held_out_evaluation_report",
+            deployment_scope="evaluation_evidence_only",
+        ),
+        PromotionJobDescriptor(
+            id=f"{instrument}.profile-package/v1",
+            display_name=f"Package {label} Expert profile",
+            kind="package",
+            status="available",
+            options_schema=PROFILE_PACKAGE_OPTIONS_SCHEMA,
+            private_request_fields=("experiment", "evaluation", "output"),
+            output_kind=f"{instrument}_expert_profile_bundle",
+            deployment_scope="deployable_after_profile_validation",
+        ),
+    )
+
+
+TRANSFORM_PROMOTION_JOBS = (
+    PromotionJobDescriptor(
+        id="chart-transform.profile-evaluate/v1",
+        display_name="Evaluate learned difficulty transform",
+        kind="evaluation",
+        status="available",
+        options_schema=TRANSFORM_EVALUATE_OPTIONS_SCHEMA,
+        private_request_fields=("bundle_root", "dataset_manifest", "output"),
+        optional_private_request_fields=("catalog_root",),
+        output_kind="chart_transform_held_out_evaluation_report",
+        deployment_scope="evaluation_evidence_only",
+    ),
+    PromotionJobDescriptor(
+        id="chart-transform.profile-package/v1",
+        display_name="Package learned difficulty transform",
+        kind="package",
+        status="available",
+        options_schema=TRANSFORM_PACKAGE_OPTIONS_SCHEMA,
+        private_request_fields=("experiment", "evaluation", "dataset_manifest", "output"),
+        optional_private_request_fields=("catalog_root",),
+        output_kind="learned_difficulty_transform_profile_bundle",
+        deployment_scope="deployable_after_profile_validation",
+    ),
+)
+
+
+def _section_promotion_jobs(instrument: str) -> tuple[PromotionJobDescriptor, ...]:
+    label = instrument.title()
+    return (
+        PromotionJobDescriptor(
+            id=f"section.{instrument}.profile-evaluate/v1",
+            display_name=f"Evaluate {label} section classifier",
+            kind="evaluation",
+            status="available",
+            options_schema=SECTION_EVALUATE_OPTIONS_SCHEMA,
+            private_request_fields=("bundle_root", "task_view", "catalog_root", "output"),
+            output_kind=f"section_{instrument}_held_out_evaluation_report",
+            deployment_scope="evaluation_evidence_only",
+        ),
+        PromotionJobDescriptor(
+            id=f"section.{instrument}.profile-package/v1",
+            display_name=f"Package {label} section evaluator",
+            kind="package",
+            status="available",
+            options_schema=SECTION_PACKAGE_OPTIONS_SCHEMA,
+            private_request_fields=("experiment", "evaluation", "output"),
+            output_kind=f"section_{instrument}_evaluation_profile_bundle",
+            deployment_scope="evaluation_only_not_auto_chart_runnable",
+        ),
+    )
+
+
+DRUMS_PROMOTION_JOBS = (
+    PromotionJobDescriptor(
+        id="drums.onset-classifier.package-evaluation/v1",
+        display_name="Package Drums onset evaluation artifact",
+        kind="package",
+        status="available",
+        options_schema=EMPTY_PROMOTION_OPTIONS_SCHEMA,
+        private_request_fields=("experiment_root", "output"),
+        output_kind="drums_onset_classifier_evaluation_bundle",
+        deployment_scope="evaluation_only_not_auto_chart_runnable",
+    ),
+)
+
 PIPELINES = (
     PipelineDescriptor(
         id="guitar.onset-fret/v1",
@@ -1107,6 +1285,7 @@ PIPELINES = (
             "required_difficulty",
         ),
         training_requirements=("profile_evaluation", "profile_packaging"),
+        promotion_jobs=_profile_promotion_jobs("guitar"),
     ),
     PipelineDescriptor(
         id="bass.onset-fret/v1",
@@ -1138,6 +1317,7 @@ PIPELINES = (
             "required_difficulty",
         ),
         training_requirements=("bass_profile_evaluation", "bass_profile_packaging"),
+        promotion_jobs=_profile_promotion_jobs("bass"),
     ),
     PipelineDescriptor(
         id="keys.onset-fret/v1",
@@ -1168,6 +1348,7 @@ PIPELINES = (
             "required_difficulty",
         ),
         training_requirements=("keys_profile_evaluation", "keys_profile_packaging"),
+        promotion_jobs=_profile_promotion_jobs("keys"),
     ),
     PipelineDescriptor(
         id="chart_transform.five_lane/v1",
@@ -1196,6 +1377,7 @@ PIPELINES = (
             "audio_role",
             "fallback_audio_role",
         ),
+        promotion_jobs=TRANSFORM_PROMOTION_JOBS,
     ),
     PipelineDescriptor(
         id="vocals.harmony-source-policy/v1",
@@ -1409,6 +1591,7 @@ PIPELINES = (
             "required_difficulty",
         ),
         training_requirements=("drums_chart_execution_profile",),
+        promotion_jobs=DRUMS_PROMOTION_JOBS,
     ),
     *(
         PipelineDescriptor(
@@ -1544,6 +1727,11 @@ PIPELINES = (
                     task_kind, PRO_TRAINING_CONTRACTS.get(task_kind)
                 )
             ),
+            promotion_jobs=(
+                _section_promotion_jobs(task_kind.removeprefix("section_"))
+                if task_kind.startswith("section_")
+                else ()
+            ),
         )
         for task_kind, pipeline_id in sorted(CATALOG_TASK_PIPELINES.items())
         if task_kind
@@ -1644,6 +1832,9 @@ def _runtime_payload() -> dict[str, object]:
         "pipeline_discovery",
         "catalog_inspect",
         "dataset_prepare",
+        "training_start",
+        "post_train_job_discovery",
+        "post_train_job_start",
         "chart_preflight",
         "chart_run",
         "typed_chart_results",
@@ -1670,7 +1861,11 @@ def _runtime_payload() -> dict[str, object]:
         "optional_dependencies": {
             "basic_pitch": {
                 "available": importlib.util.find_spec("basic_pitch") is not None,
-                "required_by": ["guitar.hybrid-v2-rule/v1"],
+                "required_by": [
+                    "guitar.hybrid-v2-rule/v1",
+                    "strum.fret-mapper/guitar/v1",
+                    "strum.fret-mapper/bass/v1",
+                ],
             }
         },
         "pipelines": [
@@ -4972,6 +5167,296 @@ def run_training_request(request_path: Path) -> dict[str, object]:
     }
 
 
+PROMOTION_RESULT_FORMAT = "strum-post-train-job-result/v1"
+
+
+def _promotion_job_by_id(pipeline_id: str, job_id: str) -> PromotionJobDescriptor:
+    descriptor = _pipeline_by_id(pipeline_id)
+    for job in descriptor.promotion_jobs:
+        if job.id == job_id:
+            return job
+    raise WorkerRequestError("post-training job is not available for this pipeline")
+
+
+def _read_promotion_request(
+    request_path: Path,
+) -> tuple[dict[str, Any], PromotionJobDescriptor]:
+    """Read a strict, host-owned post-training request without echoing paths."""
+    try:
+        raw = json.loads(request_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise WorkerRequestError("post-training request is unreadable or not valid JSON") from error
+    if not isinstance(raw, dict):
+        raise WorkerRequestError("post-training request must be an object")
+    pipeline_id, job_id = raw.get("pipeline_id"), raw.get("job_id")
+    if not isinstance(pipeline_id, str) or not isinstance(job_id, str):
+        raise WorkerRequestError("post-training request pipeline_id and job_id are required")
+    job = _promotion_job_by_id(pipeline_id, job_id)
+    required = {"pipeline_id", "job_id", "options", *job.private_request_fields}
+    permitted = required | set(job.optional_private_request_fields)
+    if set(raw) != required and not (required <= set(raw) <= permitted):
+        raise WorkerRequestError("post-training request has unsupported fields")
+    if not isinstance(raw.get("options"), dict):
+        raise WorkerRequestError("post-training job options must be an object")
+    for field in (*job.private_request_fields, *job.optional_private_request_fields):
+        if field in raw and (not isinstance(raw[field], str) or not raw[field]):
+            raise WorkerRequestError("post-training private locations must be non-empty strings")
+    schema = job.options_schema
+    properties = schema.get("properties") if isinstance(schema, dict) else None
+    required_options = schema.get("required") if isinstance(schema, dict) else None
+    if not isinstance(properties, dict) or not isinstance(required_options, list):
+        raise RuntimeError("post-training job descriptor has invalid options schema")
+    if set(raw["options"]) - set(properties) or not set(required_options) <= set(raw["options"]):
+        raise WorkerRequestError("post-training options do not match the advertised schema")
+    return raw, job
+
+
+def _promotion_options(job: PromotionJobDescriptor, raw_options: dict[str, Any]) -> dict[str, Any]:
+    """Apply only descriptor-declared JSON defaults before strict handler dispatch."""
+    schema = job.options_schema
+    properties = schema.get("properties") if isinstance(schema, dict) else None
+    if not isinstance(properties, dict):  # pragma: no cover - descriptor guard
+        raise RuntimeError("post-training job descriptor has invalid options schema")
+    values = dict(raw_options)
+    for key, definition in properties.items():
+        if key not in values and isinstance(definition, dict) and "default" in definition:
+            values[key] = definition["default"]
+    return values
+
+
+def _promotion_result_summary(
+    *, pipeline_id: str, job: PromotionJobDescriptor, result: dict[str, object]
+) -> dict[str, object]:
+    """Return only allowlisted, path-free result facts for host rendering.
+
+    Worker handlers may evolve to include diagnostic strings.  Do not attempt
+    to recognize a path inside those values: promotion output is a strict DTO
+    and omits every free-form field by default.
+    """
+    if not isinstance(result, dict):  # pragma: no cover - handler guard
+        raise WorkerRequestError("post-training job returned an invalid result")
+    summary: dict[str, object] = {}
+    safe_token = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
+    safe_capability = re.compile(r"[a-z][a-z0-9._-]*/v[1-9][0-9]*\Z")
+    for key in (
+        "model_id",
+        "profile_id",
+        "component_id",
+        "instrument",
+        "split",
+        "source_difficulty",
+        "target_difficulty",
+        "dataset_id",
+        "task_view_id",
+        "bundle_name",
+        "execution_scope",
+    ):
+        value = result.get(key)
+        if isinstance(value, str) and safe_token.fullmatch(value):
+            summary[key] = value
+    capability = result.get("capability")
+    if isinstance(capability, str) and safe_capability.fullmatch(capability):
+        summary["capability"] = capability
+    for key in (
+        "audio_manifest_sha256",
+        "bundle_manifest_sha256",
+        "candidate_lineage_sha256",
+        "candidate_manifest_sha256",
+        "component_configuration_sha256",
+        "component_sha256",
+        "dataset_manifest_sha256",
+        "dataset_records_sha256",
+        "manifest_sha256",
+        "task_view_sha256",
+    ):
+        value = result.get(key)
+        if isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value):
+            summary[key] = value
+    records = result.get("records_evaluated")
+    if isinstance(records, int) and not isinstance(records, bool) and records >= 0:
+        summary["records_evaluated"] = records
+    metrics = result.get("metrics")
+    if isinstance(metrics, dict) and all(
+        isinstance(key, str)
+        and re.fullmatch(r"[A-Za-z][A-Za-z0-9._-]*\Z", key)
+        and isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+        for key, value in metrics.items()
+    ):
+        summary["metrics"] = {key: float(value) for key, value in metrics.items()}
+    return {
+        "schema_version": 1,
+        "format": PROMOTION_RESULT_FORMAT,
+        "status": "completed",
+        "pipeline_id": pipeline_id,
+        "job_id": job.id,
+        "output_kind": job.output_kind,
+        "deployment_scope": job.deployment_scope,
+        "result": summary,
+    }
+
+
+def run_promotion_request(request_path: Path) -> dict[str, object]:
+    """Run one descriptor-advertised evaluation or packaging gate.
+
+    This is intentionally a narrow adapter over existing strict evaluators and
+    packagers.  It adds no promotion shortcut: every underlying held-out,
+    lineage, metric, immutable-copy, and profile validation gate remains the
+    authority.
+    """
+    request, job = _read_promotion_request(request_path)
+    pipeline_id = request["pipeline_id"]
+    assert isinstance(pipeline_id, str)
+    options = _promotion_options(job, request["options"])
+    result: dict[str, object]
+    try:
+        if job.id in {
+            "guitar.profile-evaluate/v1",
+            "bass.profile-evaluate/v1",
+            "keys.profile-evaluate/v1",
+        }:
+            handlers = {
+                "guitar.profile-evaluate/v1": (
+                    "src.guitar_profile_packaging",
+                    "evaluate_guitar_candidate",
+                ),
+                "bass.profile-evaluate/v1": (
+                    "src.bass_profile_packaging",
+                    "evaluate_bass_candidate",
+                ),
+                "keys.profile-evaluate/v1": (
+                    "src.keys_profile_packaging",
+                    "evaluate_keys_candidate",
+                ),
+            }
+            module_name, function_name = handlers[job.id]
+            module = __import__(module_name, fromlist=[function_name])
+            evaluate = getattr(module, function_name)
+            result = evaluate(
+                bundle_root=Path(request["bundle_root"]),
+                task_view_path=Path(request["task_view"]),
+                catalog_root=Path(request["catalog_root"]),
+                output_path=Path(request["output"]),
+                device=options["device"],
+                tolerance_ms=options["tolerance_ms"],
+                limit_songs=options["limit_songs"],
+            )
+        elif job.id in {
+            "guitar.profile-package/v1",
+            "bass.profile-package/v1",
+            "keys.profile-package/v1",
+        }:
+            handlers = {
+                "guitar.profile-package/v1": (
+                    "src.guitar_profile_packaging",
+                    "package_guitar_profile",
+                ),
+                "bass.profile-package/v1": ("src.bass_profile_packaging", "package_bass_profile"),
+                "keys.profile-package/v1": ("src.keys_profile_packaging", "package_keys_profile"),
+            }
+            module_name, function_name = handlers[job.id]
+            module = __import__(module_name, fromlist=[function_name])
+            package = getattr(module, function_name)
+            thresholds = options.get("fret_thresholds")
+            result = package(
+                experiment_dir=Path(request["experiment"]),
+                evaluation_path=Path(request["evaluation"]),
+                output_dir=Path(request["output"]),
+                profile_id=options["profile_id"],
+                minimum_onset_f1=options["minimum_onset_f1"],
+                minimum_fret_f1=options["minimum_fret_f1"],
+                onset_threshold=options.get("onset_threshold"),
+                fret_thresholds=tuple(thresholds) if isinstance(thresholds, list) else None,
+                note_duration_ms=options["note_duration_ms"],
+            )
+        elif job.id == "chart-transform.profile-evaluate/v1":
+            if "catalog_root" in request:
+                result = evaluate_catalog_chart_transform_candidate(
+                    bundle_root=request["bundle_root"],
+                    dataset_manifest=request["dataset_manifest"],
+                    catalog_root=request["catalog_root"],
+                    output_path=request["output"],
+                    device=options["device"],
+                )
+            else:
+                from src.chart_transform_profile import (  # noqa: PLC0415
+                    evaluate_chart_transform_candidate,
+                )
+
+                result = evaluate_chart_transform_candidate(
+                    bundle_root=request["bundle_root"],
+                    dataset_manifest=request["dataset_manifest"],
+                    output_path=request["output"],
+                    device=options["device"],
+                )
+        elif job.id == "chart-transform.profile-package/v1":
+            if "catalog_root" in request:
+                result = package_catalog_chart_transform_profile(
+                    experiment_dir=request["experiment"],
+                    evaluation_path=request["evaluation"],
+                    dataset_manifest=request["dataset_manifest"],
+                    catalog_root=request["catalog_root"],
+                    output_dir=request["output"],
+                    profile_id=options["profile_id"],
+                    device=options["device"],
+                )
+            else:
+                from src.chart_transform_profile import (
+                    package_chart_transform_profile,  # noqa: PLC0415
+                )
+
+                result = package_chart_transform_profile(
+                    experiment_dir=request["experiment"],
+                    evaluation_path=request["evaluation"],
+                    dataset_manifest=request["dataset_manifest"],
+                    output_dir=request["output"],
+                    profile_id=options["profile_id"],
+                    device=options["device"],
+                )
+        elif job.id.startswith("section."):
+            from src.section_profile_evaluation import (  # noqa: PLC0415
+                evaluate_section_candidate,
+                package_section_evaluation_profile,
+            )
+
+            instrument = "guitar" if ".guitar." in job.id else "bass"
+            if job.id.endswith("profile-evaluate/v1"):
+                result = evaluate_section_candidate(
+                    bundle_root=Path(request["bundle_root"]),
+                    task_view_path=Path(request["task_view"]),
+                    catalog_root=Path(request["catalog_root"]),
+                    output_path=Path(request["output"]),
+                    instrument=instrument,
+                    device=options["device"],
+                )
+            else:
+                result = package_section_evaluation_profile(
+                    experiment_dir=Path(request["experiment"]),
+                    evaluation_path=Path(request["evaluation"]),
+                    output_dir=Path(request["output"]),
+                    profile_id=options["profile_id"],
+                    instrument=instrument,
+                    minimum_accuracy=options["minimum_accuracy"],
+                    maximum_expected_calibration_error=options[
+                        "maximum_expected_calibration_error"
+                    ],
+                )
+        elif job.id == "drums.onset-classifier.package-evaluation/v1":
+            from src.drums_onset_profile_package import (  # noqa: PLC0415
+                package_drums_onset_experiment,
+            )
+
+            result = package_drums_onset_experiment(request["experiment_root"], request["output"])
+        else:  # pragma: no cover - descriptor/dispatch parity guard
+            raise RuntimeError("post-training job has no handler")
+    except (BundleValidationError, CatalogValidationError):
+        raise
+    except Exception as error:
+        raise WorkerRequestError("post-training job failed validation or execution") from error
+    return _promotion_result_summary(pipeline_id=pipeline_id, job=job, result=result)
+
+
 def package_checkpoint_request(request_path: Path) -> dict[str, object]:
     """Package one worker-owned experiment through a strict, path-private request."""
     try:
@@ -5048,6 +5533,15 @@ def _parse_args() -> argparse.Namespace:
     )
     training_start.add_argument("--request", type=Path, required=True)
     training_start.add_argument("--json-events", action="store_true")
+    promotion = commands.add_parser(
+        "promotion", help="run descriptor-advertised post-training evaluation and package jobs"
+    )
+    promotion_commands = promotion.add_subparsers(dest="promotion_command", required=True)
+    promotion_start = promotion_commands.add_parser(
+        "start", help="run one OCTAVE-supervised post-training job"
+    )
+    promotion_start.add_argument("--request", type=Path, required=True)
+    promotion_start.add_argument("--json-events", action="store_true")
     guitar = commands.add_parser("guitar", help="evaluate and package Guitar V1 profiles")
     guitar_commands = guitar.add_subparsers(dest="guitar_command", required=True)
     guitar_profile = guitar_commands.add_parser("profile", help="manage Guitar neural profiles")
@@ -5281,6 +5775,15 @@ def main() -> int:
                     args.request, "training", lambda: run_training_request(args.request)
                 )
             _print_json(run_training_request(args.request))
+            return 0
+        if args.command == "promotion" and args.promotion_command == "start":
+            if args.json_events:
+                return _run_event_stream(
+                    args.request,
+                    "post_training_promotion",
+                    lambda: run_promotion_request(args.request),
+                )
+            _print_json(run_promotion_request(args.request))
             return 0
         if args.command == "guitar" and args.guitar_command == "profile":
             from src.guitar_profile_packaging import (  # noqa: PLC0415

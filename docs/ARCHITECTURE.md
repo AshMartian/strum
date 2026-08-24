@@ -475,6 +475,13 @@ OCTAVE renders only the selected descriptor's `prepare_schema` and
 `train_schema`. It uses `dataset prepare --json-events` and `train start
 --json-events` for supervised work; event lines have a request-derived opaque
 job ID, monotonic sequence, stage, progress, state, and safe code/message.
+Descriptors whose existing held-out evaluation/package path is worker-ready
+also publish `promotion_jobs`. Each job has a renderer-safe `options_schema`,
+declared main-process-only request fields, output kind, and deployment scope;
+OCTAVE invokes the selected one through `promotion start --json-events` rather
+than hard-coding a profile command or exposing a path. The job adapter calls
+the same strict evaluator/packager and cannot bypass its evidence or immutable
+profile gates.
 OCTAVE owns cancellation by terminating the supervised process group, rather
 than requiring STRUM to retain a private-path job. A model folder is validated
 separately from a STRUM runtime with `checkpoint discover`, `checkpoint

@@ -45,10 +45,16 @@ presented as a successful OCTAVE auto-chart result.
   preserve standard and `_22` source variants. Prepare now produces strict,
   path-free decoded Pro targets (string/fret/technique or pitch/range shifts)
   plus a catalog-revalidated, global-tempo-correct audio event-window cache.
-  The cache is research-only; descriptors remain non-executable until STRUM
-  supplies an event trainer, held-out evaluator, package, and chart handler.
+  The cache and two raw candidate trainers are research-only; descriptors
+  remain non-executable until STRUM supplies held-out chart evaluation,
+  packaging, and a chart handler.
 - ✅ Worker lifecycle streams for dataset preparation and training. OCTAVE
   owns process creation/cancellation and retains private paths.
+- ✅ Descriptor-advertised post-training jobs for the existing Guitar, Bass,
+  Keys, transform, Drums evaluator, and Section evaluator paths. Their
+  options-only schemas and private-field declarations let OCTAVE supervise
+  evaluation/package work through `promotion start --json-events` without
+  reconstructing legacy profile commands or weakening promotion gates.
 - ✅ Bundle-validated Expert Guitar hybrid profile and Expert Drums direct V14
   profile. Both fail closed rather than invoking legacy companion/fallback
   behavior.
@@ -87,7 +93,7 @@ presented as a successful OCTAVE auto-chart result.
   `vocals.phrase_boundaries`, `vocals.lyric_alignment`, and
   `vocals.talky_activity` components; no raw component is a profile. Talky
   labels are only source note-96 spans and require positives in train and val.
-  The current 58-song OCTAVE curated catalog contains only two lead-talky
+  The original 58-record OCTAVE curated catalog contained only two lead-talky
   sources. A declared `sha256-source-id-seed-mod-100/v2` 67/33 smoke split can
   place one positive in each split and exercise the worker, but its zero-F1
   one-epoch result is not quality evidence; curation still needs substantially
@@ -105,9 +111,9 @@ presented as a successful OCTAVE auto-chart result.
   not a loader, note/phrase/talky decoder, timestamped CTC lyric decoder, MIDI
   assembler, evaluator, or worker handler. Its pinned 40/10/10 source and
   per-label coverage gate rejects the current three-song/no-test smoke views.
-  Its current public report checker is deliberately schema-only: claimed counts
-  and split hashes cannot admit a candidate until STRUM implements a private
-  catalog/task-view resolver that recomputes coverage and proves disjointness.
+  Its `vocal lead-admission` worker command now recomputes catalog/task-view
+  coverage and proves source disjointness; claimed counts and split hashes are
+  still never admission evidence by themselves.
   No candidate can package or execute a profile.
 - ✅ Catalog-backed, worker-trainable Guitar/Bass fret-mapper experiments.
   They require the `pitch` extra, preserve catalog train/validation splits,

@@ -27,9 +27,12 @@ from src.pro_candidate_contract import (
 )
 from src.worker import (
     PIPELINES,
+    PROMOTION_RESULT_FORMAT,
     PROTOCOL_VERSION,
     WorkerRequestError,
     _chart_result_contract,
+    _promotion_result_summary,
+    _read_promotion_request,
     _read_train_request,
     _revision,
     _run_without_legacy_output,
@@ -43,6 +46,7 @@ from src.worker import (
     preflight_chart_request,
     prepare_dataset_request,
     run_chart_request,
+    run_promotion_request,
     run_training_request,
     validate_inference_profile,
 )
@@ -396,6 +400,208 @@ def test_pipeline_descriptors_advertise_safe_host_orchestration_requirements() -
         descriptor = next(item for item in PIPELINES if item.id == pipeline_id)
         assert descriptor.private_request_fields == ("catalog_root",)
         assert "strum_pitch_extra" in descriptor.training_requirements
+
+
+def test_pipeline_descriptors_advertise_post_training_jobs_without_private_values() -> None:
+    expected = {
+        "guitar.onset-fret/v1": {
+            "guitar.profile-evaluate/v1",
+            "guitar.profile-package/v1",
+        },
+        "bass.onset-fret/v1": {"bass.profile-evaluate/v1", "bass.profile-package/v1"},
+        "keys.onset-fret/v1": {"keys.profile-evaluate/v1", "keys.profile-package/v1"},
+        "chart_transform.five_lane/v1": {
+            "chart-transform.profile-evaluate/v1",
+            "chart-transform.profile-package/v1",
+        },
+        "drums.onset-classifier/v1": {"drums.onset-classifier.package-evaluation/v1"},
+        "strum.section-classifier/guitar/v1": {
+            "section.guitar.profile-evaluate/v1",
+            "section.guitar.profile-package/v1",
+        },
+        "strum.section-classifier/bass/v1": {
+            "section.bass.profile-evaluate/v1",
+            "section.bass.profile-package/v1",
+        },
+    }
+    rendered = {descriptor.id: descriptor.as_json() for descriptor in PIPELINES}
+    for pipeline_id, job_ids in expected.items():
+        jobs = rendered[pipeline_id]["promotion_jobs"]
+        assert {job["id"] for job in jobs} == job_ids
+        assert all(
+            "/home/" not in json.dumps(job) and "/tmp/" not in json.dumps(job) for job in jobs
+        )
+        assert all(job["options_schema"]["additionalProperties"] is False for job in jobs)
+    transform = rendered["chart_transform.five_lane/v1"]["promotion_jobs"]
+    assert all(job["optional_private_request_fields"] == ["catalog_root"] for job in transform)
+
+
+def test_probe_advertises_training_and_mapper_pitch_dependency() -> None:
+    payload = _runtime_payload()
+    assert {"training_start", "post_train_job_discovery", "post_train_job_start"} <= set(
+        payload["capabilities"]
+    )
+    assert set(payload["optional_dependencies"]["basic_pitch"]["required_by"]) == {
+        "guitar.hybrid-v2-rule/v1",
+        "strum.fret-mapper/guitar/v1",
+        "strum.fret-mapper/bass/v1",
+    }
+
+
+def test_promotion_request_is_strict_and_result_is_path_free(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    secret = str(tmp_path / "private")
+    request = tmp_path / "promotion.json"
+    request.write_text(
+        json.dumps(
+            {
+                "pipeline_id": "drums.onset-classifier/v1",
+                "job_id": "drums.onset-classifier.package-evaluation/v1",
+                "experiment_root": f"{secret}/experiment",
+                "output": f"{secret}/package",
+                "options": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    parsed, descriptor = _read_promotion_request(request)
+    assert parsed["output"] == f"{secret}/package"
+    assert descriptor.output_kind == "drums_onset_classifier_evaluation_bundle"
+
+    monkeypatch.setattr(
+        "src.drums_onset_profile_package.package_drums_onset_experiment",
+        lambda _experiment, _output: {
+            "status": "packaged",
+            "model_id": "drums-v2",
+            "bundle_name": "package",
+            "deployment_status": "evaluation_only_not_auto_chart_runnable",
+            "diagnostic": f"failed to open {secret}/hidden-output",
+            "metrics": {f"failed to open {secret}": 1.0},
+            f"failed_{secret}_sha256": "a" * 64,
+        },
+    )
+    result = run_promotion_request(request)
+    assert result["format"] == PROMOTION_RESULT_FORMAT
+    assert result["job_id"] == descriptor.id
+    assert secret not in json.dumps(result)
+    assert _promotion_result_summary(
+        pipeline_id="drums.onset-classifier/v1",
+        job=descriptor,
+        result={"capability": "drums.onset-classifier-evaluation/v1"},
+    )["result"] == {"capability": "drums.onset-classifier-evaluation/v1"}
+    assert (
+        _promotion_result_summary(
+            pipeline_id="drums.onset-classifier/v1",
+            job=descriptor,
+            result={"capability": "NotARealCapability"},
+        )["result"]
+        == {}
+    )
+    assert "private/secret" not in json.dumps(
+        _promotion_result_summary(
+            pipeline_id="drums.onset-classifier/v1",
+            job=descriptor,
+            result={"bundle_name": "private/secret", "capability": "drums.v1/v1"},
+        )
+    )
+
+    request.write_text(
+        json.dumps({**json.loads(request.read_text()), "unexpected": True}), encoding="utf-8"
+    )
+    with pytest.raises(WorkerRequestError, match="unsupported fields"):
+        _read_promotion_request(request)
+
+
+def test_promotion_event_stream_is_path_free(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    request = tmp_path / "promotion.json"
+    secret = str(tmp_path / "private")
+    request.write_text(
+        json.dumps(
+            {
+                "pipeline_id": "drums.onset-classifier/v1",
+                "job_id": "drums.onset-classifier.package-evaluation/v1",
+                "experiment_root": f"{secret}/experiment",
+                "output": f"{secret}/package",
+                "options": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "src.drums_onset_profile_package.package_drums_onset_experiment",
+        lambda _experiment, _output: {
+            "status": "packaged",
+            "bundle_name": "package",
+            "diagnostic": f"failed to open {secret}/hidden-output",
+            "metrics": {f"failed to open {secret}": 1.0},
+            f"failed_{secret}_sha256": "a" * 64,
+        },
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "strum-worker",
+            "promotion",
+            "start",
+            "--request",
+            str(request),
+            "--json-events",
+        ],
+    )
+    assert main() == 0
+    events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert [event["sequence"] for event in events] == [1, 2]
+    assert events[-1]["state"] == "succeeded"
+    assert secret not in json.dumps(events)
+
+
+def test_promotion_event_stream_contains_unexpected_handler_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    request = tmp_path / "promotion.json"
+    secret = str(tmp_path / "review-private-error")
+    request.write_text(
+        json.dumps(
+            {
+                "pipeline_id": "drums.onset-classifier/v1",
+                "job_id": "drums.onset-classifier.package-evaluation/v1",
+                "experiment_root": f"{secret}/experiment",
+                "output": f"{secret}/package",
+                "options": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def raise_private_runtime_error(_experiment: str, _output: str) -> dict[str, object]:
+        raise RuntimeError(f"failed to open {secret}/experiment")
+
+    monkeypatch.setattr(
+        "src.drums_onset_profile_package.package_drums_onset_experiment",
+        raise_private_runtime_error,
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "strum-worker",
+            "promotion",
+            "start",
+            "--request",
+            str(request),
+            "--json-events",
+        ],
+    )
+    assert main() == 2
+    events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert [event["sequence"] for event in events] == [1, 2]
+    assert events[-1]["state"] == "failed"
+    assert events[-1]["code"] == "request_invalid"
+    assert secret not in json.dumps(events)
 
 
 @pytest.mark.parametrize(

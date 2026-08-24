@@ -38,6 +38,7 @@ UNSAFE_TEXT_PATTERN = re.compile(
     r"(?:[A-Za-z][A-Za-z0-9+.-]*://|file:|(?:^|[\s=:(])/(?:[^/\s]+/?)+|[A-Za-z]:[\\/])",
     re.IGNORECASE,
 )
+_MISSING = object()
 
 
 class CatalogValidationError(ValueError):
@@ -95,11 +96,19 @@ def load_catalog(catalog_root: str | Path) -> SongSourceCatalog:
     manifest = _read_json(root / CATALOG_FILENAME, "catalog manifest")
     if not isinstance(manifest, dict):
         raise CatalogValidationError("catalog manifest must be an object")
-    if set(manifest) - {"schema_version", "format", "catalog_id", "records", "created_by"}:
+    if set(manifest) - {
+        "schema_version",
+        "format",
+        "catalog_id",
+        "records",
+        "curation",
+        "created_by",
+    }:
         raise CatalogValidationError("catalog manifest contains unsupported fields")
     if manifest.get("schema_version") != 1 or manifest.get("format") != CATALOG_FORMAT:
         raise CatalogValidationError(f"catalog must use {CATALOG_FORMAT}")
     catalog_id = _safe_text(manifest.get("catalog_id"), "catalog_id")
+    _parse_curation(manifest.get("curation", _MISSING))
     _parse_created_by(manifest.get("created_by"))
     records_value = manifest.get("records")
     records_path = _resolve_records_path(root, records_value)
@@ -355,6 +364,23 @@ def _parse_created_by(raw: object) -> None:
         _safe_text(raw["source_revision"], "creator source revision")
 
 
+def _parse_curation(raw: object) -> None:
+    """Validate OCTAVE editor metadata without making it a training input.
+
+    `curation` is catalog-wide UI state, not a per-record rights decision.
+    STRUM deliberately discards it after validation: each record's
+    `rights.training_use` remains the only authorization used for training.
+    """
+    if raw is _MISSING:
+        return
+    if not isinstance(raw, dict) or set(raw) != {"provenance", "license"}:
+        raise CatalogValidationError("catalog curation metadata is invalid")
+    for field in ("provenance", "license"):
+        value = raw[field]
+        if not isinstance(value, str) or not _is_safe_curation_text(value):
+            raise CatalogValidationError(f"catalog curation {field} contains unsafe text")
+
+
 def _safe_text(value: object, field: str) -> str:
     if not isinstance(value, str) or not _is_safe_text(value):
         raise CatalogValidationError(f"catalog {field} contains unsafe text")
@@ -369,6 +395,11 @@ def _is_safe_text(value: str) -> bool:
         and not any(ord(char) < 32 for char in value)
         and not UNSAFE_TEXT_PATTERN.search(value)
     )
+
+
+def _is_safe_curation_text(value: str) -> bool:
+    """Accept catalog-wide editor text only when it cannot be a path."""
+    return _is_safe_text(value) and "/" not in value
 
 
 def _sha256(path: Path) -> str:
