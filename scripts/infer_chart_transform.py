@@ -148,12 +148,12 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _require_raw_cli_checkpoint(checkpoint_path: Path) -> None:
-    """Keep the threshold-tunable CLI outside promoted-profile execution."""
+def _require_raw_cli_checkpoint(checkpoint_path: Path) -> Path:
+    """Resolve and admit the exact raw checkpoint the CLI may subsequently load."""
     resolved_checkpoint = checkpoint_path.expanduser().resolve()
     manifest_path = resolved_checkpoint.parent.parent / MANIFEST_FILENAME
     if not manifest_path.is_file():
-        return
+        return resolved_checkpoint
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
@@ -165,15 +165,16 @@ def _require_raw_cli_checkpoint(checkpoint_path: Path) -> None:
             "promoted transform profiles require strum-worker chart run; "
             "standalone threshold inference is raw-only"
         )
+    return resolved_checkpoint
 
 
 def main() -> None:
     args = parse_args()
     try:
-        _require_raw_cli_checkpoint(args.checkpoint)
+        checkpoint_path = _require_raw_cli_checkpoint(args.checkpoint)
     except DatasetValidationError as error:
         raise SystemExit(str(error)) from error
-    checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=True)
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
     lane_count = checkpoint.get("lane_count") if isinstance(checkpoint, dict) else None
     if not isinstance(lane_count, int):
         raise SystemExit("checkpoint has no valid lane_count")
@@ -184,7 +185,7 @@ def main() -> None:
         "target_difficulty": checkpoint.get("target_difficulty"),
         "deployment_status": "raw_checkpoint_inference_not_promotable",
         "events": predict(
-            args.checkpoint,
+            checkpoint_path,
             events,
             song_path=args.song,
             device_name=args.device,

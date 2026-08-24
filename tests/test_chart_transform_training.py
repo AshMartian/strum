@@ -5,11 +5,17 @@ import shutil
 import wave
 from array import array
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
 
-from scripts.infer_chart_transform import _require_raw_cli_checkpoint, load_source_events, predict
+from scripts.infer_chart_transform import (
+    _require_raw_cli_checkpoint,
+    load_source_events,
+    predict,
+)
+from scripts.infer_chart_transform import main as infer_main
 from scripts.train_chart_transform import (
     ChartEvent,
     DatasetValidationError,
@@ -424,6 +430,53 @@ def test_standalone_threshold_cli_rejects_promoted_profile_checkpoint(tmp_path: 
     symlink.symlink_to(checkpoint)
     with pytest.raises(DatasetValidationError, match="promoted transform profiles"):
         _require_raw_cli_checkpoint(symlink)
+
+
+def test_standalone_cli_uses_the_resolved_checkpoint_for_load_and_predict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "raw" / "weights" / "chart_transform.pt"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"not opened by patched loader")
+    symlink = tmp_path / "checkpoint-link.pt"
+    symlink.symlink_to(target)
+    seen: list[Path] = []
+
+    monkeypatch.setattr(
+        "scripts.infer_chart_transform.parse_args",
+        lambda: SimpleNamespace(
+            checkpoint=symlink,
+            source_events=tmp_path / "events.json",
+            song=None,
+            output=tmp_path / "result.json",
+            device="cpu",
+            threshold=0.5,
+        ),
+    )
+    monkeypatch.setattr(
+        "scripts.infer_chart_transform.torch.load",
+        lambda checkpoint_path, **_kwargs: (
+            seen.append(checkpoint_path)
+            or {
+                "lane_count": 5,
+                "instrument": "guitar",
+                "source_difficulty": "Expert",
+                "target_difficulty": "Hard",
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        "scripts.infer_chart_transform.load_source_events",
+        lambda _path, _lanes: (ChartEvent(0.0, (0,)),),
+    )
+    monkeypatch.setattr(
+        "scripts.infer_chart_transform.predict",
+        lambda checkpoint_path, *_args, **_kwargs: seen.append(checkpoint_path) or [],
+    )
+
+    infer_main()
+
+    assert seen == [target.resolve(), target.resolve()]
 
 
 def test_legacy_two_way_catalog_candidate_can_train_but_cannot_promote(tmp_path: Path) -> None:
