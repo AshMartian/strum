@@ -11,8 +11,9 @@ _POLICY: Final = {
     "policy_id": PROFILE_POLICY_ID,
     "minimum_onset_f1": 0.5,
     "minimum_fret_f1": 0.5,
-    "onset_threshold": None,
-    "fret_thresholds": None,
+    "onset_threshold": 0.4,
+    "fret_thresholds": [0.5, 0.5, 0.5, 0.5, 0.5],
+    "note_duration_ms": 100.0,
 }
 
 

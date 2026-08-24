@@ -235,7 +235,8 @@ def package_guitar_profile(
         raise GuitarProfilePackagingError("Guitar profile_id is invalid")
     if output_dir.exists():
         raise GuitarProfilePackagingError("Guitar profile output must not already exist")
-    note_duration_ms = 100.0
+    policy = profile_quality_policy()
+    note_duration_ms = policy["note_duration_ms"]
     bundle_root, experiment = _require_candidate_experiment(experiment_dir)
     bundle = load_model_bundle(bundle_root, check_files=True)
     candidate = load_guitar_neural_candidate(bundle)
@@ -243,7 +244,6 @@ def package_guitar_profile(
         raise GuitarProfilePackagingError("Guitar candidate bundle is unavailable")
     report = _read_json(evaluation_path, "Guitar evaluation")
     metrics = report.get("metrics") if isinstance(report.get("metrics"), dict) else {}
-    policy = profile_quality_policy()
     if (
         report.get("schema_version") != 1
         or report.get("format") != EVALUATION_FORMAT
@@ -266,9 +266,9 @@ def package_guitar_profile(
             "Guitar evaluation does not satisfy the requested deployment gate"
         )
     inference = candidate["onset_inference"]
-    configured_onset_threshold = inference.get("peak_threshold")
+    configured_onset_threshold = policy["onset_threshold"]
     min_distance = inference.get("peak_min_distance_frames")
-    configured_fret_thresholds = (0.5,) * 5
+    configured_fret_thresholds = tuple(policy["fret_thresholds"])
     if (
         not isinstance(configured_onset_threshold, (int, float))
         or not 0 < configured_onset_threshold <= 1

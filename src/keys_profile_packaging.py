@@ -285,7 +285,8 @@ def package_keys_profile(
         raise KeysProfilePackagingError("Keys profile_id is invalid")
     if output_dir.exists():
         raise KeysProfilePackagingError("Keys profile output must not already exist")
-    note_duration_ms = 100.0
+    policy = profile_quality_policy()
+    note_duration_ms = policy["note_duration_ms"]
     bundle_root, experiment = _require_candidate_experiment(experiment_dir)
     bundle = load_model_bundle(bundle_root, check_files=True)
     candidate = load_keys_neural_candidate(bundle)
@@ -295,15 +296,14 @@ def package_keys_profile(
     metrics = _require_deployment_evaluation(
         report, model_id=bundle.model_id, bundle_manifest_sha256=_sha256(bundle.manifest_path)
     )
-    policy = profile_quality_policy()
     if metrics["onset_f1"] < policy["minimum_onset_f1"] or metrics["fret_f1"] < policy["minimum_fret_f1"]:
         raise KeysProfilePackagingError(
             "Keys evaluation does not satisfy the requested deployment gate"
         )
     inference = candidate["onset_inference"]
-    configured_onset_threshold = inference.get("peak_threshold")
+    configured_onset_threshold = policy["onset_threshold"]
     min_distance = inference.get("peak_min_distance_frames")
-    configured_fret_thresholds = (0.5,) * 5
+    configured_fret_thresholds = tuple(policy["fret_thresholds"])
     if (
         not isinstance(configured_onset_threshold, (int, float))
         or not 0 < configured_onset_threshold <= 1
