@@ -526,6 +526,50 @@ def test_promotion_request_is_strict_and_result_is_path_free(
         _read_promotion_request(request)
 
 
+def test_profile_package_promotion_uses_canonical_policy_without_host_overrides(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    request = tmp_path / "promotion-package.json"
+    request.write_text(
+        json.dumps(
+            {
+                "pipeline_id": "guitar.onset-fret/v1",
+                "job_id": "guitar.profile-package/v1",
+                "experiment": "private-experiment",
+                "evaluation": "private-evaluation",
+                "output": "private-output",
+                "options": {"profile_id": "guitar-expert"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    _, descriptor = _read_promotion_request(request)
+    assert set(descriptor.options_schema["properties"]) == {"profile_id"}
+    calls: list[dict[str, object]] = []
+
+    def package(**kwargs: object) -> dict[str, object]:
+        calls.append(kwargs)
+        return {
+            "status": "packaged",
+            "model_id": "guitar-v2",
+            "profile_id": "guitar-expert",
+            "capability": "guitar.neural-v1-expert/v1",
+            "bundle_name": "package",
+        }
+
+    monkeypatch.setattr("src.guitar_profile_packaging.package_guitar_profile", package)
+    result = run_promotion_request(request)
+    assert result["status"] == "completed"
+    assert calls == [
+        {
+            "experiment_dir": Path("private-experiment"),
+            "evaluation_path": Path("private-evaluation"),
+            "output_dir": Path("private-output"),
+            "profile_id": "guitar-expert",
+        }
+    ]
+
+
 def test_promotion_event_stream_is_path_free(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
