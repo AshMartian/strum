@@ -236,6 +236,12 @@ def load_guitar_neural_expert_profile(
         or evaluation["minimum_fret_f1"] != policy["minimum_fret_f1"]
     ):
         raise BundleValidationError("Guitar evaluation thresholds do not match canonical policy")
+    if (
+        onset_threshold != policy["onset_threshold"]
+        or tuple(thresholds) != tuple(policy["fret_thresholds"])
+        or note_duration != policy["note_duration_ms"]
+    ):
+        raise BundleValidationError("Guitar decoder settings do not match canonical policy")
     report = _read_json(evaluation_path, "Guitar evaluation artifact")
     metric_values = report.get("metrics") if isinstance(report.get("metrics"), dict) else {}
     report_required = {

@@ -238,6 +238,8 @@ def load_bass_neural_expert_profile(
     policy = profile_quality_policy()
     if evaluation["minimum_onset_f1"] != policy["minimum_onset_f1"] or evaluation["minimum_fret_f1"] != policy["minimum_fret_f1"]:
         raise BundleValidationError("Bass evaluation thresholds do not match canonical policy")
+    if onset_threshold != policy["onset_threshold"] or tuple(thresholds) != tuple(policy["fret_thresholds"]) or note_duration != policy["note_duration_ms"]:
+        raise BundleValidationError("Bass decoder settings do not match canonical policy")
     report = _read_json(evaluation_path, "Bass evaluation artifact")
     metrics = report.get("metrics") if isinstance(report.get("metrics"), dict) else {}
     required_report = {
