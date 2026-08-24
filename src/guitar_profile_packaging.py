@@ -27,6 +27,7 @@ from src.inference.guitar_neural_profile import (
     load_guitar_neural_candidate,
 )
 from src.model_bundle import MANIFEST_FILENAME, BundleValidationError, load_model_bundle
+from src.profile_quality_policy import profile_quality_policy, profile_quality_policy_sha256
 
 _PROFILE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 
@@ -176,6 +177,8 @@ def evaluate_guitar_candidate(
         "split": "val",
         "records_evaluated": len(songs),
         "alignment_tolerance_ms": tolerance_ms,
+        "quality_policy": profile_quality_policy(),
+        "quality_policy_sha256": profile_quality_policy_sha256(),
         "metrics": {
             "onset_f1": _f1(onset_tp, onset_fp, onset_fn),
             "fret_f1": _f1(fret_tp, fret_fp, fret_fn),
@@ -253,11 +256,14 @@ def package_guitar_profile(
         raise GuitarProfilePackagingError("Guitar candidate bundle is unavailable")
     report = _read_json(evaluation_path, "Guitar evaluation")
     metrics = report.get("metrics") if isinstance(report.get("metrics"), dict) else {}
+    policy = profile_quality_policy()
     if (
         report.get("schema_version") != 1
         or report.get("format") != EVALUATION_FORMAT
         or report.get("model_id") != bundle.model_id
         or report.get("bundle_manifest_sha256") != _sha256(bundle.manifest_path)
+        or report.get("quality_policy") != policy
+        or report.get("quality_policy_sha256") != profile_quality_policy_sha256()
         or not isinstance(report.get("records_evaluated"), int)
         or report["records_evaluated"] < 1
         or not all(
@@ -266,18 +272,16 @@ def package_guitar_profile(
             and 0 <= metrics[key] <= 1
             for key in ("onset_f1", "fret_f1", "event_f1")
         )
-        or metrics["onset_f1"] < minimum_onset_f1
-        or metrics["fret_f1"] < minimum_fret_f1
+        or metrics["onset_f1"] < policy["minimum_onset_f1"]
+        or metrics["fret_f1"] < policy["minimum_fret_f1"]
     ):
         raise GuitarProfilePackagingError(
             "Guitar evaluation does not satisfy the requested deployment gate"
         )
     inference = candidate["onset_inference"]
-    configured_onset_threshold = (
-        onset_threshold if onset_threshold is not None else inference.get("peak_threshold")
-    )
+    configured_onset_threshold = inference.get("peak_threshold")
     min_distance = inference.get("peak_min_distance_frames")
-    configured_fret_thresholds = fret_thresholds or (0.5,) * 5
+    configured_fret_thresholds = (0.5,) * 5
     if (
         not isinstance(configured_onset_threshold, (int, float))
         or not 0 < configured_onset_threshold <= 1
@@ -312,6 +316,8 @@ def package_guitar_profile(
             "source_bundle_manifest_sha256": _sha256(bundle.manifest_path),
             "minimum_onset_f1": float(minimum_onset_f1),
             "minimum_fret_f1": float(minimum_fret_f1),
+            "quality_policy": policy,
+            "quality_policy_sha256": profile_quality_policy_sha256(),
         },
     }
     config_path = output_dir / "profiles" / f"{profile_id}.json"

@@ -31,6 +31,7 @@ from src.inference.bass_neural_profile import (
     load_bass_neural_candidate,
 )
 from src.model_bundle import MANIFEST_FILENAME, BundleValidationError, load_model_bundle
+from src.profile_quality_policy import profile_quality_policy, profile_quality_policy_sha256
 
 _PROFILE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 
@@ -191,6 +192,8 @@ def evaluate_bass_candidate(
         "split": "val",
         "records_evaluated": len(songs),
         "alignment_tolerance_ms": tolerance_ms,
+        "quality_policy": profile_quality_policy(),
+        "quality_policy_sha256": profile_quality_policy_sha256(),
         "metrics": {
             "onset_f1": _f1(onset_tp, onset_fp, onset_fn),
             "fret_f1": _f1(fret_tp, fret_fp, fret_fn),
@@ -242,6 +245,8 @@ def _require_deployment_evaluation(
         "split",
         "records_evaluated",
         "alignment_tolerance_ms",
+        "quality_policy",
+        "quality_policy_sha256",
         "metrics",
     }
     if (
@@ -250,6 +255,8 @@ def _require_deployment_evaluation(
         or report.get("format") != EVALUATION_FORMAT
         or report.get("model_id") != model_id
         or report.get("bundle_manifest_sha256") != bundle_manifest_sha256
+        or report.get("quality_policy") != profile_quality_policy()
+        or report.get("quality_policy_sha256") != profile_quality_policy_sha256()
         or not isinstance(report.get("task_view_sha256"), str)
         or len(report["task_view_sha256"]) != 64
         or not isinstance(report.get("records_evaluated"), int)
@@ -305,16 +312,15 @@ def package_bass_profile(
         model_id=bundle.model_id,
         bundle_manifest_sha256=_sha256(bundle.manifest_path),
     )
-    if metrics["onset_f1"] < minimum_onset_f1 or metrics["fret_f1"] < minimum_fret_f1:
+    policy = profile_quality_policy()
+    if metrics["onset_f1"] < policy["minimum_onset_f1"] or metrics["fret_f1"] < policy["minimum_fret_f1"]:
         raise BassProfilePackagingError(
             "Bass evaluation does not satisfy the requested deployment gate"
         )
     inference = candidate["onset_inference"]
-    configured_onset_threshold = (
-        onset_threshold if onset_threshold is not None else inference.get("peak_threshold")
-    )
+    configured_onset_threshold = inference.get("peak_threshold")
     min_distance = inference.get("peak_min_distance_frames")
-    configured_fret_thresholds = fret_thresholds or (0.5,) * 5
+    configured_fret_thresholds = (0.5,) * 5
     if (
         not isinstance(configured_onset_threshold, (int, float))
         or not 0 < configured_onset_threshold <= 1
@@ -349,6 +355,8 @@ def package_bass_profile(
             "source_bundle_manifest_sha256": _sha256(bundle.manifest_path),
             "minimum_onset_f1": float(minimum_onset_f1),
             "minimum_fret_f1": float(minimum_fret_f1),
+            "quality_policy": profile_quality_policy(),
+            "quality_policy_sha256": profile_quality_policy_sha256(),
         },
     }
     config_path = output_dir / "profiles" / f"{profile_id}.json"

@@ -9,6 +9,7 @@ import pytest
 import torch
 
 from src.guitar_profile_packaging import GuitarProfilePackagingError, package_guitar_profile
+from src.profile_quality_policy import profile_quality_policy, profile_quality_policy_sha256
 from src.inference.guitar_neural import GuitarEvent, GuitarNeuralCharter
 from src.inference.guitar_neural_profile import (
     CAPABILITY,
@@ -154,6 +155,8 @@ def _evaluation(bundle: Path, output: Path, *, onset_f1: float = 0.8) -> Path:
                 "split": "val",
                 "records_evaluated": 2,
                 "alignment_tolerance_ms": 50.0,
+                "quality_policy": profile_quality_policy(),
+                "quality_policy_sha256": profile_quality_policy_sha256(),
                 "metrics": {"onset_f1": onset_f1, "fret_f1": 0.8, "event_f1": 0.7},
             }
         )

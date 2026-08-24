@@ -17,6 +17,7 @@ from src.inference.keys_neural_profile import (
     load_keys_neural_expert_profile,
 )
 from src.keys_profile_packaging import KeysProfilePackagingError, package_keys_profile
+from src.profile_quality_policy import profile_quality_policy, profile_quality_policy_sha256
 from src.model_bundle import MANIFEST_FILENAME, load_model_bundle
 from src.models.guitar_v1 import (
     FretClassifierConfig,
@@ -153,6 +154,8 @@ def _evaluation(bundle: Path, output: Path) -> Path:
                 "split": "val",
                 "records_evaluated": 2,
                 "alignment_tolerance_ms": 50.0,
+                "quality_policy": profile_quality_policy(),
+                "quality_policy_sha256": profile_quality_policy_sha256(),
                 "metrics": {"onset_f1": 0.8, "fret_f1": 0.8, "event_f1": 0.7},
             }
         )

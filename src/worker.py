@@ -54,6 +54,7 @@ from src.chart_transform_calibration import (
     checkpoint_selection_policy_evidence,
 )
 from src.chart_transform_quality_policy import quality_policy_evidence
+from src.profile_quality_policy import profile_quality_policy
 from src.model_bundle import (
     MANIFEST_FILENAME,
     BundleValidationError,
@@ -1161,19 +1162,14 @@ PROFILE_EVALUATE_OPTIONS_SCHEMA = _object_schema(
 PROFILE_PACKAGE_OPTIONS_SCHEMA = _object_schema(
     {
         "profile_id": {"type": "string"},
-        "minimum_onset_f1": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
-        "minimum_fret_f1": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
-        "onset_threshold": {"type": ["number", "null"], "exclusiveMinimum": 0, "maximum": 1},
-        "fret_thresholds": {
-            "type": ["array", "null"],
-            "items": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
-            "minItems": 5,
-            "maxItems": 5,
-        },
         "note_duration_ms": {"type": "number", "minimum": 1, "maximum": 10000, "default": 100},
     },
-    required=("profile_id", "minimum_onset_f1", "minimum_fret_f1"),
+    required=("profile_id",),
 )
+
+# Deployment policy is owned by STRUM.  Hosts may select a profile name and
+# duration, but never lower quality gates or decoder thresholds.
+PROFILE_PACKAGE_POLICY = profile_quality_policy()
 TRANSFORM_EVALUATE_OPTIONS_SCHEMA = _object_schema(
     {"device": {"type": "string", "enum": ["cpu", "cuda"], "default": "cpu"}}
 )
@@ -5409,16 +5405,15 @@ def run_promotion_request(request_path: Path) -> dict[str, object]:
             module_name, function_name = handlers[job.id]
             module = __import__(module_name, fromlist=[function_name])
             package = getattr(module, function_name)
-            thresholds = options.get("fret_thresholds")
             result = package(
                 experiment_dir=Path(request["experiment"]),
                 evaluation_path=Path(request["evaluation"]),
                 output_dir=Path(request["output"]),
                 profile_id=options["profile_id"],
-                minimum_onset_f1=options["minimum_onset_f1"],
-                minimum_fret_f1=options["minimum_fret_f1"],
-                onset_threshold=options.get("onset_threshold"),
-                fret_thresholds=tuple(thresholds) if isinstance(thresholds, list) else None,
+                minimum_onset_f1=PROFILE_PACKAGE_POLICY["minimum_onset_f1"],
+                minimum_fret_f1=PROFILE_PACKAGE_POLICY["minimum_fret_f1"],
+                onset_threshold=PROFILE_PACKAGE_POLICY["onset_threshold"],
+                fret_thresholds=PROFILE_PACKAGE_POLICY["fret_thresholds"],
                 note_duration_ms=options["note_duration_ms"],
             )
         elif job.id == "chart-transform.profile-evaluate/v1":

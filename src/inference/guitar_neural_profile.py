@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from src.model_bundle import BundleValidationError, ModelBundle
+from src.profile_quality_policy import profile_quality_policy, profile_quality_policy_sha256
 
 FORMAT = "strum-guitar-neural-expert-profile/v1"
 CAPABILITY = "guitar.neural-v1-expert/v1"
@@ -206,6 +207,8 @@ def load_guitar_neural_expert_profile(
         "source_bundle_manifest_sha256",
         "minimum_onset_f1",
         "minimum_fret_f1",
+        "quality_policy",
+        "quality_policy_sha256",
     }:
         raise BundleValidationError("Guitar neural profile requires a verified evaluation artifact")
     evaluation_path = _resolve_bundle_file(
@@ -216,6 +219,8 @@ def load_guitar_neural_expert_profile(
         or not isinstance(evaluation.get("source_bundle_manifest_sha256"), str)
         or len(evaluation["source_bundle_manifest_sha256"]) != 64
         or _sha256(evaluation_path) != evaluation["sha256"]
+        or evaluation.get("quality_policy") != profile_quality_policy()
+        or evaluation.get("quality_policy_sha256") != profile_quality_policy_sha256()
     ):
         raise BundleValidationError("Guitar evaluation artifact hash does not match")
     if not all(
@@ -236,6 +241,8 @@ def load_guitar_neural_expert_profile(
         "split",
         "records_evaluated",
         "alignment_tolerance_ms",
+        "quality_policy",
+        "quality_policy_sha256",
         "metrics",
     }
     if (
@@ -244,6 +251,8 @@ def load_guitar_neural_expert_profile(
         or report.get("format") != EVALUATION_FORMAT
         or report.get("model_id") != bundle.model_id
         or report.get("bundle_manifest_sha256") != evaluation["source_bundle_manifest_sha256"]
+        or report.get("quality_policy") != profile_quality_policy()
+        or report.get("quality_policy_sha256") != profile_quality_policy_sha256()
         or not isinstance(report.get("task_view_sha256"), str)
         or len(report["task_view_sha256"]) != 64
         or report.get("split") != "val"
