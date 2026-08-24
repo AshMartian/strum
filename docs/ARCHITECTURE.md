@@ -590,6 +590,12 @@ shared by the activity, phrase, lyric, and talky task kinds. The task view
 records only the aggregate number excluded—never paths or source IDs—so the
 four components cannot acquire incompatible target partitions silently.
 
+Catalog inspection applies that same MIDI predicate and the shared
+`soundfile-full-stream-decode/v1` preferred/fallback audio selection before
+reporting eligibility. It returns aggregate target-versus-audio exclusion
+counts only; a host can therefore make the preparation count actionable
+without receiving source identifiers or local asset locations.
+
 `strum-owned-lead-catalog-task-admission-resolver/v1` is a separate,
 pre-model admission boundary. It receives a private catalog root and all four
 lead task views, revalidates each immutable view against catalog assets, then

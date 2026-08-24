@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import subprocess
@@ -9,7 +10,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import mido
+import numpy as np
 import pytest
+import soundfile as sf
 
 from scripts.train_chart_transform import TrainingConfig, train
 from src.chart_transform_profile import (
@@ -793,6 +796,61 @@ def _catalog_record(
     }
 
 
+def _lead_vocal_midi_bytes() -> bytes:
+    midi = mido.MidiFile()
+    track = mido.MidiTrack()
+    midi.tracks.append(track)
+    track.append(mido.MetaMessage("track_name", name="PART VOCALS", time=0))
+    track.append(mido.Message("note_on", note=60, velocity=100, time=0))
+    track.append(mido.Message("note_off", note=60, velocity=0, time=480))
+    output = io.BytesIO()
+    midi.save(file=output)
+    return output.getvalue()
+
+
+def _lead_vocal_wav_bytes() -> bytes:
+    output = io.BytesIO()
+    sf.write(output, np.full(512, 0.01, dtype=np.float32), 22_050, format="WAV")
+    return output.getvalue()
+
+
+def _lead_vocal_catalog_record(
+    root: Path,
+    suffix: str,
+    *,
+    midi_bytes: bytes | None = None,
+    vocals_bytes: bytes | None = None,
+    mix_bytes: bytes | None = None,
+) -> dict[str, object]:
+    record = _catalog_record(
+        root,
+        suffix,
+        instruments={"vocals": ["expert"]},
+        audio_roles=(),
+    )
+    record["chart"] = {
+        "notes_midi": _catalog_asset(
+            root,
+            _lead_vocal_midi_bytes() if midi_bytes is None else midi_bytes,
+            "notes.mid",
+        ),
+        "instruments": {
+            "vocals": {
+                "status": "present",
+                "difficulties": ["expert"],
+                "track_names": ["PART VOCALS"],
+            }
+        },
+    }
+    audio: dict[str, object] = {}
+    if vocals_bytes is not None:
+        audio["vocals"] = _catalog_asset(root, vocals_bytes, "vocals.wav")
+    if mix_bytes is not None:
+        audio["mix"] = _catalog_asset(root, mix_bytes, "mix.wav")
+    record["audio"] = audio
+    return record
+
+
 def _write_catalog(root: Path, records: list[dict[str, object]]) -> None:
     (root / "records.jsonl").write_text("\n".join(json.dumps(record) for record in records) + "\n")
     (root / "catalog.json").write_text(
@@ -1005,6 +1063,83 @@ def test_catalog_inspect_uses_the_derived_task_adapter_fallback_policy(tmp_path:
         )
     )
     assert prepare_dataset_request(request_path)["record_count"] == inspection["eligible_count"]
+
+
+@pytest.mark.parametrize(
+    "pipeline_id",
+    (
+        "vocals.note-activity/v1",
+        "vocals.phrase-boundaries/v1",
+        "vocals.lyric-alignment/v1",
+        "vocals.talky-activity/v1",
+        "strum.instrument-chart/vocals/v1",
+    ),
+)
+def test_vocal_catalog_inspection_matches_lead_task_preparation_gates(
+    tmp_path: Path, pipeline_id: str
+) -> None:
+    malformed_midi = (
+        b"MThd\x00\x00\x00\x06\x00\x00\x00\x01\x00\x60"
+        b"MTrk\x00\x00\x00\x08\x00\x90\x3c\xc8\x00\xff\x2f\x00"
+    )
+    valid_audio = _lead_vocal_wav_bytes()
+    _write_catalog(
+        tmp_path,
+        [
+            _lead_vocal_catalog_record(tmp_path, "aaaaaaaa", vocals_bytes=valid_audio),
+            _lead_vocal_catalog_record(
+                tmp_path, "bbbbbbbb", midi_bytes=malformed_midi, vocals_bytes=valid_audio
+            ),
+            _lead_vocal_catalog_record(
+                tmp_path,
+                "cccccccc",
+                vocals_bytes=b"undecodable-vocal-stem",
+                mix_bytes=valid_audio,
+            ),
+            _lead_vocal_catalog_record(
+                tmp_path,
+                "dddddddd",
+                vocals_bytes=b"undecodable-vocal-stem",
+                mix_bytes=b"undecodable-mix",
+            ),
+        ],
+    )
+
+    inspection = inspect_catalog(tmp_path, pipeline_id)
+    request_path = tmp_path / f"{pipeline_id.replace('/', '-')}.prepare.json"
+    request_path.write_text(
+        json.dumps(
+            {
+                "catalog_root": str(tmp_path),
+                "pipeline_id": pipeline_id,
+                "output": str(tmp_path / "views" / f"{pipeline_id.replace('/', '-')}.json"),
+                "options": {},
+            }
+        )
+    )
+
+    prepared = prepare_dataset_request(request_path)
+
+    assert inspection["eligible_count"] == prepared["record_count"] == 2
+    assert inspection["exclusion_reason_counts"] == {
+        "training_use_not_allowed": 0,
+        "instrument_not_present": 0,
+        "required_difficulty_missing": 0,
+        "audio_unavailable": 0,
+        "vocal_target_incompatible": 1,
+        "vocal_audio_incompatible": 1,
+    }
+    assert inspection["audio_policy"] == {
+        "kind": "preferred_with_fallback",
+        "preferred_role": "vocals",
+        "fallback_role": "mix",
+        "required": True,
+        "compatibility": "soundfile-full-stream-decode/v1",
+    }
+    rendered = json.dumps(inspection)
+    assert str(tmp_path) not in rendered
+    assert "octave-src-" not in rendered
+    assert "Reviewed private collection" not in rendered
 
 
 def test_drums_pipeline_exposes_a_strict_worker_training_schema() -> None:

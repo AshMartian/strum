@@ -336,7 +336,7 @@ def _has_section_label_source(record: object, instrument: str) -> bool:
     return bool(chart.notes)
 
 
-def _has_exact_lead_vocal_label_source(record: object) -> bool:
+def has_exact_lead_vocal_label_source(record: object) -> bool:
     """Return whether a managed MIDI target is safe for all lead Vocal tasks.
 
     OCTAVE can record an imported package as having Vocal coverage without
@@ -357,7 +357,7 @@ def _has_exact_lead_vocal_label_source(record: object) -> bool:
     return sum(track.name == "PART VOCALS" for track in midi.tracks) == 1
 
 
-def _select_compatible_vocal_audio_role(
+def select_compatible_vocal_audio_role(
     record: object, preferred: str, fallback: str | None
 ) -> str | None:
     """Pick the declared Vocal role the implemented preprocessors can decode.
@@ -512,12 +512,12 @@ def build_catalog_task_manifest(
             record, instrument
         ):
             continue
-        if task_kind in VOCAL_TARGET_TASK_KINDS and not _has_exact_lead_vocal_label_source(record):
+        if task_kind in VOCAL_TARGET_TASK_KINDS and not has_exact_lead_vocal_label_source(record):
             vocal_target_exclusions += 1
             continue
         role = available_roles[source_id][0]
         if task_kind in VOCAL_TARGET_TASK_KINDS:
-            role = _select_compatible_vocal_audio_role(record, preferred, fallback)
+            role = select_compatible_vocal_audio_role(record, preferred, fallback)
             if role is None:
                 vocal_audio_exclusions += 1
                 continue
@@ -666,7 +666,7 @@ def resolve_catalog_task_manifest_songs(
         record = records.get(source_id)
         coverage = record.instruments.get(TASK_INSTRUMENTS[task_kind]) if record else None
         compatible_vocal_role = (
-            _select_compatible_vocal_audio_role(record, preferred, fallback)
+            select_compatible_vocal_audio_role(record, preferred, fallback)
             if task_kind in VOCAL_TARGET_TASK_KINDS and record is not None
             else None
         )
@@ -685,9 +685,7 @@ def resolve_catalog_task_manifest_songs(
             or not _asset_matches(raw_song.get("notes_midi"), record.notes_midi, catalog)
             or (
                 task_kind in VOCAL_TARGET_TASK_KINDS
-                and (
-                    not _has_exact_lead_vocal_label_source(record) or role != compatible_vocal_role
-                )
+                and (not has_exact_lead_vocal_label_source(record) or role != compatible_vocal_role)
             )
         ):
             raise CatalogValidationError("manifest song is not a valid approved catalog task input")

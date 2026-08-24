@@ -43,6 +43,8 @@ from src.catalog_task_manifest import (
 )
 from src.catalog_task_manifest import (
     build_catalog_task_manifest,
+    has_exact_lead_vocal_label_source,
+    select_compatible_vocal_audio_role,
     write_catalog_task_manifest,
 )
 from src.model_bundle import (
@@ -3223,14 +3225,66 @@ def _audio_task_inspection(
     preferred_role: str,
     fallback_role: str | None,
     required_difficulty: str,
+    require_lead_vocal_compatibility: bool = False,
 ) -> dict[str, object]:
-    """Inspect the same preferred/fallback selection used by audio manifests."""
+    """Inspect the same selection and compatibility gates as task preparation."""
     exclusions = _empty_exclusions(
         "training_use_not_allowed",
         "instrument_not_present",
         "required_difficulty_missing",
         "audio_unavailable",
     )
+    if require_lead_vocal_compatibility:
+        exclusions.update(
+            _empty_exclusions(
+                "vocal_target_incompatible",
+                "vocal_audio_incompatible",
+            )
+        )
+
+        assets: list[CatalogAsset] = []
+        eligible_count = 0
+        for record in catalog.records:
+            if record.training_use != TRAINING_ALLOWED:
+                exclusions["training_use_not_allowed"] += 1
+                continue
+            coverage = record.instruments.get(instrument)
+            if coverage is None or coverage.status != "present":
+                exclusions["instrument_not_present"] += 1
+                continue
+            if required_difficulty not in coverage.difficulties:
+                exclusions["required_difficulty_missing"] += 1
+                continue
+            if not has_exact_lead_vocal_label_source(record):
+                exclusions["vocal_target_incompatible"] += 1
+                continue
+            role = select_compatible_vocal_audio_role(record, preferred_role, fallback_role)
+            if role is None:
+                # This aggregates a missing declared role and a stream that
+                # cannot complete the exact soundfile decode used by every
+                # lead-Vocal preprocessor.  Both are excluded by preparation
+                # at the same boundary, and neither reveals a record identity.
+                exclusions["vocal_audio_incompatible"] += 1
+                continue
+            assets.extend((record.notes_midi, record.audio[role]))
+            eligible_count += 1
+
+        estimated_storage_bytes, storage_estimate_capped = _bounded_asset_bytes(assets)
+        return {
+            "eligible_count": eligible_count,
+            "exclusion_reason_counts": exclusions,
+            "audio_policy": {
+                "kind": "preferred_with_fallback",
+                "preferred_role": preferred_role,
+                "fallback_role": fallback_role,
+                "required": True,
+                "compatibility": "soundfile-full-stream-decode/v1",
+            },
+            "estimated_storage_bytes": estimated_storage_bytes,
+            "storage_estimate_capped": storage_estimate_capped,
+            "storage_estimate_semantics": CATALOG_STORAGE_ESTIMATE_SEMANTICS,
+        }
+
     selected_roles: dict[str, str] = {}
     for role in (preferred_role, fallback_role):
         if role is None:
@@ -3458,6 +3512,7 @@ def _inspect_pipeline_catalog(
             preferred_role=options.get("audio_role", "vocals"),
             fallback_role=options.get("fallback_audio_role", "mix"),
             required_difficulty=options.get("required_difficulty", "expert"),
+            require_lead_vocal_compatibility=True,
         )
     if pipeline_id == "drums.onset-classifier/v1":
         permitted = {"audio_role", "fallback_audio_role", "required_difficulty"}
@@ -3545,6 +3600,7 @@ def _inspect_pipeline_catalog(
         if disable_fallback
         else (default_fallback if requested_fallback is None else requested_fallback),
         required_difficulty=options.get("required_difficulty", "expert"),
+        require_lead_vocal_compatibility=task_kind == "vocals",
     )
 
 
