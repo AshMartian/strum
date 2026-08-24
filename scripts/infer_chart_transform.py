@@ -150,7 +150,8 @@ def parse_args() -> argparse.Namespace:
 
 def _require_raw_cli_checkpoint(checkpoint_path: Path) -> None:
     """Keep the threshold-tunable CLI outside promoted-profile execution."""
-    manifest_path = checkpoint_path.parent.parent / MANIFEST_FILENAME
+    resolved_checkpoint = checkpoint_path.expanduser().resolve()
+    manifest_path = resolved_checkpoint.parent.parent / MANIFEST_FILENAME
     if not manifest_path.is_file():
         return
     try:

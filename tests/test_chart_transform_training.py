@@ -420,6 +420,11 @@ def test_standalone_threshold_cli_rejects_promoted_profile_checkpoint(tmp_path: 
     with pytest.raises(DatasetValidationError, match="promoted transform profiles"):
         _require_raw_cli_checkpoint(checkpoint)
 
+    symlink = tmp_path / "raw-looking-checkpoint.pt"
+    symlink.symlink_to(checkpoint)
+    with pytest.raises(DatasetValidationError, match="promoted transform profiles"):
+        _require_raw_cli_checkpoint(symlink)
+
 
 def test_legacy_two_way_catalog_candidate_can_train_but_cannot_promote(tmp_path: Path) -> None:
     dataset = tmp_path / "dataset"

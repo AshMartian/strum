@@ -489,7 +489,8 @@ python scripts/infer_chart_transform.py \
 ```
 
 This direct CLI is explicitly raw/non-promotable and may tune `--threshold` for
-experimentation. It refuses any checkpoint inside a promoted profile bundle;
+experimentation. It resolves symlinks and refuses any checkpoint whose resolved
+target is inside a promoted profile bundle;
 production transforms must use `strum-worker chart run`, which uses the
 profile's calibrated thresholds.
 
