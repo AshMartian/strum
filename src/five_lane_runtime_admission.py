@@ -19,11 +19,17 @@ import soundfile as sf
 
 RUNTIME_ADMISSION_FORMAT = "strum-five-lane-runtime-admission/v1"
 RUNTIME_ADMISSION = {"format": RUNTIME_ADMISSION_FORMAT}
-# Catalog stems are bounded song assets; two seconds leaves room for a normal
-# full-stream decode while preventing several wedged native decoders from
-# making a catalog inspection unresponsive.
-FULL_STREAM_AUDIO_DECODE_TIMEOUT_SECONDS = 2.0
+# Catalog stems are bounded song assets.  A conservative per-attempt limit
+# avoids storage jitter becoming a random admission decision; one timeout is
+# retried in a fresh child, while any completed decode failure remains final.
+FULL_STREAM_AUDIO_DECODE_TIMEOUT_SECONDS = 5.0
 FULL_STREAM_AUDIO_DECODE_CLEANUP_SECONDS = 0.1
+FULL_STREAM_AUDIO_DECODE_ATTEMPTS = 2
+
+_DECODED = "decoded"
+_DECODE_FAILED = "decode_failed"
+_DECODE_TIMED_OUT = "timed_out"
+_DECODE_CRASHED = "crashed"
 
 # A five-lane neural profile must learn from the isolated instrument stem it
 # will be asked to interpret.  This is intentionally separate from runtime
@@ -89,38 +95,39 @@ def _process_is_alive(process: Any) -> bool:
         return False
 
 
-def _stop_decode_process(process: Any) -> None:
+def _stop_decode_process(process: Any) -> bool:
     """Bound cleanup even when a native child ignores termination signals."""
     if not _process_is_alive(process):
-        return
+        return True
     try:
         process.terminate()
     except (OSError, ValueError):
-        return
+        return not _process_is_alive(process)
     try:
         process.join(FULL_STREAM_AUDIO_DECODE_CLEANUP_SECONDS)
     except (OSError, ValueError):
-        return
+        return not _process_is_alive(process)
     if not _process_is_alive(process):
-        return
+        return True
     kill = getattr(process, "kill", None)
     if not callable(kill):
-        return
+        return False
     try:
         kill()
         process.join(FULL_STREAM_AUDIO_DECODE_CLEANUP_SECONDS)
     except (OSError, ValueError):
-        return
+        return not _process_is_alive(process)
+    return not _process_is_alive(process)
 
 
-def _full_stream_audio_decodes(
+def _full_stream_audio_decode_attempt(
     audio_path: Path,
     *,
     timeout_seconds: float = FULL_STREAM_AUDIO_DECODE_TIMEOUT_SECONDS,
     child_target: Callable[[str, Any, Any], None] = _full_stream_decode_child,
     process_context: Any | None = None,
-) -> bool:
-    """Return whether a bounded child process fully decodes one audio asset."""
+) -> str:
+    """Return one private decode outcome without exposing asset details."""
     if timeout_seconds <= 0:
         raise ValueError("audio decode timeout must be positive")
     # Do not fork a process that already imported libsndfile: native decoder
@@ -146,17 +153,17 @@ def _full_stream_audio_decodes(
         send_connection.close()
         process.join(timeout_seconds)
         if _process_is_alive(process):
-            _stop_decode_process(process)
+            reaped = _stop_decode_process(process)
             cleanup_attempted = True
-            return False
+            return _DECODE_TIMED_OUT if reaped else _DECODE_CRASHED
         if process.exitcode != 0 or not receive_connection.poll():
-            return False
+            return _DECODE_CRASHED
         try:
-            return receive_connection.recv() is True
+            return _DECODED if receive_connection.recv() is True else _DECODE_FAILED
         except (EOFError, OSError):
-            return False
+            return _DECODE_CRASHED
     except (OSError, RuntimeError):
-        return False
+        return _DECODE_CRASHED
     finally:
         for connection in (send_connection, receive_connection):
             try:
@@ -171,6 +178,28 @@ def _full_stream_audio_decodes(
                     process.close()
                 except (OSError, ValueError):
                     pass
+
+
+def _full_stream_audio_decodes(
+    audio_path: Path,
+    *,
+    timeout_seconds: float = FULL_STREAM_AUDIO_DECODE_TIMEOUT_SECONDS,
+    child_target: Callable[[str, Any, Any], None] = _full_stream_decode_child,
+    process_context: Any | None = None,
+) -> bool:
+    """Fully decode once, retrying only a bounded timeout in a fresh child."""
+    for attempt in range(FULL_STREAM_AUDIO_DECODE_ATTEMPTS):
+        outcome = _full_stream_audio_decode_attempt(
+            audio_path,
+            timeout_seconds=timeout_seconds,
+            child_target=child_target,
+            process_context=process_context,
+        )
+        if outcome == _DECODED:
+            return True
+        if outcome != _DECODE_TIMED_OUT or attempt + 1 == FULL_STREAM_AUDIO_DECODE_ATTEMPTS:
+            return False
+    return False
 
 
 def classify_five_lane_runtime_source(

@@ -54,12 +54,14 @@ class _SignalResistantProcess:
 class _SignalResistantContext:
     def __init__(self) -> None:
         self.process = _SignalResistantProcess()
+        self.process_calls = 0
 
     def Pipe(self, *, duplex: bool) -> tuple[_Connection, _Connection]:
         assert duplex is False
         return _Connection(), _Connection()
 
     def Process(self, **_kwargs: object) -> _SignalResistantProcess:
+        self.process_calls += 1
         return self.process
 
 
@@ -98,6 +100,37 @@ def test_isolated_decode_bounds_sigterm_and_sigkill_resistant_child(tmp_path: Pa
     assert context.process.terminate_calls == 1
     assert context.process.kill_calls == 1
     assert context.process.close_calls == 0
+    assert context.process_calls == 1
+
+
+def test_isolated_decode_retries_only_timeout_and_accepts_completed_retry(
+    tmp_path: Path, monkeypatch
+) -> None:
+    outcomes = iter((admission._DECODE_TIMED_OUT, admission._DECODED))
+    calls: list[Path] = []
+
+    def decode_attempt(audio_path: Path, **_kwargs: object) -> str:
+        calls.append(audio_path)
+        return next(outcomes)
+
+    monkeypatch.setattr(admission, "_full_stream_audio_decode_attempt", decode_attempt)
+
+    assert admission._full_stream_audio_decodes(tmp_path / "retry.ogg") is True
+    assert calls == [tmp_path / "retry.ogg", tmp_path / "retry.ogg"]
+
+
+def test_isolated_decode_does_not_retry_completed_failure(tmp_path: Path, monkeypatch) -> None:
+    calls = 0
+
+    def decode_attempt(_audio_path: Path, **_kwargs: object) -> str:
+        nonlocal calls
+        calls += 1
+        return admission._DECODE_FAILED
+
+    monkeypatch.setattr(admission, "_full_stream_audio_decode_attempt", decode_attempt)
+
+    assert admission._full_stream_audio_decodes(tmp_path / "failed.ogg") is False
+    assert calls == 1
 
 
 def test_runtime_admission_maps_isolated_decode_failure_to_unreadable(
