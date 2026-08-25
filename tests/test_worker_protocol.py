@@ -1195,6 +1195,27 @@ def test_catalog_inspect_and_prepare_emit_path_free_task_view(tmp_path: Path) ->
     assert str(tmp_path) not in output.read_text()
 
 
+def test_profile_catalog_inspection_aggregates_decoder_child_termination(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _guitar_catalog(tmp_path)
+    monkeypatch.setattr(
+        "src.five_lane_runtime_admission._full_stream_audio_decodes", lambda _path: False
+    )
+
+    inspection = inspect_catalog(tmp_path, "guitar.onset-fret/v1", options={"profile_grade": True})
+
+    assert inspection["eligible_count"] == 0
+    assert inspection["exclusion_reason_counts"]["runtime_audio_unreadable"] == 1
+    assert inspection["profile_grade_admission"] == {
+        "format": "strum-five-lane-profile-audibility-admission/v1",
+        "audio_selection": "exact_dedicated_instrument_role",
+        "source_disjoint_minimums": {"train": 20, "val": 5, "test": 5},
+        "by_split": {"train": 0, "val": 0, "test": 0},
+        "meets_minimums": False,
+    }
+
+
 def test_catalog_inspect_is_pipeline_specific_and_path_free(tmp_path: Path) -> None:
     _write_catalog(
         tmp_path,
