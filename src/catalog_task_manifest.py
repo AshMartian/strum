@@ -29,6 +29,11 @@ from src.song_source_catalog import (
     load_catalog,
     select_training_sources,
 )
+from src.five_lane_runtime_admission import (
+    RUNTIME_ADMISSION,
+    RUNTIME_ADMISSION_FORMAT,
+    classify_five_lane_runtime_source,
+)
 from src.vocal_audio_compatibility import (
     VOCAL_AUDIO_COMPATIBILITY,
     has_compatible_vocal_audio,
@@ -42,6 +47,13 @@ MANIFEST_VERSION = 1
 LEGACY_SPLIT_ALGORITHM = "sha256-source-id-mod-100/v1"
 SPLIT_ALGORITHM = "sha256-source-id-seed-mod-100/v2"
 DEFAULT_SPLIT_RATIOS = (80, 10, 10)
+
+# Full audio decode plus exact Expert-label admission is a five-lane neural
+# profile contract only.  Guitar owns a dedicated task-view builder, while
+# Bass and Keys use this generic builder.  Do not let this marker leak into
+# unrelated catalog task families: a resolver must treat such a view as
+# malformed rather than silently accepting an unenforced declaration.
+RUNTIME_ADMISSION_TASK_KINDS = frozenset({"bass_onset_fret", "keys_onset_fret"})
 
 # OCTAVE catalog coverage is intentionally a lightweight import-time summary.
 # Lead-Vocal training derives four distinct targets from one exact MIDI track,
@@ -499,10 +511,15 @@ def build_catalog_task_manifest(
     split_ratios: tuple[int, int, int] = DEFAULT_SPLIT_RATIOS,
     split_seed: str = "catalog-source-id/v1",
     preprocessing: Mapping[str, object] | None = None,
+    runtime_admission: bool = False,
 ) -> dict[str, object]:
     """Create an immutable, path-free STRUM task view for one pipeline family."""
     if task_kind not in PIPELINE_IDS:
         raise CatalogValidationError(f"unsupported STRUM catalog task: {task_kind}")
+    if runtime_admission and task_kind not in RUNTIME_ADMISSION_TASK_KINDS:
+        raise CatalogValidationError(
+            "runtime admission is only supported for five-lane Guitar, Bass, and Keys profiles"
+        )
     if not isinstance(split_seed, str) or not split_seed:
         raise CatalogValidationError("split seed must be a non-empty identifier")
     instrument = TASK_INSTRUMENTS[task_kind]
@@ -532,6 +549,7 @@ def build_catalog_task_manifest(
 
     records = {record.source_id: record for record in catalog.records}
     songs: list[dict[str, object]] = []
+    runtime_exclusions = {"runtime_audio_unreadable": 0, "exact_expert_label_missing": 0}
     vocal_target_exclusions = 0
     vocal_audio_exclusions = 0
     for source_id in sorted(available_roles):
@@ -549,6 +567,14 @@ def build_catalog_task_manifest(
             role = select_compatible_vocal_audio_role(record, preferred, fallback)
             if role is None:
                 vocal_audio_exclusions += 1
+                continue
+        if runtime_admission:
+            label_track = "PART BASS" if task_kind == "bass_onset_fret" else "PART KEYS"
+            reason = classify_five_lane_runtime_source(
+                record.audio[role].path, record.notes_midi.path, label_track=label_track
+            )
+            if reason is not None:
+                runtime_exclusions[reason] += 1
                 continue
         songs.append(
             {
@@ -579,6 +605,7 @@ def build_catalog_task_manifest(
         # Task views are caller-owned mutable dictionaries; never expose the
         # module-level canonical declaration by reference.
         "label_schema": copy.deepcopy(TASK_LABEL_SCHEMAS[task_kind]),
+        **({"runtime_admission": RUNTIME_ADMISSION} if runtime_admission else {}),
     }
     summary: dict[str, object] = {
         "record_count": len(songs),
@@ -595,6 +622,11 @@ def build_catalog_task_manifest(
                 "format": VOCAL_AUDIO_COMPATIBILITY,
                 "excluded_record_count": vocal_audio_exclusions,
             },
+        }
+    if runtime_admission:
+        summary["runtime_admission"] = {
+            "format": RUNTIME_ADMISSION_FORMAT,
+            "exclusion_reason_counts": runtime_exclusions,
         }
     return {
         "schema_version": MANIFEST_VERSION,
@@ -662,6 +694,12 @@ def resolve_catalog_task_manifest_songs(
     settings = _require_safe_preprocessing(
         task.get("preprocessing") if isinstance(task.get("preprocessing"), dict) else None
     )
+    runtime_admission = task.get("runtime_admission")
+    if runtime_admission is not None and (
+        runtime_admission != RUNTIME_ADMISSION
+        or task_kind not in RUNTIME_ADMISSION_TASK_KINDS
+    ):
+        raise CatalogValidationError("manifest runtime admission is invalid")
     if task.get("preprocessing_sha256") != _canonical_json_hash(settings):
         raise CatalogValidationError("manifest preprocessing lineage is invalid")
     if section_task_uses_retired_prefix_schema(task_kind, task.get("label_schema")):
@@ -722,6 +760,12 @@ def resolve_catalog_task_manifest_songs(
             )
         ):
             raise CatalogValidationError("manifest song is not a valid approved catalog task input")
+        if runtime_admission is not None:
+            label_track = "PART BASS" if task_kind == "bass_onset_fret" else "PART KEYS"
+            if classify_five_lane_runtime_source(
+                record.audio[role].path, record.notes_midi.path, label_track=label_track
+            ) is not None:
+                raise CatalogValidationError("manifest song no longer satisfies runtime admission")
         seen_source_ids.add(source_id)
         resolved.append(
             {

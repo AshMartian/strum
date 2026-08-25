@@ -72,6 +72,9 @@ def test_bass_worker_trains_from_its_catalog_task_view_and_packages_provenance(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _catalog_with_train_and_val(tmp_path)
+    monkeypatch.setattr(
+        "src.catalog_task_manifest.classify_five_lane_runtime_source", lambda *_args, **_kwargs: None
+    )
     task_view = tmp_path / "views" / "bass.json"
     prepare_request = tmp_path / "prepare.json"
     prepare_request.write_text(

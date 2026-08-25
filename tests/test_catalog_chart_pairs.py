@@ -173,6 +173,41 @@ def test_builds_path_free_catalog_task_view_for_each_five_lane_instrument(
     assert training["metadata"]["split"]["algorithm"] == "sha256-source-id-rank/v2-three-way"
 
 
+def test_chart_transform_task_view_rejects_five_lane_runtime_admission_marker(
+    tmp_path: Path,
+) -> None:
+    _catalog(
+        tmp_path,
+        [
+            _record(tmp_path, "octave-src-11111111", "PART GUITAR", 0),
+            _record(tmp_path, "octave-src-22222222", "PART GUITAR", 1),
+            _record(tmp_path, "octave-src-33333333", "PART GUITAR", 2),
+        ],
+    )
+    result = prepare_catalog_chart_pairs(
+        tmp_path,
+        tmp_path / "task-view",
+        CatalogChartPairOptions(instrument="guitar", target_difficulty="Hard", split_seed=17),
+    )
+    manifest_path = result["manifest_path"]
+    assert isinstance(manifest_path, Path)
+    manifest = json.loads(manifest_path.read_text())
+    manifest["task_view"]["runtime_admission"] = "strum-five-lane-runtime-admission/v1"
+    manifest_path.write_text(json.dumps(manifest))
+
+    with pytest.raises(ValueError, match="task_view has unsupported or missing fields"):
+        load_dataset(
+            TrainingConfig(
+                dataset_manifest=str(manifest_path),
+                output_dir=str(tmp_path / "experiment"),
+                model_id="fixture-model",
+                source_difficulty="Expert",
+                target_difficulty="Hard",
+                device="cpu",
+            )
+        )
+
+
 def test_rejects_pair_that_no_longer_matches_catalog_task_view(tmp_path: Path) -> None:
     _catalog(
         tmp_path,

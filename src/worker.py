@@ -88,6 +88,7 @@ from src.song_source_catalog import (
     select_training_sources,
 )
 from src.source_provenance import source_revision_identity
+from src.five_lane_runtime_admission import classify_five_lane_runtime_source
 from src.vocal_harmony_catalog import (
     build_vocal_harmony_source_task,
     inspect_vocal_harmony_source_catalog,
@@ -3514,6 +3515,7 @@ def _audio_task_inspection(
     fallback_role: str | None,
     required_difficulty: str,
     require_lead_vocal_compatibility: bool = False,
+    runtime_admission_label_track: str | None = None,
 ) -> dict[str, object]:
     """Inspect the same selection and compatibility gates as task preparation."""
     exclusions = _empty_exclusions(
@@ -3529,7 +3531,9 @@ def _audio_task_inspection(
                 "vocal_audio_incompatible",
             )
         )
-
+    if runtime_admission_label_track is not None:
+        exclusions.update(_empty_exclusions("runtime_audio_unreadable", "exact_expert_label_missing"))
+    if require_lead_vocal_compatibility:
         assets: list[CatalogAsset] = []
         eligible_count = 0
         for record in catalog.records:
@@ -3586,6 +3590,7 @@ def _audio_task_inspection(
             selected_roles.setdefault(source.source_id, role)
 
     assets: list[CatalogAsset] = []
+    eligible_count = 0
     for record in catalog.records:
         if record.training_use != TRAINING_ALLOWED:
             exclusions["training_use_not_allowed"] += 1
@@ -3601,11 +3606,21 @@ def _audio_task_inspection(
         if role is None:
             exclusions["audio_unavailable"] += 1
             continue
+        if runtime_admission_label_track is not None:
+            reason = classify_five_lane_runtime_source(
+                record.audio[role].path,
+                record.notes_midi.path,
+                label_track=runtime_admission_label_track,
+            )
+            if reason is not None:
+                exclusions[reason] += 1
+                continue
         assets.extend((record.notes_midi, record.audio[role]))
+        eligible_count += 1
 
     estimated_storage_bytes, storage_estimate_capped = _bounded_asset_bytes(assets)
     return {
-        "eligible_count": len(selected_roles),
+        "eligible_count": eligible_count,
         "exclusion_reason_counts": exclusions,
         "audio_policy": {
             "kind": "preferred_with_fallback",
@@ -3756,6 +3771,7 @@ def _inspect_pipeline_catalog(
             preferred_role=options.get("audio_role", "guitar"),
             fallback_role=options.get("fallback_audio_role", "mix"),
             required_difficulty=options.get("required_difficulty", "expert"),
+            runtime_admission_label_track="PART GUITAR",
         )
     if pipeline_id == "bass.onset-fret/v1":
         permitted = {"audio_role", "fallback_audio_role", "required_difficulty"}
@@ -3767,6 +3783,7 @@ def _inspect_pipeline_catalog(
             preferred_role=options.get("audio_role", "bass"),
             fallback_role=options.get("fallback_audio_role", "mix"),
             required_difficulty=options.get("required_difficulty", "expert"),
+            runtime_admission_label_track="PART BASS",
         )
     if pipeline_id == "keys.onset-fret/v1":
         permitted = {"audio_role", "fallback_audio_role", "required_difficulty"}
@@ -3778,6 +3795,7 @@ def _inspect_pipeline_catalog(
             preferred_role=options.get("audio_role", "keys"),
             fallback_role=options.get("fallback_audio_role", "mix"),
             required_difficulty=options.get("required_difficulty", "expert"),
+            runtime_admission_label_track="PART KEYS",
         )
     if pipeline_id in {
         "vocals.note-activity/v1",
@@ -3972,7 +3990,7 @@ def prepare_dataset_request(request_path: Path) -> dict[str, object]:
         permitted = {"audio_role", "fallback_audio_role", "required_difficulty"}
         if set(options) - permitted:
             raise WorkerRequestError("unsupported Guitar preparation option")
-        manifest = build_guitar_manifest(catalog_root, **options)
+        manifest = build_guitar_manifest(catalog_root, runtime_admission=True, **options)
         written = write_guitar_manifest(output, manifest)
         record_count = manifest["summary"]["record_count"]
         task_view_id = _task_view_digest(manifest)
@@ -4010,7 +4028,9 @@ def prepare_dataset_request(request_path: Path) -> dict[str, object]:
         permitted = {"audio_role", "fallback_audio_role", "required_difficulty"}
         if set(options) - permitted:
             raise WorkerRequestError("unsupported Bass preparation option")
-        manifest = build_catalog_task_manifest(catalog_root, "bass_onset_fret", **options)
+        manifest = build_catalog_task_manifest(
+            catalog_root, "bass_onset_fret", runtime_admission=True, **options
+        )
         written = write_catalog_task_manifest(output, manifest)
         record_count = manifest["summary"]["record_count"]
         task_view_id = _task_view_digest(manifest)
@@ -4018,7 +4038,9 @@ def prepare_dataset_request(request_path: Path) -> dict[str, object]:
         permitted = {"audio_role", "fallback_audio_role", "required_difficulty"}
         if set(options) - permitted:
             raise WorkerRequestError("unsupported Keys preparation option")
-        manifest = build_catalog_task_manifest(catalog_root, "keys_onset_fret", **options)
+        manifest = build_catalog_task_manifest(
+            catalog_root, "keys_onset_fret", runtime_admission=True, **options
+        )
         written = write_catalog_task_manifest(output, manifest)
         record_count = manifest["summary"]["record_count"]
         task_view_id = _task_view_digest(manifest)

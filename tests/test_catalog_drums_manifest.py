@@ -106,6 +106,8 @@ def test_builds_portable_drums_task_view_with_lineage(tmp_path: Path) -> None:
     assert manifest["format"] == MANIFEST_FORMAT
     assert [song["audio_role"] for song in manifest["songs"]] == ["mix", "drums"]
     assert manifest["task"]["pipeline_id"] == "drums.onset-classifier"
+    assert "runtime_admission" not in manifest["task"]
+    assert "runtime_admission" not in manifest["summary"]
     assert manifest["catalog"]["content_sha256"]
     assert str(tmp_path) not in serialized
     assert "provenance" not in serialized
@@ -117,6 +119,18 @@ def test_builds_portable_drums_task_view_with_lineage(tmp_path: Path) -> None:
         "octave-src-bbbbbbbb",
     ]
     assert all("audio_sha256" in song["input_hashes"] for song in resolved)
+
+
+def test_drums_manifest_rejects_five_lane_runtime_admission_marker(tmp_path: Path) -> None:
+    _catalog(tmp_path, [_record(tmp_path, "octave-src-aaaaaaaa", roles=("drums",))])
+
+    with pytest.raises(TypeError, match="runtime_admission"):
+        build_drums_manifest(tmp_path, runtime_admission=True)  # type: ignore[call-arg]
+
+    manifest = build_drums_manifest(tmp_path)
+    manifest["task"]["runtime_admission"] = "strum-five-lane-runtime-admission/v1"
+    with pytest.raises(CatalogValidationError, match="manifest task is invalid"):
+        resolve_drums_manifest_songs(manifest, tmp_path)
 
 
 def test_rejects_catalog_changes_and_asset_tampering(tmp_path: Path) -> None:

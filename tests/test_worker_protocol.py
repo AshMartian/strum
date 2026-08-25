@@ -1137,12 +1137,14 @@ def test_catalog_inspect_and_prepare_emit_path_free_task_view(tmp_path: Path) ->
         "record_count": 1,
         "allowed_record_count": 1,
         "pipeline_id": "guitar.onset-fret/v1",
-        "eligible_count": 1,
+        "eligible_count": 0,
         "exclusion_reason_counts": {
             "training_use_not_allowed": 0,
             "instrument_not_present": 0,
             "required_difficulty_missing": 0,
             "audio_unavailable": 0,
+            "runtime_audio_unreadable": 1,
+            "exact_expert_label_missing": 0,
         },
         "audio_policy": {
             "kind": "preferred_with_fallback",
@@ -1150,7 +1152,7 @@ def test_catalog_inspect_and_prepare_emit_path_free_task_view(tmp_path: Path) ->
             "fallback_role": "mix",
             "required": True,
         },
-        "estimated_storage_bytes": 9,
+        "estimated_storage_bytes": 0,
         "storage_estimate_capped": False,
         "storage_estimate_semantics": (
             "sum of distinct catalog input assets selected by the declared policy; "
@@ -1175,7 +1177,7 @@ def test_catalog_inspect_and_prepare_emit_path_free_task_view(tmp_path: Path) ->
 
     assert result["status"] == "prepared"
     assert result["output_name"] == "guitar.json"
-    assert result["record_count"] == 1
+    assert result["record_count"] == 0
     assert str(tmp_path) not in output.read_text()
 
 
@@ -1216,12 +1218,14 @@ def test_catalog_inspect_is_pipeline_specific_and_path_free(tmp_path: Path) -> N
     )
 
     guitar = inspect_catalog(tmp_path, "guitar.onset-fret/v1")
-    assert guitar["eligible_count"] == 1
+    assert guitar["eligible_count"] == 0
     assert guitar["exclusion_reason_counts"] == {
         "training_use_not_allowed": 1,
         "instrument_not_present": 1,
         "required_difficulty_missing": 0,
         "audio_unavailable": 2,
+        "runtime_audio_unreadable": 1,
+        "exact_expert_label_missing": 0,
     }
     assert guitar["audio_policy"] == {
         "kind": "preferred_with_fallback",
@@ -1230,7 +1234,7 @@ def test_catalog_inspect_is_pipeline_specific_and_path_free(tmp_path: Path) -> N
         "required": True,
     }
     assert isinstance(guitar["estimated_storage_bytes"], int)
-    assert guitar["estimated_storage_bytes"] > 0
+    assert guitar["estimated_storage_bytes"] == 0
 
     drums = inspect_catalog(tmp_path, "drums.onset-classifier/v1")
     assert drums["eligible_count"] == 1

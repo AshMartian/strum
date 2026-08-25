@@ -19,6 +19,7 @@ from src.catalog_task_manifest import (
     deterministic_split,
     resolve_catalog_task_manifest_songs,
 )
+from src.five_lane_runtime_admission import classify_five_lane_runtime_source
 from src.song_source_catalog import CatalogValidationError
 from src.vocal_audio_compatibility import has_compatible_vocal_audio
 
@@ -130,6 +131,66 @@ def _catalog(root: Path, records: list[dict[str, object]]) -> None:
             }
         )
     )
+
+
+def _bass_midi_without_expert_notes() -> bytes:
+    midi = mido.MidiFile()
+    track = mido.MidiTrack()
+    midi.tracks.append(track)
+    track.append(mido.MetaMessage("track_name", name="PART BASS", time=0))
+    track.append(mido.Message("note_on", note=60, velocity=100, time=0))
+    track.append(mido.Message("note_off", note=60, velocity=0, time=480))
+    output = io.BytesIO()
+    midi.save(file=output)
+    return output.getvalue()
+
+
+def test_runtime_admission_keeps_prepare_preprocess_and_evaluation_inputs_in_parity(
+    tmp_path: Path,
+) -> None:
+    good = _record(tmp_path, "octave-src-aaaaaaaa")
+    good["audio"]["bass"] = _asset(tmp_path, _wav_bytes(), "bass.wav")
+    unreadable = _record(tmp_path, "octave-src-bbbbbbbb")
+    unreadable["audio"]["bass"] = _asset(tmp_path, b"not-audio", "bass.ogg")
+    missing_expert = _record(tmp_path, "octave-src-cccccccc")
+    missing_expert["audio"]["bass"] = _asset(tmp_path, _wav_bytes(), "bass.wav")
+    missing_expert["chart"]["notes_midi"] = _asset(
+        tmp_path, _bass_midi_without_expert_notes(), "notes.mid"
+    )
+    _catalog(tmp_path, [good, unreadable, missing_expert])
+
+    manifest = build_catalog_task_manifest(
+        tmp_path, "bass_onset_fret", runtime_admission=True
+    )
+
+    assert [song["source_id"] for song in manifest["songs"]] == ["octave-src-aaaaaaaa"]
+    assert manifest["summary"]["runtime_admission"] == {
+        "format": "strum-five-lane-runtime-admission/v1",
+        "exclusion_reason_counts": {
+            "runtime_audio_unreadable": 1,
+            "exact_expert_label_missing": 1,
+        },
+    }
+    resolved = resolve_catalog_task_manifest_songs(manifest, tmp_path)
+    assert len(resolved) == 1
+    source = resolved[0]
+    assert classify_five_lane_runtime_source(
+        Path(str(source["audio_path"])),
+        Path(str(source["midi_path"])),
+        label_track="PART BASS",
+    ) is None
+
+
+def test_runtime_admission_is_rejected_for_non_profile_task_views(tmp_path: Path) -> None:
+    with pytest.raises(CatalogValidationError, match="only supported"):
+        build_catalog_task_manifest(tmp_path, "vocals_activity", runtime_admission=True)
+
+    record = _record(tmp_path, "octave-src-aaaaaaaa")
+    _catalog(tmp_path, [record])
+    manifest = build_catalog_task_manifest(tmp_path, "vocals_activity")
+    manifest["task"]["runtime_admission"] = "strum-five-lane-runtime-admission/v1"
+    with pytest.raises(CatalogValidationError, match="runtime admission"):
+        resolve_catalog_task_manifest_songs(manifest, tmp_path)
 
 
 def test_vocal_audio_gate_rejects_decode_failure_after_open_and_initial_frames(

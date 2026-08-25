@@ -17,6 +17,11 @@ from src.song_source_catalog import (
     load_catalog,
     select_training_sources,
 )
+from src.five_lane_runtime_admission import (
+    RUNTIME_ADMISSION,
+    RUNTIME_ADMISSION_FORMAT,
+    classify_five_lane_runtime_source,
+)
 
 MANIFEST_FORMAT = "strum-guitar-catalog-manifest/v1"
 MANIFEST_VERSION = 1
@@ -52,6 +57,7 @@ def build_guitar_manifest(
     fallback_audio_role: str | None = "mix",
     required_difficulty: str = "expert",
     split_ratios: tuple[int, int, int] = DEFAULT_SPLIT_RATIOS,
+    runtime_admission: bool = False,
 ) -> dict[str, object]:
     """Create a path-free Guitar manifest from rights-approved catalog records."""
     catalog = load_catalog(catalog_root)
@@ -70,10 +76,18 @@ def build_guitar_manifest(
 
     records = {record.source_id: record for record in catalog.records}
     songs: list[dict[str, object]] = []
+    runtime_exclusions = {"runtime_audio_unreadable": 0, "exact_expert_label_missing": 0}
     for source_id in sorted(selected_roles):
         record = records[source_id]
         role = selected_roles[source_id]
         audio = record.audio[role]
+        if runtime_admission:
+            reason = classify_five_lane_runtime_source(
+                audio.path, record.notes_midi.path, label_track="PART GUITAR"
+            )
+            if reason is not None:
+                runtime_exclusions[reason] += 1
+                continue
         songs.append(
             {
                 "source_id": source_id,
@@ -96,9 +110,17 @@ def build_guitar_manifest(
             "audio_role": audio_role,
             "fallback_audio_role": fallback_audio_role,
             "split_ratios": list(split_ratios),
+            **({"runtime_admission": RUNTIME_ADMISSION} if runtime_admission else {}),
         },
         "songs": songs,
-        "summary": {"record_count": len(songs), "by_split": dict(sorted(counts.items()))},
+        "summary": {
+            "record_count": len(songs),
+            "by_split": dict(sorted(counts.items())),
+            **(
+                {"runtime_admission": {"format": RUNTIME_ADMISSION_FORMAT, "exclusion_reason_counts": runtime_exclusions}}
+                if runtime_admission else {}
+            ),
+        },
     }
 
 
@@ -144,6 +166,9 @@ def resolve_guitar_manifest_songs(
         or not all(isinstance(ratio, int) for ratio in raw_ratios)
     ):
         raise CatalogValidationError("manifest task settings are invalid")
+    runtime_admission = task.get("runtime_admission")
+    if runtime_admission is not None and runtime_admission != RUNTIME_ADMISSION:
+        raise CatalogValidationError("manifest runtime admission is invalid")
     split_ratios = tuple(raw_ratios)
     deterministic_split("octave-src-00000000", split_ratios)
     records = {record.source_id: record for record in catalog.records}
@@ -179,6 +204,10 @@ def resolve_guitar_manifest_songs(
             raw_song.get("audio"), record.audio[role], catalog
         ) or not _asset_matches(raw_song.get("notes_midi"), record.notes_midi, catalog):
             raise CatalogValidationError("manifest asset does not match the catalog")
+        if runtime_admission is not None and classify_five_lane_runtime_source(
+            record.audio[role].path, record.notes_midi.path, label_track="PART GUITAR"
+        ) is not None:
+            raise CatalogValidationError("manifest song no longer satisfies runtime admission")
         seen_source_ids.add(source_id)
         resolved.append(
             {

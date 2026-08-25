@@ -159,6 +159,7 @@ def resolve_drums_manifest_songs(
         or task.get("pipeline_id") != PIPELINE_ID
         or task.get("pipeline_version") != PIPELINE_VERSION
         or task.get("instrument") != "drums"
+        or task.get("runtime_admission") is not None
         or not isinstance(raw_songs, list)
     ):
         raise CatalogValidationError("manifest task is invalid")
