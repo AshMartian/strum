@@ -255,6 +255,40 @@ def test_section_task_views_exclude_malformed_midi_sources(tmp_path: Path, task_
 
 
 @pytest.mark.parametrize(
+    ("task_kind", "instrument", "case_variant"),
+    [
+        ("section_guitar", "guitar", "part guitar"),
+        ("section_bass", "bass", "Part Bass"),
+    ],
+)
+def test_section_prepare_requires_the_exact_canonical_label_track(
+    tmp_path: Path,
+    task_kind: str,
+    instrument: str,
+    case_variant: str,
+) -> None:
+    record = _record(tmp_path, "octave-src-aaaaaaaa")
+    record["chart"]["instruments"][instrument]["track_names"] = [case_variant]
+    _catalog(tmp_path, [record])
+
+    with pytest.raises(CatalogValidationError, match="no track"):
+        build_catalog_task_manifest(tmp_path, task_kind)
+
+
+def test_section_prefix_schema_views_must_be_reprepared(tmp_path: Path) -> None:
+    _catalog(tmp_path, [_record(tmp_path, "octave-src-aaaaaaaa")])
+    manifest = build_catalog_task_manifest(tmp_path, "section_guitar")
+    manifest["task"]["label_schema"] = {
+        "id": "midi-section-events/v1",
+        "track_prefixes": ["PART GUITAR"],
+        "difficulty_encoding": "not-applicable",
+    }
+
+    with pytest.raises(CatalogValidationError, match="retired prefix.*re-prepare"):
+        resolve_catalog_task_manifest_songs(manifest, tmp_path)
+
+
+@pytest.mark.parametrize(
     "task_kind",
     (
         "vocals",

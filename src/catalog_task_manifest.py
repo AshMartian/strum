@@ -139,6 +139,22 @@ TASK_INSTRUMENTS = {
     "section_bass": "bass",
 }
 
+# Section labels are derived from one canonical five-lane performance stream.
+# Prefix selection is unsafe here: an ``ALT`` or co-op arrangement would be a
+# second chart rather than another fragment of the same label source.
+SECTION_LABEL_TRACKS = {
+    "section_guitar": "PART GUITAR",
+    "section_bass": "PART BASS",
+}
+RETIRED_SECTION_PREFIX_LABEL_SCHEMAS = {
+    task_kind: {
+        "id": "midi-section-events/v1",
+        "track_prefixes": [label_track],
+        "difficulty_encoding": "not-applicable",
+    }
+    for task_kind, label_track in SECTION_LABEL_TRACKS.items()
+}
+
 # A catalog only establishes that an approved MIDI asset contains an
 # instrument.  A future trainer must also know which event language it is
 # allowed to derive from that asset.  Keep that declaration in the immutable
@@ -236,12 +252,12 @@ TASK_LABEL_SCHEMAS: dict[str, dict[str, object]] = {
     },
     "section_guitar": {
         "id": "midi-section-events/v1",
-        "track_prefixes": ["PART GUITAR"],
+        "track_names": [SECTION_LABEL_TRACKS["section_guitar"]],
         "difficulty_encoding": "not-applicable",
     },
     "section_bass": {
         "id": "midi-section-events/v1",
-        "track_prefixes": ["PART BASS"],
+        "track_names": [SECTION_LABEL_TRACKS["section_bass"]],
         "difficulty_encoding": "not-applicable",
     },
 }
@@ -287,6 +303,11 @@ def task_label_schema_is_supported(task_kind: str, value: object) -> bool:
     )
 
 
+def section_task_uses_retired_prefix_schema(task_kind: str, value: object) -> bool:
+    """Identify Section views that must be regenerated with exact tracks."""
+    return value == RETIRED_SECTION_PREFIX_LABEL_SCHEMAS.get(task_kind)
+
+
 def deterministic_split(
     source_id: str,
     ratios: tuple[int, int, int] = DEFAULT_SPLIT_RATIOS,
@@ -314,6 +335,14 @@ def deterministic_split(
 
 def available_task_kinds() -> tuple[str, ...]:
     return tuple(sorted(PIPELINE_IDS))
+
+
+def section_task_contract(pipeline_id: str) -> tuple[str, str, str] | None:
+    """Return the one exact label stream shared by Section prepare and train."""
+    for task_kind, label_track in SECTION_LABEL_TRACKS.items():
+        if PIPELINE_IDS[task_kind] == pipeline_id:
+            return task_kind, TASK_INSTRUMENTS[task_kind], label_track
+    return None
 
 
 def _has_section_label_source(record: object, instrument: str) -> bool:
@@ -445,7 +474,7 @@ def _label_tracks(task_kind: str, track_names: tuple[str, ...]) -> list[str]:
     exact_names = schema.get("track_names")
     if exact_names is not None:
         assert isinstance(exact_names, list)  # Static module contract.
-        selected = [track_name for track_name in track_names if track_name.upper() in exact_names]
+        selected = [track_name for track_name in track_names if track_name in exact_names]
     else:
         prefixes = schema["track_prefixes"]
         assert isinstance(prefixes, list)  # Static module contract.
@@ -635,6 +664,10 @@ def resolve_catalog_task_manifest_songs(
     )
     if task.get("preprocessing_sha256") != _canonical_json_hash(settings):
         raise CatalogValidationError("manifest preprocessing lineage is invalid")
+    if section_task_uses_retired_prefix_schema(task_kind, task.get("label_schema")):
+        raise CatalogValidationError(
+            "section task view uses a retired prefix label schema; re-prepare the task view"
+        )
     if not task_label_schema_is_supported(task_kind, task.get("label_schema")):
         raise CatalogValidationError("manifest label schema is invalid")
     ratios = tuple(raw_ratios)

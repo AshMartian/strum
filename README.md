@@ -1197,6 +1197,10 @@ python scripts/build_mapper_dataset.py \
 These task views make each family catalog-ready. Guitar/Bass section task views
 also feed a bounded worker experiment: STRUM derives six chart-pattern labels,
 materializes catalog-split log-mel windows, and trains `SectionClassifier/v1`.
+Their label source is exactly `PART GUITAR` or `PART BASS`; alternate/co-op and
+case-variant track names are not merged or normalized. Earlier Section views
+that used the retired prefix schema must be re-prepared before training or
+evaluation.
 The resulting `section_classifier.guitar` or `section_classifier.bass`
 component has no inference profile and is not an auto-chart model. Its worker
 feature extractor is explicitly `section-logmel-librosa-router-windows/v1`.

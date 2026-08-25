@@ -254,6 +254,8 @@ def _candidate(bundle_root: str | Path) -> tuple[ModelBundle, str, dict[str, Any
         set(config) != required
         or config.get("dataset_manifest") is not None
         or config.get("output_dir") is not None
+        or config.get("audio_manifest") is not None
+        or config.get("init_checkpoint") is not None
     ):
         raise ChartTransformPromotionError("transform candidate configuration is unsupported")
     _candidate_lineage(config)
@@ -370,6 +372,50 @@ def _verify_declared_lineage(
         )
 
 
+def _evaluation_config_from_portable_candidate(
+    portable: dict[str, Any],
+    *,
+    dataset_manifest: str | Path,
+    device: str,
+    audio_manifest: str | Path | None,
+) -> TrainingConfig:
+    """Rehydrate a candidate only for held-out evaluation.
+
+    Candidate configuration deliberately strips every local path before it is
+    packaged.  A fine-tune candidate therefore retains its immutable parent
+    provenance but has no ``init_checkpoint`` to load.  Evaluation never
+    initializes model weights from that parent: it verifies and loads the
+    candidate component below.  Treat that path-free evaluation config as
+    ``fresh`` only after requiring the fine-tune provenance that the worker
+    bound at training time.
+    """
+    values = dict(portable)
+    values.pop("instrument", None)
+    values.pop("lineage", None)
+    values.pop("decoder_calibration", None)
+    if values.get("checkpoint_mode") == "fine_tune":
+        if values.get("init_checkpoint") is not None or not isinstance(
+            values.get("parent_provenance"), dict
+        ):
+            raise ChartTransformPromotionError(
+                "fine-tune candidate lacks portable parent provenance"
+            )
+        values["checkpoint_mode"] = "fresh"
+    values.update(
+        {
+            "dataset_manifest": str(dataset_manifest),
+            "output_dir": "evaluation-local",
+            "device": device,
+        }
+    )
+    if audio_manifest is not None:
+        values["audio_manifest"] = str(audio_manifest)
+    try:
+        return TrainingConfig.from_mapping(values)
+    except DatasetValidationError as error:
+        raise ChartTransformPromotionError("held-out transform dataset is invalid") from error
+
+
 def evaluate_chart_transform_candidate(
     *,
     bundle_root: str | Path,
@@ -387,21 +433,14 @@ def evaluate_chart_transform_candidate(
     """
     bundle, component_id, portable = _candidate(bundle_root)
     lineage = _candidate_lineage(portable)
-    values = dict(portable)
-    values.pop("instrument", None)
-    values.pop("lineage", None)
-    calibration = values.pop("decoder_calibration", None)
-    values.update(
-        {
-            "dataset_manifest": str(dataset_manifest),
-            "output_dir": "evaluation-local",
-            "device": device,
-        }
-    )
-    if audio_manifest is not None:
-        values["audio_manifest"] = str(audio_manifest)
+    calibration = portable.get("decoder_calibration")
     try:
-        config = TrainingConfig.from_mapping(values)
+        config = _evaluation_config_from_portable_candidate(
+            portable,
+            dataset_manifest=dataset_manifest,
+            device=device,
+            audio_manifest=audio_manifest,
+        )
         pairs, manifest = load_dataset(config)
         assets, audio_manifest_sha256 = _load_audio_assets(config, pairs)
         pairs = [replace(pair, audio_path=assets.get(pair.song_id)) for pair in pairs]

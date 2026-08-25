@@ -28,7 +28,13 @@ from typing import Any
 import numpy as np
 
 from src import PROJECT_ROOT, __version__
-from src.catalog_task_manifest import MANIFEST_FORMAT, resolve_catalog_task_manifest_songs
+from src.catalog_task_manifest import (
+    MANIFEST_FORMAT,
+    TASK_LABEL_SCHEMAS,
+    resolve_catalog_task_manifest_songs,
+    section_task_contract,
+    section_task_uses_retired_prefix_schema,
+)
 from src.model_bundle import MANIFEST_FILENAME
 from src.section_frontend import ROUTER_FEATURE_EXTRACTOR
 from src.song_source_catalog import CatalogValidationError
@@ -51,12 +57,6 @@ RUNTIME_PROFILE_REQUIREMENTS = (
 # deliberately the same data object exported by the runtime frontend.
 SECTION_FEATURE_EXTRACTOR = ROUTER_FEATURE_EXTRACTOR
 _MODEL_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
-_TASKS = {
-    "strum.section-classifier/guitar/v1": ("section_guitar", "guitar", "PART GUITAR"),
-    "strum.section-classifier/bass/v1": ("section_bass", "bass", "PART BASS"),
-}
-
-
 class SectionTrainingError(ValueError):
     """Raised when a section training request cannot safely start or package."""
 
@@ -137,7 +137,7 @@ def _canonical_sha256(value: object) -> str:
 def _read_task_view(
     path: Path, catalog_root: Path, pipeline_id: str
 ) -> tuple[dict[str, Any], list[dict[str, object]], str, str]:
-    expected = _TASKS.get(pipeline_id)
+    expected = section_task_contract(pipeline_id)
     if expected is None:
         raise SectionTrainingError("unknown section-classifier pipeline")
     task_kind, instrument, label_track = expected
@@ -147,6 +147,10 @@ def _read_task_view(
         raise SectionTrainingError("section task view is unreadable or invalid") from error
     task = task_view.get("task") if isinstance(task_view, dict) else None
     label_schema = task.get("label_schema") if isinstance(task, dict) else None
+    if section_task_uses_retired_prefix_schema(task_kind, label_schema):
+        raise SectionTrainingError(
+            "section task view uses a retired prefix label schema; re-prepare the task view"
+        )
     if (
         not isinstance(task_view, dict)
         or task_view.get("format") != MANIFEST_FORMAT
@@ -154,10 +158,7 @@ def _read_task_view(
         or task.get("kind") != task_kind
         or task.get("pipeline_id") != pipeline_id
         or task.get("instrument") != instrument
-        or not isinstance(label_schema, dict)
-        or label_schema.get("id") != "midi-section-events/v1"
-        or label_schema.get("track_prefixes") != [label_track]
-        or label_schema.get("difficulty_encoding") != "not-applicable"
+        or label_schema != TASK_LABEL_SCHEMAS[task_kind]
     ):
         raise SectionTrainingError("section training requires its exact catalog task view")
     try:

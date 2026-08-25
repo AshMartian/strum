@@ -59,19 +59,24 @@ def _catalog(root: Path) -> None:
                 "chart": {
                     "notes_midi": _asset(
                         root,
-                        _five_lane_midi("PART GUITAR", "PART BASS"),
+                        _five_lane_midi(
+                            "PART GUITAR",
+                            "PART GUITAR ALT",
+                            "PART BASS",
+                            "PART BASS ALT",
+                        ),
                         f"notes-{index}.mid",
                     ),
                     "instruments": {
                         "guitar": {
                             "status": "present",
                             "difficulties": ["expert"],
-                            "track_names": ["PART GUITAR"],
+                            "track_names": ["PART GUITAR", "PART GUITAR ALT"],
                         },
                         "bass": {
                             "status": "present",
                             "difficulties": ["expert"],
-                            "track_names": ["PART BASS"],
+                            "track_names": ["PART BASS", "PART BASS ALT"],
                         },
                     },
                 },
@@ -194,6 +199,9 @@ def test_section_worker_packages_a_revalidated_catalog_experiment_without_profil
     prepare_dataset_request(prepare)
     prepared = json.loads(task_view.read_text())
     assert prepared["task"]["kind"] == task_kind
+    label_track = "PART GUITAR" if task_kind == "section_guitar" else "PART BASS"
+    assert prepared["task"]["label_schema"]["track_names"] == [label_track]
+    assert {tuple(song["label_tracks"]) for song in prepared["songs"]} == {(label_track,)}
     assert str(tmp_path) not in json.dumps(prepared)
 
     commands: list[list[str]] = []
@@ -263,9 +271,24 @@ def test_section_worker_rejects_wrong_task_or_label_schema(tmp_path: Path) -> No
         _read_task_view(path, tmp_path, "strum.section-classifier/guitar/v1")
 
     wrong = build_catalog_task_manifest(tmp_path, "section_guitar")
-    wrong["task"]["label_schema"]["track_prefixes"] = ["PART BASS"]
+    wrong["task"]["label_schema"]["track_names"] = ["PART BASS"]
     path.write_text(json.dumps(wrong))
     with pytest.raises(SectionTrainingError, match="exact catalog task view"):
+        _read_task_view(path, tmp_path, "strum.section-classifier/guitar/v1")
+
+
+def test_section_worker_requires_reprepare_for_retired_prefix_view(tmp_path: Path) -> None:
+    _catalog(tmp_path)
+    retired = build_catalog_task_manifest(tmp_path, "section_guitar")
+    retired["task"]["label_schema"] = {
+        "id": "midi-section-events/v1",
+        "track_prefixes": ["PART GUITAR"],
+        "difficulty_encoding": "not-applicable",
+    }
+    path = tmp_path / "retired.json"
+    path.write_text(json.dumps(retired))
+
+    with pytest.raises(SectionTrainingError, match="retired prefix.*re-prepare"):
         _read_task_view(path, tmp_path, "strum.section-classifier/guitar/v1")
 
 

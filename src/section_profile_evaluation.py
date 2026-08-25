@@ -20,7 +20,12 @@ from typing import Any
 import numpy as np
 
 from src import PROJECT_ROOT
-from src.catalog_task_manifest import MANIFEST_FORMAT
+from src.catalog_task_manifest import (
+    MANIFEST_FORMAT,
+    TASK_LABEL_SCHEMAS,
+    section_task_contract,
+    section_task_uses_retired_prefix_schema,
+)
 from src.inference.section_classifier_profile import (
     ARCHITECTURE,
     CAPABILITY,
@@ -66,18 +71,23 @@ def _require_task_view(task_view: dict[str, Any], instrument: str) -> None:
     task = task_view.get("task")
     if instrument not in {"guitar", "bass"}:
         raise SectionProfileEvaluationError("Section evaluation instrument is invalid")
+    contract = section_task_contract(f"strum.section-classifier/{instrument}/v1")
+    if contract is None:  # pragma: no cover - static catalog task contract.
+        raise SectionProfileEvaluationError("Section evaluation instrument is invalid")
+    task_kind, expected_instrument, _ = contract
+    if section_task_uses_retired_prefix_schema(
+        task_kind, task.get("label_schema") if isinstance(task, dict) else None
+    ):
+        raise SectionProfileEvaluationError(
+            "Section task view uses a retired prefix label schema; re-prepare the task view"
+        )
     if (
         task_view.get("format") != MANIFEST_FORMAT
         or not isinstance(task, dict)
-        or task.get("kind") != f"section_{instrument}"
+        or task.get("kind") != task_kind
         or task.get("pipeline_id") != f"strum.section-classifier/{instrument}/v1"
-        or task.get("instrument") != instrument
-        or task.get("label_schema")
-        != {
-            "id": "midi-section-events/v1",
-            "track_prefixes": [f"PART {instrument.upper()}"],
-            "difficulty_encoding": "not-applicable",
-        }
+        or task.get("instrument") != expected_instrument
+        or task.get("label_schema") != TASK_LABEL_SCHEMAS[task_kind]
     ):
         raise SectionProfileEvaluationError(
             "Section evaluation requires its exact catalog task view"

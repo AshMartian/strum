@@ -47,7 +47,7 @@ def _task_view(root: Path) -> Path:
                     "instrument": "guitar",
                     "label_schema": {
                         "id": "midi-section-events/v1",
-                        "track_prefixes": ["PART GUITAR"],
+                        "track_names": ["PART GUITAR"],
                         "difficulty_encoding": "not-applicable",
                     },
                 },

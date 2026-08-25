@@ -31,6 +31,7 @@ from src.chart_transform_calibration import (
 )
 from src.chart_transform_profile import (
     ChartTransformPromotionError,
+    _evaluation_config_from_portable_candidate,
     evaluate_chart_transform_candidate,
     package_chart_transform_profile,
 )
@@ -408,6 +409,79 @@ def test_transform_requires_held_out_evaluation_and_immutable_promotion(
     )
     with pytest.raises(BundleValidationError, match="evaluation evidence"):
         preflight_chart_request(request)
+
+
+def test_fine_tune_candidate_evaluation_rehydrates_portable_parent_provenance(
+    tmp_path: Path,
+) -> None:
+    """Promotion evaluates a fine-tune candidate without retaining a parent path."""
+    dataset = tmp_path / "dataset"
+    dataset.mkdir()
+    manifest = _catalog_task_dataset(dataset)
+    parent = tmp_path / "parent"
+    train(
+        TrainingConfig(
+            dataset_manifest=str(manifest),
+            output_dir=str(parent),
+            model_id="parent-transform",
+            source_difficulty="Expert",
+            target_difficulty="Hard",
+            hidden_dim=4,
+            epochs=1,
+            device="cpu",
+        )
+    )
+    parent_bundle = load_model_bundle(parent, check_files=True)
+    parent_component = parent_bundle.component("chart_transform.guitar.expert_to_hard")
+    assert parent_component is not None and parent_component.sha256 is not None
+    assert parent_bundle.manifest_path is not None
+    child = tmp_path / "fine-tuned"
+    train(
+        TrainingConfig(
+            dataset_manifest=str(manifest),
+            output_dir=str(child),
+            model_id="fine-tuned-transform",
+            source_difficulty="Expert",
+            target_difficulty="Hard",
+            hidden_dim=4,
+            epochs=1,
+            device="cpu",
+            init_checkpoint=str(parent / "weights" / "chart_transform.pt"),
+            checkpoint_mode="fine_tune",
+            parent_provenance={
+                "model_id": parent_bundle.model_id,
+                "manifest_sha256": hashlib.sha256(
+                    parent_bundle.manifest_path.read_bytes()
+                ).hexdigest(),
+                "component": "chart_transform.guitar.expert_to_hard",
+                "checkpoint_sha256": parent_component.sha256,
+            },
+        )
+    )
+    portable = json.loads((child / "configs" / "training-config.json").read_text())
+    assert portable["checkpoint_mode"] == "fine_tune"
+    assert portable["init_checkpoint"] is None
+    assert portable["parent_provenance"]["model_id"] == "parent-transform"
+    assert inspect_model_bundle(child)["deployment_status"] == "not_deployable"
+
+    report = tmp_path / "fine-tune-evaluation.json"
+    result = evaluate_chart_transform_candidate(
+        bundle_root=child,
+        dataset_manifest=manifest,
+        output_path=report,
+    )
+    assert result["split"] == "test"
+    assert result["model_id"] == "fine-tuned-transform"
+
+    forged = dict(portable)
+    forged["parent_provenance"] = None
+    with pytest.raises(ChartTransformPromotionError, match="portable parent provenance"):
+        _evaluation_config_from_portable_candidate(
+            forged,
+            dataset_manifest=manifest,
+            device="cpu",
+            audio_manifest=None,
+        )
 
 
 def test_calibration_tiebreak_is_strum_owned_and_deterministic() -> None:
