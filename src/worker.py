@@ -30,7 +30,13 @@ from typing import Any
 from src import PROJECT_ROOT, __version__
 from src.catalog_chart_pairs import CatalogChartPairOptions, prepare_catalog_chart_pairs
 from src.catalog_drums_manifest import build_drums_manifest, write_drums_manifest
-from src.catalog_guitar_manifest import build_guitar_manifest, write_guitar_manifest
+from src.catalog_guitar_manifest import (
+    build_guitar_manifest,
+    write_guitar_manifest,
+)
+from src.catalog_guitar_manifest import (
+    deterministic_split as guitar_deterministic_split,
+)
 from src.catalog_task_manifest import (
     DEFAULT_AUDIO_ROLES as CATALOG_TASK_DEFAULT_AUDIO_ROLES,
 )
@@ -49,11 +55,22 @@ from src.catalog_task_manifest import (
     select_compatible_vocal_audio_role,
     write_catalog_task_manifest,
 )
+from src.catalog_task_manifest import (
+    deterministic_split as catalog_task_deterministic_split,
+)
 from src.chart_transform_calibration import (
     calibration_policy_evidence,
     checkpoint_selection_policy_evidence,
 )
 from src.chart_transform_quality_policy import quality_policy_evidence
+from src.five_lane_runtime_admission import (
+    PROFILE_GRADE_ADMISSION,
+    PROFILE_GRADE_ADMISSION_FORMAT,
+    PROFILE_GRADE_MINIMUM_SOURCES_BY_SPLIT,
+    classify_five_lane_runtime_source,
+    profile_grade_admission_is_met,
+    validate_profile_grade_audio_selection,
+)
 from src.model_bundle import (
     MANIFEST_FILENAME,
     BundleValidationError,
@@ -88,7 +105,6 @@ from src.song_source_catalog import (
     select_training_sources,
 )
 from src.source_provenance import source_revision_identity
-from src.five_lane_runtime_admission import classify_five_lane_runtime_source
 from src.vocal_harmony_catalog import (
     build_vocal_harmony_source_task,
     inspect_vocal_harmony_source_catalog,
@@ -257,6 +273,14 @@ CATALOG_AUDIO_OPTIONS = {
     "audio_role": {"type": "string"},
     "fallback_audio_role": {"type": ["string", "null"]},
     "required_difficulty": {"type": "string", "default": "expert"},
+}
+FIVE_LANE_PROFILE_AUDIO_OPTIONS = {
+    **CATALOG_AUDIO_OPTIONS,
+    "profile_grade": {
+        "type": "boolean",
+        "default": False,
+        "description": "Require dedicated audio, runtime admission, and source-disjoint coverage.",
+    },
 }
 CHART_TRANSFORM_PREPARE_SCHEMA = _object_schema(
     {
@@ -1303,8 +1327,9 @@ PIPELINES = (
             "difficulties": ["expert"],
             "audio_roles": ["guitar", "mix"],
             "audio_policy": "prefer:guitar,fallback:mix",
+            "profile_grade_admission": PROFILE_GRADE_ADMISSION,
         },
-        prepare_schema=_object_schema(CATALOG_AUDIO_OPTIONS),
+        prepare_schema=_object_schema(FIVE_LANE_PROFILE_AUDIO_OPTIONS),
         train_schema=GUITAR_TRAIN_SCHEMA,
         checkpoint_outputs=("guitar.onset", "guitar.fret"),
         inference_capability="guitar.neural-v1-expert/v1",
@@ -1316,6 +1341,7 @@ PIPELINES = (
             "audio_role",
             "fallback_audio_role",
             "required_difficulty",
+            "profile_grade",
         ),
         training_requirements=("profile_evaluation", "profile_packaging"),
         promotion_jobs=_profile_promotion_jobs("guitar"),
@@ -1332,8 +1358,9 @@ PIPELINES = (
             "audio_policy": "prefer:bass,fallback:mix",
             "label_schema": CATALOG_TASK_LABEL_SCHEMAS["bass_onset_fret"]["id"],
             "label_tracks": CATALOG_TASK_LABEL_SCHEMAS["bass_onset_fret"]["track_names"],
+            "profile_grade_admission": PROFILE_GRADE_ADMISSION,
         },
-        prepare_schema=_object_schema(CATALOG_AUDIO_OPTIONS),
+        prepare_schema=_object_schema(FIVE_LANE_PROFILE_AUDIO_OPTIONS),
         train_schema=BASS_TRAIN_SCHEMA,
         checkpoint_outputs=("bass.onset", "bass.fret"),
         # Raw experiments still require a held-out Bass evaluation and an
@@ -1348,6 +1375,7 @@ PIPELINES = (
             "audio_role",
             "fallback_audio_role",
             "required_difficulty",
+            "profile_grade",
         ),
         training_requirements=("bass_profile_evaluation", "bass_profile_packaging"),
         promotion_jobs=_profile_promotion_jobs("bass"),
@@ -1364,8 +1392,9 @@ PIPELINES = (
             "audio_policy": "prefer:keys,fallback:mix",
             "label_schema": CATALOG_TASK_LABEL_SCHEMAS["keys_onset_fret"]["id"],
             "label_tracks": CATALOG_TASK_LABEL_SCHEMAS["keys_onset_fret"]["track_names"],
+            "profile_grade_admission": PROFILE_GRADE_ADMISSION,
         },
-        prepare_schema=_object_schema(CATALOG_AUDIO_OPTIONS),
+        prepare_schema=_object_schema(FIVE_LANE_PROFILE_AUDIO_OPTIONS),
         train_schema=KEYS_TRAIN_SCHEMA,
         checkpoint_outputs=("keys.onset", "keys.fret"),
         # This names only an evaluated, immutable Keys profile.  It does not
@@ -1379,6 +1408,7 @@ PIPELINES = (
             "audio_role",
             "fallback_audio_role",
             "required_difficulty",
+            "profile_grade",
         ),
         training_requirements=("keys_profile_evaluation", "keys_profile_packaging"),
         promotion_jobs=_profile_promotion_jobs("keys"),
@@ -3516,14 +3546,28 @@ def _audio_task_inspection(
     required_difficulty: str,
     require_lead_vocal_compatibility: bool = False,
     runtime_admission_label_track: str | None = None,
+    profile_grade: bool = False,
+    profile_splitter: Callable[[str], str] | None = None,
 ) -> dict[str, object]:
     """Inspect the same selection and compatibility gates as task preparation."""
-    exclusions = _empty_exclusions(
+    exclusion_codes = [
         "training_use_not_allowed",
         "instrument_not_present",
         "required_difficulty_missing",
-        "audio_unavailable",
-    )
+        "dedicated_audio_unavailable" if profile_grade else "audio_unavailable",
+    ]
+    exclusions = _empty_exclusions(*exclusion_codes)
+    if profile_grade:
+        if profile_splitter is None:
+            raise WorkerRequestError("profile-grade inspection split assignment is unavailable")
+        try:
+            validate_profile_grade_audio_selection(
+                instrument=instrument,
+                audio_role=preferred_role,
+                fallback_audio_role=fallback_role,
+            )
+        except ValueError as error:
+            raise WorkerRequestError(str(error)) from error
     if require_lead_vocal_compatibility:
         exclusions.update(
             _empty_exclusions(
@@ -3532,7 +3576,9 @@ def _audio_task_inspection(
             )
         )
     if runtime_admission_label_track is not None:
-        exclusions.update(_empty_exclusions("runtime_audio_unreadable", "exact_expert_label_missing"))
+        exclusions.update(
+            _empty_exclusions("runtime_audio_unreadable", "exact_expert_label_missing")
+        )
     if require_lead_vocal_compatibility:
         assets: list[CatalogAsset] = []
         eligible_count = 0
@@ -3591,6 +3637,7 @@ def _audio_task_inspection(
 
     assets: list[CatalogAsset] = []
     eligible_count = 0
+    profile_source_ids: list[str] = []
     for record in catalog.records:
         if record.training_use != TRAINING_ALLOWED:
             exclusions["training_use_not_allowed"] += 1
@@ -3604,7 +3651,7 @@ def _audio_task_inspection(
             continue
         role = selected_roles.get(record.source_id)
         if role is None:
-            exclusions["audio_unavailable"] += 1
+            exclusions["dedicated_audio_unavailable" if profile_grade else "audio_unavailable"] += 1
             continue
         if runtime_admission_label_track is not None:
             reason = classify_five_lane_runtime_source(
@@ -3617,13 +3664,15 @@ def _audio_task_inspection(
                 continue
         assets.extend((record.notes_midi, record.audio[role]))
         eligible_count += 1
+        if profile_grade:
+            profile_source_ids.append(record.source_id)
 
     estimated_storage_bytes, storage_estimate_capped = _bounded_asset_bytes(assets)
-    return {
+    result: dict[str, object] = {
         "eligible_count": eligible_count,
         "exclusion_reason_counts": exclusions,
         "audio_policy": {
-            "kind": "preferred_with_fallback",
+            "kind": "exact_dedicated_role" if profile_grade else "preferred_with_fallback",
             "preferred_role": preferred_role,
             "fallback_role": fallback_role,
             "required": True,
@@ -3632,6 +3681,20 @@ def _audio_task_inspection(
         "storage_estimate_capped": storage_estimate_capped,
         "storage_estimate_semantics": CATALOG_STORAGE_ESTIMATE_SEMANTICS,
     }
+    if profile_grade:
+        assert profile_splitter is not None
+        by_split = {
+            split: sum(profile_splitter(source_id) == split for source_id in profile_source_ids)
+            for split in ("train", "val", "test")
+        }
+        result["profile_grade_admission"] = {
+            "format": PROFILE_GRADE_ADMISSION_FORMAT,
+            "audio_selection": PROFILE_GRADE_ADMISSION["audio_selection"],
+            "source_disjoint_minimums": dict(PROFILE_GRADE_MINIMUM_SOURCES_BY_SPLIT),
+            "by_split": by_split,
+            "meets_minimums": profile_grade_admission_is_met(by_split),
+        }
+    return result
 
 
 def _chart_transform_inspection(
@@ -3762,40 +3825,77 @@ def _inspect_pipeline_catalog(
         result["storage_estimate_semantics"] = CATALOG_STORAGE_ESTIMATE_SEMANTICS
         return result
     if pipeline_id == "guitar.onset-fret/v1":
-        permitted = {"audio_role", "fallback_audio_role", "required_difficulty"}
+        permitted = {"audio_role", "fallback_audio_role", "required_difficulty", "profile_grade"}
         if set(options) - permitted:
             raise WorkerRequestError("unsupported Guitar catalog inspection option")
+        profile_grade = options.get("profile_grade", False)
+        if not isinstance(profile_grade, bool):
+            raise WorkerRequestError("Guitar profile_grade must be a boolean")
+        if profile_grade and options.get("fallback_audio_role") is not None:
+            raise WorkerRequestError("Guitar profile_grade does not permit a fallback audio role")
         return _audio_task_inspection(
             catalog,
             instrument="guitar",
             preferred_role=options.get("audio_role", "guitar"),
-            fallback_role=options.get("fallback_audio_role", "mix"),
+            fallback_role=(
+                options.get("fallback_audio_role")
+                if profile_grade
+                else options.get("fallback_audio_role", "mix")
+            ),
             required_difficulty=options.get("required_difficulty", "expert"),
             runtime_admission_label_track="PART GUITAR",
+            profile_grade=profile_grade,
+            profile_splitter=guitar_deterministic_split,
         )
     if pipeline_id == "bass.onset-fret/v1":
-        permitted = {"audio_role", "fallback_audio_role", "required_difficulty"}
+        permitted = {"audio_role", "fallback_audio_role", "required_difficulty", "profile_grade"}
         if set(options) - permitted:
             raise WorkerRequestError("unsupported Bass catalog inspection option")
+        profile_grade = options.get("profile_grade", False)
+        if not isinstance(profile_grade, bool):
+            raise WorkerRequestError("Bass profile_grade must be a boolean")
+        if profile_grade and options.get("fallback_audio_role") is not None:
+            raise WorkerRequestError("Bass profile_grade does not permit a fallback audio role")
         return _audio_task_inspection(
             catalog,
             instrument="bass",
             preferred_role=options.get("audio_role", "bass"),
-            fallback_role=options.get("fallback_audio_role", "mix"),
+            fallback_role=(
+                options.get("fallback_audio_role")
+                if profile_grade
+                else options.get("fallback_audio_role", "mix")
+            ),
             required_difficulty=options.get("required_difficulty", "expert"),
             runtime_admission_label_track="PART BASS",
+            profile_grade=profile_grade,
+            profile_splitter=lambda source_id: catalog_task_deterministic_split(
+                source_id, seed="catalog-source-id/v1"
+            ),
         )
     if pipeline_id == "keys.onset-fret/v1":
-        permitted = {"audio_role", "fallback_audio_role", "required_difficulty"}
+        permitted = {"audio_role", "fallback_audio_role", "required_difficulty", "profile_grade"}
         if set(options) - permitted:
             raise WorkerRequestError("unsupported Keys catalog inspection option")
+        profile_grade = options.get("profile_grade", False)
+        if not isinstance(profile_grade, bool):
+            raise WorkerRequestError("Keys profile_grade must be a boolean")
+        if profile_grade and options.get("fallback_audio_role") is not None:
+            raise WorkerRequestError("Keys profile_grade does not permit a fallback audio role")
         return _audio_task_inspection(
             catalog,
             instrument="keys",
             preferred_role=options.get("audio_role", "keys"),
-            fallback_role=options.get("fallback_audio_role", "mix"),
+            fallback_role=(
+                options.get("fallback_audio_role")
+                if profile_grade
+                else options.get("fallback_audio_role", "mix")
+            ),
             required_difficulty=options.get("required_difficulty", "expert"),
             runtime_admission_label_track="PART KEYS",
+            profile_grade=profile_grade,
+            profile_splitter=lambda source_id: catalog_task_deterministic_split(
+                source_id, seed="catalog-source-id/v1"
+            ),
         )
     if pipeline_id in {
         "vocals.note-activity/v1",
@@ -3987,10 +4087,25 @@ def prepare_dataset_request(request_path: Path) -> dict[str, object]:
         request["options"],
     )
     if pipeline_id == "guitar.onset-fret/v1":
-        permitted = {"audio_role", "fallback_audio_role", "required_difficulty"}
+        permitted = {"audio_role", "fallback_audio_role", "required_difficulty", "profile_grade"}
         if set(options) - permitted:
             raise WorkerRequestError("unsupported Guitar preparation option")
-        manifest = build_guitar_manifest(catalog_root, runtime_admission=True, **options)
+        profile_grade = options.get("profile_grade", False)
+        if not isinstance(profile_grade, bool):
+            raise WorkerRequestError("Guitar profile_grade must be a boolean")
+        if profile_grade and options.get("fallback_audio_role") is not None:
+            raise WorkerRequestError("Guitar profile_grade does not permit a fallback audio role")
+        manifest_options = dict(options)
+        manifest_options.pop("profile_grade", None)
+        if profile_grade:
+            manifest_options.setdefault("audio_role", "guitar")
+            manifest_options.setdefault("fallback_audio_role", None)
+        manifest = build_guitar_manifest(
+            catalog_root,
+            runtime_admission=True,
+            profile_grade=profile_grade,
+            **manifest_options,
+        )
         written = write_guitar_manifest(output, manifest)
         record_count = manifest["summary"]["record_count"]
         task_view_id = _task_view_digest(manifest)
@@ -4025,21 +4140,49 @@ def prepare_dataset_request(request_path: Path) -> dict[str, object]:
         assert isinstance(record_count, int)
         task_view_id = _task_view_digest(manifest)
     elif pipeline_id == "bass.onset-fret/v1":
-        permitted = {"audio_role", "fallback_audio_role", "required_difficulty"}
+        permitted = {"audio_role", "fallback_audio_role", "required_difficulty", "profile_grade"}
         if set(options) - permitted:
             raise WorkerRequestError("unsupported Bass preparation option")
+        profile_grade = options.get("profile_grade", False)
+        if not isinstance(profile_grade, bool):
+            raise WorkerRequestError("Bass profile_grade must be a boolean")
+        if profile_grade and options.get("fallback_audio_role") is not None:
+            raise WorkerRequestError("Bass profile_grade does not permit a fallback audio role")
+        manifest_options = dict(options)
+        manifest_options.pop("profile_grade", None)
+        if profile_grade:
+            manifest_options.setdefault("audio_role", "bass")
+            manifest_options["disable_fallback"] = True
         manifest = build_catalog_task_manifest(
-            catalog_root, "bass_onset_fret", runtime_admission=True, **options
+            catalog_root,
+            "bass_onset_fret",
+            runtime_admission=True,
+            profile_grade=profile_grade,
+            **manifest_options,
         )
         written = write_catalog_task_manifest(output, manifest)
         record_count = manifest["summary"]["record_count"]
         task_view_id = _task_view_digest(manifest)
     elif pipeline_id == "keys.onset-fret/v1":
-        permitted = {"audio_role", "fallback_audio_role", "required_difficulty"}
+        permitted = {"audio_role", "fallback_audio_role", "required_difficulty", "profile_grade"}
         if set(options) - permitted:
             raise WorkerRequestError("unsupported Keys preparation option")
+        profile_grade = options.get("profile_grade", False)
+        if not isinstance(profile_grade, bool):
+            raise WorkerRequestError("Keys profile_grade must be a boolean")
+        if profile_grade and options.get("fallback_audio_role") is not None:
+            raise WorkerRequestError("Keys profile_grade does not permit a fallback audio role")
+        manifest_options = dict(options)
+        manifest_options.pop("profile_grade", None)
+        if profile_grade:
+            manifest_options.setdefault("audio_role", "keys")
+            manifest_options["disable_fallback"] = True
         manifest = build_catalog_task_manifest(
-            catalog_root, "keys_onset_fret", runtime_admission=True, **options
+            catalog_root,
+            "keys_onset_fret",
+            runtime_admission=True,
+            profile_grade=profile_grade,
+            **manifest_options,
         )
         written = write_catalog_task_manifest(output, manifest)
         record_count = manifest["summary"]["record_count"]

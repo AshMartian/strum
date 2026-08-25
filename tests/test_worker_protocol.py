@@ -369,6 +369,7 @@ def test_pipeline_descriptors_advertise_safe_host_orchestration_requirements() -
         "audio_role",
         "fallback_audio_role",
         "required_difficulty",
+        "profile_grade",
     )
     rendered = guitar.as_json()
     assert rendered["private_request_fields"] == ["catalog_root"]
@@ -376,13 +377,25 @@ def test_pipeline_descriptors_advertise_safe_host_orchestration_requirements() -
         "audio_role",
         "fallback_audio_role",
         "required_difficulty",
+        "profile_grade",
     ]
-    for pipeline_id in (
-        "bass.onset-fret/v1",
-        "keys.onset-fret/v1",
-        "vocals.note-activity/v1",
-        "drums.onset-classifier/v1",
-    ):
+    assert rendered["catalog_requirements"]["profile_grade_admission"] == {
+        "format": "strum-five-lane-profile-audibility-admission/v1",
+        "audio_selection": "exact_dedicated_instrument_role",
+        "source_disjoint_minimums": {"train": 20, "val": 5, "test": 5},
+        "runtime_admission": "strum-five-lane-runtime-admission/v1",
+    }
+    assert "profile_grade" in guitar.prepare_schema["properties"]
+    for pipeline_id in ("bass.onset-fret/v1", "keys.onset-fret/v1"):
+        descriptor = next(item for item in PIPELINES if item.id == pipeline_id)
+        assert descriptor.private_request_fields == ("catalog_root",)
+        assert descriptor.catalog_inspection_option_keys == (
+            "audio_role",
+            "fallback_audio_role",
+            "required_difficulty",
+            "profile_grade",
+        )
+    for pipeline_id in ("vocals.note-activity/v1", "drums.onset-classifier/v1"):
         descriptor = next(item for item in PIPELINES if item.id == pipeline_id)
         assert descriptor.private_request_fields == ("catalog_root",)
         assert descriptor.catalog_inspection_option_keys == (
@@ -390,6 +403,7 @@ def test_pipeline_descriptors_advertise_safe_host_orchestration_requirements() -
             "fallback_audio_role",
             "required_difficulty",
         )
+        assert "profile_grade" not in descriptor.prepare_schema["properties"]
     assert next(
         item for item in PIPELINES if item.id == "bass.onset-fret/v1"
     ).training_requirements == (

@@ -19,7 +19,10 @@ from src.catalog_task_manifest import (
     deterministic_split,
     resolve_catalog_task_manifest_songs,
 )
-from src.five_lane_runtime_admission import classify_five_lane_runtime_source
+from src.five_lane_runtime_admission import (
+    PROFILE_GRADE_MINIMUM_SOURCES_BY_SPLIT,
+    classify_five_lane_runtime_source,
+)
 from src.song_source_catalog import CatalogValidationError
 from src.vocal_audio_compatibility import has_compatible_vocal_audio
 
@@ -159,9 +162,7 @@ def test_runtime_admission_keeps_prepare_preprocess_and_evaluation_inputs_in_par
     )
     _catalog(tmp_path, [good, unreadable, missing_expert])
 
-    manifest = build_catalog_task_manifest(
-        tmp_path, "bass_onset_fret", runtime_admission=True
-    )
+    manifest = build_catalog_task_manifest(tmp_path, "bass_onset_fret", runtime_admission=True)
 
     assert [song["source_id"] for song in manifest["songs"]] == ["octave-src-aaaaaaaa"]
     assert manifest["summary"]["runtime_admission"] == {
@@ -174,11 +175,14 @@ def test_runtime_admission_keeps_prepare_preprocess_and_evaluation_inputs_in_par
     resolved = resolve_catalog_task_manifest_songs(manifest, tmp_path)
     assert len(resolved) == 1
     source = resolved[0]
-    assert classify_five_lane_runtime_source(
-        Path(str(source["audio_path"])),
-        Path(str(source["midi_path"])),
-        label_track="PART BASS",
-    ) is None
+    assert (
+        classify_five_lane_runtime_source(
+            Path(str(source["audio_path"])),
+            Path(str(source["midi_path"])),
+            label_track="PART BASS",
+        )
+        is None
+    )
 
 
 def test_runtime_admission_is_rejected_for_non_profile_task_views(tmp_path: Path) -> None:
@@ -191,6 +195,54 @@ def test_runtime_admission_is_rejected_for_non_profile_task_views(tmp_path: Path
     manifest["task"]["runtime_admission"] = "strum-five-lane-runtime-admission/v1"
     with pytest.raises(CatalogValidationError, match="runtime admission"):
         resolve_catalog_task_manifest_songs(manifest, tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("task_kind", "instrument"),
+    (("bass_onset_fret", "bass"), ("keys_onset_fret", "keys")),
+)
+def test_profile_grade_task_views_bind_dedicated_audio_and_reject_forgery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    task_kind: str,
+    instrument: str,
+) -> None:
+    monkeypatch.setitem(PROFILE_GRADE_MINIMUM_SOURCES_BY_SPLIT, "train", 1)
+    monkeypatch.setitem(PROFILE_GRADE_MINIMUM_SOURCES_BY_SPLIT, "val", 1)
+    monkeypatch.setitem(PROFILE_GRADE_MINIMUM_SOURCES_BY_SPLIT, "test", 1)
+    monkeypatch.setattr(
+        "src.catalog_task_manifest.classify_five_lane_runtime_source",
+        lambda *_args, **_kwargs: None,
+    )
+    found: dict[str, str] = {}
+    for index in range(10_000):
+        source_id = f"octave-src-profile-{instrument}-{index:08d}"
+        found.setdefault(deterministic_split(source_id, seed="catalog-source-id/v1"), source_id)
+        if len(found) == 3:
+            break
+    _catalog(tmp_path, [_record(tmp_path, found[split]) for split in ("train", "val", "test")])
+
+    manifest = build_catalog_task_manifest(
+        tmp_path,
+        task_kind,
+        disable_fallback=True,
+        profile_grade=True,
+    )
+
+    assert manifest["task"]["audio_role"] == instrument
+    assert manifest["task"]["fallback_audio_role"] is None
+    assert all(song["audio_role"] == instrument for song in manifest["songs"])
+    assert manifest["summary"]["profile_grade_admission"]["meets_minimums"] is True
+    assert str(tmp_path) not in json.dumps(manifest)
+
+    manifest["task"]["fallback_audio_role"] = "mix"
+    with pytest.raises(CatalogValidationError, match="profile-grade admission"):
+        resolve_catalog_task_manifest_songs(manifest, tmp_path)
+
+
+def test_profile_grade_is_unavailable_to_non_five_lane_catalog_tasks(tmp_path: Path) -> None:
+    with pytest.raises(CatalogValidationError, match="only supported"):
+        build_catalog_task_manifest(tmp_path, "vocals_activity", profile_grade=True)
 
 
 def test_vocal_audio_gate_rejects_decode_failure_after_open_and_initial_frames(

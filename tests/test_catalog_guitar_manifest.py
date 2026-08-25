@@ -10,6 +10,7 @@ from src.catalog_guitar_manifest import (
     resolve_guitar_manifest_songs,
     write_guitar_manifest,
 )
+from src.five_lane_runtime_admission import PROFILE_GRADE_MINIMUM_SOURCES_BY_SPLIT
 from src.song_source_catalog import CatalogValidationError
 
 
@@ -130,3 +131,69 @@ def test_split_assignments_are_deterministic(tmp_path: Path) -> None:
         build_guitar_manifest(tmp_path)["songs"][0]["split"]
         == build_guitar_manifest(tmp_path)["songs"][0]["split"]
     )
+
+
+def _source_ids_for_guitar_splits() -> list[str]:
+    from src.catalog_guitar_manifest import deterministic_split
+
+    found: dict[str, str] = {}
+    for index in range(10_000):
+        source_id = f"octave-src-profile-{index:08d}"
+        found.setdefault(deterministic_split(source_id), source_id)
+        if len(found) == 3:
+            return [found[split] for split in ("train", "val", "test")]
+    raise AssertionError("could not allocate deterministic profile split fixtures")
+
+
+def test_profile_grade_requires_dedicated_audio_and_revalidates_immutable_view(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Keep this contract test small; production minima remain 20/5/5 and are
+    # published independently by the shared admission contract.
+    monkeypatch.setitem(PROFILE_GRADE_MINIMUM_SOURCES_BY_SPLIT, "train", 1)
+    monkeypatch.setitem(PROFILE_GRADE_MINIMUM_SOURCES_BY_SPLIT, "val", 1)
+    monkeypatch.setitem(PROFILE_GRADE_MINIMUM_SOURCES_BY_SPLIT, "test", 1)
+    monkeypatch.setattr(
+        "src.catalog_guitar_manifest.classify_five_lane_runtime_source",
+        lambda *_args, **_kwargs: None,
+    )
+    source_ids = _source_ids_for_guitar_splits()
+    records = [_record(tmp_path, source_id, roles=("guitar", "mix")) for source_id in source_ids]
+    records.append(_record(tmp_path, "octave-src-mix-only", roles=("mix",)))
+    _catalog(tmp_path, records)
+
+    manifest = build_guitar_manifest(tmp_path, fallback_audio_role=None, profile_grade=True)
+
+    assert all(song["audio_role"] == "guitar" for song in manifest["songs"])
+    assert manifest["summary"]["profile_grade_admission"]["by_split"] == {
+        "train": 1,
+        "val": 1,
+        "test": 1,
+    }
+    assert manifest["summary"]["profile_grade_admission"]["exclusion_reason_counts"] == {
+        "dedicated_audio_unavailable": 1,
+        "runtime_audio_unreadable": 0,
+        "exact_expert_label_missing": 0,
+    }
+    assert manifest["task"]["fallback_audio_role"] is None
+    assert str(tmp_path) not in json.dumps(manifest)
+    assert "provenance" not in json.dumps(manifest)
+
+    manifest["songs"][0]["audio_role"] = "mix"
+    with pytest.raises(CatalogValidationError, match="guitar coverage"):
+        resolve_guitar_manifest_songs(manifest, tmp_path)
+
+    fresh_manifest = build_guitar_manifest(tmp_path, fallback_audio_role=None, profile_grade=True)
+    records[0]["audio"].pop("guitar")
+    _catalog(tmp_path, records)
+    with pytest.raises(CatalogValidationError, match="approved catalog input"):
+        resolve_guitar_manifest_songs(fresh_manifest, tmp_path)
+
+
+def test_profile_grade_rejects_mix_fallback_and_insufficient_coverage(tmp_path: Path) -> None:
+    _catalog(tmp_path, [_record(tmp_path, "octave-src-aaaaaaaa", roles=("guitar", "mix"))])
+
+    with pytest.raises(CatalogValidationError, match="dedicated instrument"):
+        build_guitar_manifest(tmp_path, profile_grade=True)
+    with pytest.raises(CatalogValidationError, match="split minimums"):
+        build_guitar_manifest(tmp_path, fallback_audio_role=None, profile_grade=True)

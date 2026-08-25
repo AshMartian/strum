@@ -18,6 +18,16 @@ from typing import Any
 
 import mido
 
+from src.five_lane_runtime_admission import (
+    PROFILE_GRADE_ADMISSION,
+    PROFILE_GRADE_ADMISSION_FORMAT,
+    PROFILE_GRADE_MINIMUM_SOURCES_BY_SPLIT,
+    RUNTIME_ADMISSION,
+    RUNTIME_ADMISSION_FORMAT,
+    classify_five_lane_runtime_source,
+    profile_grade_admission_is_met,
+    validate_profile_grade_audio_selection,
+)
 from src.preprocessing.parsers.guitar_parser import GuitarParser
 from src.song_source_catalog import (
     AUDIO_ROLES,
@@ -28,11 +38,6 @@ from src.song_source_catalog import (
     SongSourceCatalog,
     load_catalog,
     select_training_sources,
-)
-from src.five_lane_runtime_admission import (
-    RUNTIME_ADMISSION,
-    RUNTIME_ADMISSION_FORMAT,
-    classify_five_lane_runtime_source,
 )
 from src.vocal_audio_compatibility import (
     VOCAL_AUDIO_COMPATIBILITY,
@@ -54,6 +59,7 @@ DEFAULT_SPLIT_RATIOS = (80, 10, 10)
 # unrelated catalog task families: a resolver must treat such a view as
 # malformed rather than silently accepting an unenforced declaration.
 RUNTIME_ADMISSION_TASK_KINDS = frozenset({"bass_onset_fret", "keys_onset_fret"})
+PROFILE_GRADE_ADMISSION_TASK_KINDS = RUNTIME_ADMISSION_TASK_KINDS
 
 # OCTAVE catalog coverage is intentionally a lightweight import-time summary.
 # Lead-Vocal training derives four distinct targets from one exact MIDI track,
@@ -512,6 +518,7 @@ def build_catalog_task_manifest(
     split_seed: str = "catalog-source-id/v1",
     preprocessing: Mapping[str, object] | None = None,
     runtime_admission: bool = False,
+    profile_grade: bool = False,
 ) -> dict[str, object]:
     """Create an immutable, path-free STRUM task view for one pipeline family."""
     if task_kind not in PIPELINE_IDS:
@@ -520,16 +527,34 @@ def build_catalog_task_manifest(
         raise CatalogValidationError(
             "runtime admission is only supported for five-lane Guitar, Bass, and Keys profiles"
         )
+    if profile_grade and task_kind not in PROFILE_GRADE_ADMISSION_TASK_KINDS:
+        raise CatalogValidationError(
+            "profile-grade admission is only supported for five-lane Guitar, Bass, and Keys profiles"
+        )
     if not isinstance(split_seed, str) or not split_seed:
         raise CatalogValidationError("split seed must be a non-empty identifier")
     instrument = TASK_INSTRUMENTS[task_kind]
     default_preferred, default_fallback = DEFAULT_AUDIO_ROLES[task_kind]
     preferred = audio_role or default_preferred
+    if profile_grade and fallback_audio_role is not None:
+        raise CatalogValidationError(
+            "profile-grade five-lane preparation does not permit a fallback audio role"
+        )
     fallback = (
         None
         if disable_fallback
         else (default_fallback if fallback_audio_role is None else fallback_audio_role)
     )
+    if profile_grade:
+        try:
+            validate_profile_grade_audio_selection(
+                instrument=instrument,
+                audio_role=preferred,
+                fallback_audio_role=fallback,
+            )
+        except ValueError as error:
+            raise CatalogValidationError(str(error)) from error
+        runtime_admission = True
     if preferred not in AUDIO_ROLES or (fallback is not None and fallback not in AUDIO_ROLES):
         raise CatalogValidationError("task audio role is unsupported by the catalog contract")
     settings = _require_safe_preprocessing(preprocessing)
@@ -548,6 +573,18 @@ def build_catalog_task_manifest(
             available_roles.setdefault(source.source_id, []).append(role)
 
     records = {record.source_id: record for record in catalog.records}
+    dedicated_audio_exclusions = 0
+    if profile_grade:
+        for record in catalog.records:
+            coverage = record.instruments.get(instrument)
+            if (
+                record.training_use == "allowed"
+                and coverage is not None
+                and coverage.status == "present"
+                and required_difficulty in coverage.difficulties
+                and instrument not in record.audio
+            ):
+                dedicated_audio_exclusions += 1
     songs: list[dict[str, object]] = []
     runtime_exclusions = {"runtime_audio_unreadable": 0, "exact_expert_label_missing": 0}
     vocal_target_exclusions = 0
@@ -589,6 +626,11 @@ def build_catalog_task_manifest(
             }
         )
     counts = Counter(song["split"] for song in songs)
+    by_split = {split: counts.get(split, 0) for split in ("train", "val", "test")}
+    if profile_grade and not profile_grade_admission_is_met(by_split):
+        raise CatalogValidationError(
+            "profile-grade task view does not meet the required source-disjoint split minimums"
+        )
     catalog_fingerprint = _catalog_fingerprint(catalog)
     task = {
         "kind": task_kind,
@@ -606,10 +648,15 @@ def build_catalog_task_manifest(
         # module-level canonical declaration by reference.
         "label_schema": copy.deepcopy(TASK_LABEL_SCHEMAS[task_kind]),
         **({"runtime_admission": RUNTIME_ADMISSION} if runtime_admission else {}),
+        **(
+            {"profile_grade_admission": copy.deepcopy(PROFILE_GRADE_ADMISSION)}
+            if profile_grade
+            else {}
+        ),
     }
     summary: dict[str, object] = {
         "record_count": len(songs),
-        "by_split": dict(sorted(counts.items())),
+        "by_split": by_split if profile_grade else dict(sorted(counts.items())),
     }
     if task_kind in VOCAL_TARGET_TASK_KINDS:
         # The task view remains private and contains no source locations. An
@@ -627,6 +674,18 @@ def build_catalog_task_manifest(
         summary["runtime_admission"] = {
             "format": RUNTIME_ADMISSION_FORMAT,
             "exclusion_reason_counts": runtime_exclusions,
+        }
+    if profile_grade:
+        summary["profile_grade_admission"] = {
+            "format": PROFILE_GRADE_ADMISSION_FORMAT,
+            "selected_audio_role": instrument,
+            "source_disjoint_minimums": dict(PROFILE_GRADE_MINIMUM_SOURCES_BY_SPLIT),
+            "by_split": by_split,
+            "meets_minimums": True,
+            "exclusion_reason_counts": {
+                "dedicated_audio_unavailable": dedicated_audio_exclusions,
+                **runtime_exclusions,
+            },
         }
     return {
         "schema_version": MANIFEST_VERSION,
@@ -696,10 +755,18 @@ def resolve_catalog_task_manifest_songs(
     )
     runtime_admission = task.get("runtime_admission")
     if runtime_admission is not None and (
-        runtime_admission != RUNTIME_ADMISSION
-        or task_kind not in RUNTIME_ADMISSION_TASK_KINDS
+        runtime_admission != RUNTIME_ADMISSION or task_kind not in RUNTIME_ADMISSION_TASK_KINDS
     ):
         raise CatalogValidationError("manifest runtime admission is invalid")
+    profile_grade_admission = task.get("profile_grade_admission")
+    if profile_grade_admission is not None and (
+        profile_grade_admission != PROFILE_GRADE_ADMISSION
+        or task_kind not in PROFILE_GRADE_ADMISSION_TASK_KINDS
+        or runtime_admission != RUNTIME_ADMISSION
+        or preferred != TASK_INSTRUMENTS[task_kind]
+        or fallback is not None
+    ):
+        raise CatalogValidationError("manifest profile-grade admission is invalid")
     if task.get("preprocessing_sha256") != _canonical_json_hash(settings):
         raise CatalogValidationError("manifest preprocessing lineage is invalid")
     if section_task_uses_retired_prefix_schema(task_kind, task.get("label_schema")):
@@ -751,6 +818,7 @@ def resolve_catalog_task_manifest_songs(
             or raw_song.get("instrument") != TASK_INSTRUMENTS[task_kind]
             or raw_song.get("required_difficulty") != required_difficulty
             or raw_song.get("split") != deterministic_split(source_id, ratios, seed=use_seed)
+            or (profile_grade_admission is not None and role != TASK_INSTRUMENTS[task_kind])
             or label_tracks != _label_tracks(task_kind, coverage.track_names)
             or not _asset_matches(raw_song.get("audio"), record.audio[role], catalog)
             or not _asset_matches(raw_song.get("notes_midi"), record.notes_midi, catalog)
@@ -762,9 +830,12 @@ def resolve_catalog_task_manifest_songs(
             raise CatalogValidationError("manifest song is not a valid approved catalog task input")
         if runtime_admission is not None:
             label_track = "PART BASS" if task_kind == "bass_onset_fret" else "PART KEYS"
-            if classify_five_lane_runtime_source(
-                record.audio[role].path, record.notes_midi.path, label_track=label_track
-            ) is not None:
+            if (
+                classify_five_lane_runtime_source(
+                    record.audio[role].path, record.notes_midi.path, label_track=label_track
+                )
+                is not None
+            ):
                 raise CatalogValidationError("manifest song no longer satisfies runtime admission")
         seen_source_ids.add(source_id)
         resolved.append(
@@ -779,4 +850,10 @@ def resolve_catalog_task_manifest_songs(
                 "label_tracks": label_tracks,
             }
         )
+    if profile_grade_admission is not None:
+        resolved_counts = Counter(item["split"] for item in resolved)
+        if not profile_grade_admission_is_met(
+            {split: resolved_counts.get(split, 0) for split in ("train", "val", "test")}
+        ):
+            raise CatalogValidationError("manifest no longer meets profile-grade split minimums")
     return resolved

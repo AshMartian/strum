@@ -3,12 +3,23 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from src.five_lane_runtime_admission import (
+    PROFILE_GRADE_ADMISSION,
+    PROFILE_GRADE_ADMISSION_FORMAT,
+    PROFILE_GRADE_MINIMUM_SOURCES_BY_SPLIT,
+    RUNTIME_ADMISSION,
+    RUNTIME_ADMISSION_FORMAT,
+    classify_five_lane_runtime_source,
+    profile_grade_admission_is_met,
+    validate_profile_grade_audio_selection,
+)
 from src.song_source_catalog import (
     CATALOG_FORMAT,
     CatalogAsset,
@@ -16,11 +27,6 @@ from src.song_source_catalog import (
     SongSourceCatalog,
     load_catalog,
     select_training_sources,
-)
-from src.five_lane_runtime_admission import (
-    RUNTIME_ADMISSION,
-    RUNTIME_ADMISSION_FORMAT,
-    classify_five_lane_runtime_source,
 )
 
 MANIFEST_FORMAT = "strum-guitar-catalog-manifest/v1"
@@ -58,8 +64,19 @@ def build_guitar_manifest(
     required_difficulty: str = "expert",
     split_ratios: tuple[int, int, int] = DEFAULT_SPLIT_RATIOS,
     runtime_admission: bool = False,
+    profile_grade: bool = False,
 ) -> dict[str, object]:
     """Create a path-free Guitar manifest from rights-approved catalog records."""
+    if profile_grade:
+        try:
+            validate_profile_grade_audio_selection(
+                instrument="guitar",
+                audio_role=audio_role,
+                fallback_audio_role=fallback_audio_role,
+            )
+        except ValueError as error:
+            raise CatalogValidationError(str(error)) from error
+        runtime_admission = True
     catalog = load_catalog(catalog_root)
     roles = tuple(role for role in (audio_role, fallback_audio_role) if role is not None)
     if not roles:
@@ -75,6 +92,18 @@ def build_guitar_manifest(
             selected_roles.setdefault(source.source_id, role)
 
     records = {record.source_id: record for record in catalog.records}
+    dedicated_audio_exclusions = 0
+    if profile_grade:
+        for record in catalog.records:
+            coverage = record.instruments.get("guitar")
+            if (
+                record.training_use == "allowed"
+                and coverage is not None
+                and coverage.status == "present"
+                and required_difficulty in coverage.difficulties
+                and "guitar" not in record.audio
+            ):
+                dedicated_audio_exclusions += 1
     songs: list[dict[str, object]] = []
     runtime_exclusions = {"runtime_audio_unreadable": 0, "exact_expert_label_missing": 0}
     for source_id in sorted(selected_roles):
@@ -100,6 +129,12 @@ def build_guitar_manifest(
             }
         )
     counts = Counter(song["split"] for song in songs)
+    by_split = {split: counts.get(split, 0) for split in ("train", "val", "test")}
+    if profile_grade and not profile_grade_admission_is_met(by_split):
+        raise CatalogValidationError(
+            "profile-grade Guitar task view does not meet the required "
+            "source-disjoint split minimums"
+        )
     return {
         "schema_version": MANIFEST_VERSION,
         "format": MANIFEST_FORMAT,
@@ -111,14 +146,42 @@ def build_guitar_manifest(
             "fallback_audio_role": fallback_audio_role,
             "split_ratios": list(split_ratios),
             **({"runtime_admission": RUNTIME_ADMISSION} if runtime_admission else {}),
+            **(
+                {"profile_grade_admission": copy.deepcopy(PROFILE_GRADE_ADMISSION)}
+                if profile_grade
+                else {}
+            ),
         },
         "songs": songs,
         "summary": {
             "record_count": len(songs),
-            "by_split": dict(sorted(counts.items())),
+            "by_split": by_split if profile_grade else dict(sorted(counts.items())),
             **(
-                {"runtime_admission": {"format": RUNTIME_ADMISSION_FORMAT, "exclusion_reason_counts": runtime_exclusions}}
-                if runtime_admission else {}
+                {
+                    "runtime_admission": {
+                        "format": RUNTIME_ADMISSION_FORMAT,
+                        "exclusion_reason_counts": runtime_exclusions,
+                    }
+                }
+                if runtime_admission
+                else {}
+            ),
+            **(
+                {
+                    "profile_grade_admission": {
+                        "format": PROFILE_GRADE_ADMISSION_FORMAT,
+                        "selected_audio_role": "guitar",
+                        "source_disjoint_minimums": dict(PROFILE_GRADE_MINIMUM_SOURCES_BY_SPLIT),
+                        "by_split": by_split,
+                        "meets_minimums": True,
+                        "exclusion_reason_counts": {
+                            "dedicated_audio_unavailable": dedicated_audio_exclusions,
+                            **runtime_exclusions,
+                        },
+                    }
+                }
+                if profile_grade
+                else {}
             ),
         },
     }
@@ -169,6 +232,15 @@ def resolve_guitar_manifest_songs(
     runtime_admission = task.get("runtime_admission")
     if runtime_admission is not None and runtime_admission != RUNTIME_ADMISSION:
         raise CatalogValidationError("manifest runtime admission is invalid")
+    profile_grade_admission = task.get("profile_grade_admission")
+    if profile_grade_admission is not None:
+        if (
+            profile_grade_admission != PROFILE_GRADE_ADMISSION
+            or runtime_admission != RUNTIME_ADMISSION
+            or task.get("audio_role") != "guitar"
+            or task.get("fallback_audio_role") is not None
+        ):
+            raise CatalogValidationError("manifest profile-grade admission is invalid")
     split_ratios = tuple(raw_ratios)
     deterministic_split("octave-src-00000000", split_ratios)
     records = {record.source_id: record for record in catalog.records}
@@ -198,15 +270,20 @@ def resolve_guitar_manifest_songs(
             or required_difficulty not in coverage.difficulties
             or raw_song.get("instrument") != "guitar"
             or split != deterministic_split(source_id, split_ratios)
+            or (profile_grade_admission is not None and role != "guitar")
         ):
             raise CatalogValidationError("manifest song guitar coverage is invalid")
         if not _asset_matches(
             raw_song.get("audio"), record.audio[role], catalog
         ) or not _asset_matches(raw_song.get("notes_midi"), record.notes_midi, catalog):
             raise CatalogValidationError("manifest asset does not match the catalog")
-        if runtime_admission is not None and classify_five_lane_runtime_source(
-            record.audio[role].path, record.notes_midi.path, label_track="PART GUITAR"
-        ) is not None:
+        if (
+            runtime_admission is not None
+            and classify_five_lane_runtime_source(
+                record.audio[role].path, record.notes_midi.path, label_track="PART GUITAR"
+            )
+            is not None
+        ):
             raise CatalogValidationError("manifest song no longer satisfies runtime admission")
         seen_source_ids.add(source_id)
         resolved.append(
@@ -218,6 +295,12 @@ def resolve_guitar_manifest_songs(
                 "audio_kind": role,
             }
         )
+    if profile_grade_admission is not None:
+        resolved_counts = Counter(item["split"] for item in resolved)
+        if not profile_grade_admission_is_met(
+            {split: resolved_counts.get(split, 0) for split in ("train", "val", "test")}
+        ):
+            raise CatalogValidationError("manifest no longer meets profile-grade split minimums")
     return resolved
 
 
