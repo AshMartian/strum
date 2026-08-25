@@ -2034,6 +2034,60 @@ def _model_bundle_artifact_id(bundle: ModelBundle) -> str:
     return f"strum-model-bundle/{manifest_sha256}"
 
 
+def _verified_chart_run_profile(bundle: ModelBundle, plan: dict[str, object]) -> tuple[str, str]:
+    """Revalidate the immutable preflight profile tuple before execution.
+
+    A direct chart run has to reopen its bundle before deserializing weights.
+    Its preflight request is writable, however, so it must not become a second
+    source of profile authority.  Bind that reopened bundle to the preflight
+    plan's manifest and profile tuple, and return the *plan* profile ID for
+    every capability-specific loader below.
+    """
+    expected_manifest = plan.get("manifest_sha256")
+    actual_manifest = _manifest_sha256(bundle)
+    if not isinstance(expected_manifest, str) or not isinstance(actual_manifest, str):
+        raise WorkerRequestError("chart profile bundle has no manifest identity")
+    if actual_manifest != expected_manifest:
+        raise WorkerRequestError("chart profile bundle identity does not match preflight")
+
+    profile_id = plan.get("profile_id")
+    capability = plan.get("capability")
+    difficulty_policy = plan.get("difficulty_policy")
+    instruments = plan.get("instruments")
+    configuration_sha256 = plan.get("profile_configuration_sha256")
+    if (
+        not isinstance(profile_id, str)
+        or not isinstance(capability, str)
+        or not isinstance(difficulty_policy, str)
+        or not isinstance(configuration_sha256, str)
+        or not isinstance(instruments, list)
+        or not instruments
+        or not all(isinstance(instrument, str) and instrument for instrument in instruments)
+    ):
+        raise WorkerRequestError("chart preflight plan has invalid profile identity")
+
+    refreshed = validate_inference_profile(
+        bundle.root,
+        profile_id=profile_id,
+        difficulty_policy=difficulty_policy,
+    )
+    if (
+        refreshed.get("profile_id") != profile_id
+        or refreshed.get("capability") != capability
+        or refreshed.get("difficulty_policy") != difficulty_policy
+        or refreshed.get("profile_configuration_sha256") != configuration_sha256
+    ):
+        raise WorkerRequestError("chart profile identity does not match preflight")
+    available_instruments = refreshed.get("instruments")
+    if (
+        not isinstance(available_instruments, list)
+        or not all(isinstance(instrument, str) for instrument in available_instruments)
+        or not set(instruments) <= set(available_instruments)
+    ):
+        raise WorkerRequestError("chart profile instruments do not match preflight")
+    return profile_id, actual_manifest
+
+
 def _safe_compatibility_summary(bundle: ModelBundle) -> dict[str, object]:
     """Return the compatibility keys defined by the portable bundle schema.
 
@@ -2983,6 +3037,7 @@ def run_chart_request(request_path: Path) -> dict[str, object]:
         errors = bundle.validate(check_files=True, verify_hashes=True)
         if errors:
             raise BundleValidationError("; ".join(errors))
+        profile_id, manifest_sha256 = _verified_chart_run_profile(bundle, plan)
         output_dir = Path(request["output_dir"])
         if plan["capability"] == "guitar.hybrid-v2-rule/v1":
             audio = Path(request["audio_path"])
@@ -2993,7 +3048,7 @@ def run_chart_request(request_path: Path) -> dict[str, object]:
             )
             from src.inference.guitar_hybrid_v2 import transcribe_guitar_hybrid  # noqa: PLC0415
 
-            profile = load_guitar_hybrid_rule_profile(bundle, preflight_raw["profile_id"])
+            profile = load_guitar_hybrid_rule_profile(bundle, profile_id)
             chart = _run_without_legacy_output(
                 lambda: transcribe_guitar_hybrid(
                     audio,
@@ -3040,7 +3095,7 @@ def run_chart_request(request_path: Path) -> dict[str, object]:
             audio = load_audio_mono_22050(audio_path)
             if audio is None:
                 raise WorkerRequestError("chart input audio is unreadable")
-            profile = load_guitar_neural_expert_profile(bundle, preflight_raw["profile_id"])
+            profile = load_guitar_neural_expert_profile(bundle, profile_id)
             events = _run_without_legacy_output(
                 lambda: GuitarNeuralCharter.from_bundle_profile(
                     bundle, profile, device=plan["device"]
@@ -3105,7 +3160,7 @@ def run_chart_request(request_path: Path) -> dict[str, object]:
             audio = load_audio_mono_22050(audio_path)
             if audio is None:
                 raise WorkerRequestError("chart input audio is unreadable")
-            profile = load_bass_neural_expert_profile(bundle, preflight_raw["profile_id"])
+            profile = load_bass_neural_expert_profile(bundle, profile_id)
             events = _run_without_legacy_output(
                 lambda: BassNeuralCharter.from_bundle_profile(
                     bundle, profile, device=plan["device"]
@@ -3170,7 +3225,7 @@ def run_chart_request(request_path: Path) -> dict[str, object]:
             audio = load_audio_mono_22050(audio_path)
             if audio is None:
                 raise WorkerRequestError("chart input audio is unreadable")
-            profile = load_keys_neural_expert_profile(bundle, preflight_raw["profile_id"])
+            profile = load_keys_neural_expert_profile(bundle, profile_id)
             events = _run_without_legacy_output(
                 lambda: KeysNeuralCharter.from_bundle_profile(
                     bundle, profile, device=plan["device"]
@@ -3226,7 +3281,7 @@ def run_chart_request(request_path: Path) -> dict[str, object]:
             )
             from src.inference.drums_v14_runtime import DrumsV14Runtime  # noqa: PLC0415
 
-            profile = load_drums_v14_expert_profile(bundle, preflight_raw["profile_id"])
+            profile = load_drums_v14_expert_profile(bundle, profile_id)
             component = bundle.component(profile.component_id)
             if component is None or component.checkpoint is None:
                 raise WorkerRequestError("drums V14 component is incomplete")
@@ -3336,6 +3391,7 @@ def run_chart_request(request_path: Path) -> dict[str, object]:
             "profile_id": plan["profile_id"],
             "capability": plan["capability"],
             "difficulty_policy": plan["difficulty_policy"],
+            "manifest_sha256": manifest_sha256,
             "components": plan["components"],
             "profile_configuration_sha256": plan["profile_configuration_sha256"],
             "profile_configuration_byte_length": plan["profile_configuration_byte_length"],
@@ -3356,6 +3412,7 @@ def run_chart_request(request_path: Path) -> dict[str, object]:
         "format": CHART_RUN_FORMAT,
         "status": "completed",
         "profile_id": plan["profile_id"],
+        "manifest_sha256": manifest_sha256,
         "run_manifest_name": "run.json",
         "instrument_results": instrument_results,
         "chart_result": {

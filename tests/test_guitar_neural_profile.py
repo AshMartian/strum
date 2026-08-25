@@ -8,8 +8,8 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+import src.worker as worker_module
 from src.guitar_profile_packaging import GuitarProfilePackagingError, package_guitar_profile
-from src.profile_quality_policy import profile_quality_policy, profile_quality_policy_sha256
 from src.inference.guitar_neural import GuitarEvent, GuitarNeuralCharter
 from src.inference.guitar_neural_profile import (
     CAPABILITY,
@@ -23,7 +23,8 @@ from src.models.guitar_v1 import (
     GuitarOnsetCRNN,
     OnsetCRNNConfig,
 )
-from src.worker import preflight_chart_request, run_chart_request
+from src.profile_quality_policy import profile_quality_policy, profile_quality_policy_sha256
+from src.worker import WorkerRequestError, preflight_chart_request, run_chart_request
 
 
 def _sha256(path: Path) -> str:
@@ -287,4 +288,117 @@ def test_chart_run_uses_only_typed_neural_profile(
     result = run_chart_request(request)
 
     assert result["expert_event_count"] == 1
+    preflight_plan = preflight_chart_request(preflight)
+    expected_manifest_sha256 = _sha256(output_bundle / MANIFEST_FILENAME)
+    assert preflight_plan["manifest_sha256"] == expected_manifest_sha256
+    assert result["manifest_sha256"] == expected_manifest_sha256
+    run_manifest = json.loads((tmp_path / "result" / "run.json").read_text())
+    assert run_manifest["manifest_sha256"] == expected_manifest_sha256
+    assert str(tmp_path) not in json.dumps(result)
+    assert str(tmp_path) not in json.dumps(run_manifest)
     assert (tmp_path / "result" / "notes.mid").is_file()
+
+    original_preflight = worker_module.preflight_chart_request
+
+    def replace_manifest_after_preflight(path: Path) -> dict[str, object]:
+        plan = original_preflight(path)
+        manifest_path = output_bundle / MANIFEST_FILENAME
+        replaced = json.loads(manifest_path.read_text())
+        replaced["model_id"] = "catalog-guitar-replaced-v1"
+        manifest_path.write_text(json.dumps(replaced, indent=2, sort_keys=True) + "\n")
+        return plan
+
+    monkeypatch.setattr(worker_module, "preflight_chart_request", replace_manifest_after_preflight)
+    with pytest.raises(WorkerRequestError, match="bundle identity does not match preflight"):
+        run_chart_request(request)
+
+
+def test_chart_run_keeps_the_preflight_profile_during_same_bundle_profile_swap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A rewritten preflight file cannot select another valid profile mid-run."""
+    experiment, bundle = _worker_experiment(tmp_path)
+    output_bundle = tmp_path / "deployable"
+    package_guitar_profile(
+        experiment_dir=experiment,
+        evaluation_path=_evaluation(bundle, tmp_path / "evaluation.json"),
+        output_dir=output_bundle,
+        profile_id="guitar-v1-expert-a",
+    )
+    manifest_path = output_bundle / MANIFEST_FILENAME
+    manifest = json.loads(manifest_path.read_text())
+    manifest["profiles"]["guitar-v1-expert-b"] = dict(manifest["profiles"]["guitar-v1-expert-a"])
+    manifest_path.write_text(json.dumps(manifest))
+    # Both profiles are independently executable and share the same immutable
+    # bundle. The test therefore isolates profile authority from manifest race
+    # protection.
+    packaged = load_model_bundle(output_bundle, check_files=True)
+    load_guitar_neural_expert_profile(packaged, "guitar-v1-expert-a")
+    load_guitar_neural_expert_profile(packaged, "guitar-v1-expert-b")
+
+    audio = tmp_path / "song.wav"
+    audio.write_bytes(b"safe-audio-input")
+    preflight = tmp_path / "preflight.json"
+    preflight.write_text(
+        json.dumps(
+            {
+                "model_root": str(output_bundle),
+                "profile_id": "guitar-v1-expert-a",
+                "difficulty_policy": "expert_only",
+                "instruments": ["guitar"],
+                "device": "cpu",
+            }
+        )
+    )
+    request = tmp_path / "run.json"
+    request.write_text(
+        json.dumps(
+            {
+                "preflight_request": str(preflight),
+                "audio_path": str(audio),
+                "output_dir": str(tmp_path / "result"),
+            }
+        )
+    )
+
+    real_preflight = worker_module.preflight_chart_request
+
+    def preflight_then_swap_profile(path: Path) -> dict[str, object]:
+        plan = real_preflight(path)
+        preflight.write_text(
+            json.dumps(
+                {
+                    "model_root": str(output_bundle),
+                    "profile_id": "guitar-v1-expert-b",
+                    "difficulty_policy": "expert_only",
+                    "instruments": ["guitar"],
+                    "device": "cpu",
+                }
+            )
+        )
+        return plan
+
+    monkeypatch.setattr(worker_module, "preflight_chart_request", preflight_then_swap_profile)
+    import scripts.preprocess_guitar_windows as preprocess
+
+    monkeypatch.setattr(preprocess, "load_audio_mono_22050", lambda _: object())
+    selected_profile_ids: list[str] = []
+    monkeypatch.setattr(
+        GuitarNeuralCharter,
+        "from_bundle_profile",
+        classmethod(
+            lambda cls, _bundle, profile, *, device: (
+                selected_profile_ids.append(profile.profile_id)
+                or SimpleNamespace(
+                    transcribe=lambda *_args, **_kwargs: [
+                        GuitarEvent(0.1, (0,), 0.9, (0.9, 0.1, 0.1, 0.1, 0.1))
+                    ]
+                )
+            )
+        ),
+    )
+
+    result = run_chart_request(request)
+
+    assert result["profile_id"] == "guitar-v1-expert-a"
+    assert selected_profile_ids == ["guitar-v1-expert-a"]
