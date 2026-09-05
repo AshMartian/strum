@@ -13,6 +13,7 @@ import argparse
 import hashlib
 import json
 import math
+import os
 import random
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
@@ -810,6 +811,13 @@ def _metrics(
 
 
 def _seed_everything(seed: int) -> None:
+    # Configure cuBLAS before seeding or allocating CUDA tensors. Worker jobs
+    # start in fresh processes; preserve either supported explicit setting.
+    workspace = os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+    if workspace not in {":4096:8", ":16:8"}:
+        raise DatasetValidationError(
+            "deterministic training requires a supported cuBLAS workspace configuration"
+        )
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -819,6 +827,16 @@ def _seed_everything(seed: int) -> None:
 
 
 def train(config: TrainingConfig) -> dict[str, Any]:
+    """Train deterministically without changing the caller's algorithm policy."""
+    deterministic = torch.are_deterministic_algorithms_enabled()
+    warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
+    try:
+        return _train(config)
+    finally:
+        torch.use_deterministic_algorithms(deterministic, warn_only=warn_only)
+
+
+def _train(config: TrainingConfig) -> dict[str, Any]:
     """Train on local pairs and write a self-describing registry-compatible bundle."""
     config = TrainingConfig.from_mapping(asdict(config))
     _seed_everything(config.seed)

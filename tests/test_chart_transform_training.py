@@ -1074,6 +1074,8 @@ def test_cuda_chart_pair_training_uses_cuda_and_saves_portable_weights(
 
     monkeypatch.setattr(EventTransformMLP, "forward", record_forward)
 
+    previous_determinism = torch.are_deterministic_algorithms_enabled()
+    previous_warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
     train(
         TrainingConfig(
             dataset_manifest=str(dataset_dir / "dataset-manifest.json"),
@@ -1087,6 +1089,9 @@ def test_cuda_chart_pair_training_uses_cuda_and_saves_portable_weights(
             device="cuda:0",
         )
     )
+
+    assert torch.are_deterministic_algorithms_enabled() is previous_determinism
+    assert torch.is_deterministic_algorithms_warn_only_enabled() is previous_warn_only
 
     metadata = json.loads((output_dir / "training-metadata.json").read_text())
     checkpoint = torch.load(
@@ -1102,3 +1107,40 @@ def test_cuda_chart_pair_training_uses_cuda_and_saves_portable_weights(
         for model_device, features_device in observed_devices
     )
     assert all(tensor.device.type == "cpu" for tensor in checkpoint["model_state_dict"].values())
+
+
+@pytest.mark.parametrize("enabled,warn_only", [(False, False), (True, True)])
+def test_training_restores_callers_determinism_policy_on_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    enabled: bool,
+    warn_only: bool,
+) -> None:
+    import scripts.train_chart_transform as training
+
+    original = torch.are_deterministic_algorithms_enabled()
+    original_warn = torch.is_deterministic_algorithms_warn_only_enabled()
+
+    def reject_dataset(config: TrainingConfig) -> None:
+        assert torch.are_deterministic_algorithms_enabled()
+        assert not torch.is_deterministic_algorithms_warn_only_enabled()
+        raise DatasetValidationError("fixture dataset rejected")
+
+    monkeypatch.setattr(training, "load_dataset", reject_dataset)
+    try:
+        torch.use_deterministic_algorithms(enabled, warn_only=warn_only)
+        with pytest.raises(DatasetValidationError, match="fixture dataset rejected"):
+            train(
+                TrainingConfig(
+                    dataset_manifest=str(tmp_path / "dataset.json"),
+                    output_dir=str(tmp_path / "run"),
+                    model_id="determinism-test",
+                    source_difficulty="Expert",
+                    target_difficulty="Hard",
+                    device="cpu",
+                )
+            )
+        assert torch.are_deterministic_algorithms_enabled() is enabled
+        assert torch.is_deterministic_algorithms_warn_only_enabled() is warn_only
+    finally:
+        torch.use_deterministic_algorithms(original, warn_only=original_warn)
