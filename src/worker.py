@@ -4587,9 +4587,9 @@ def _chart_transform_catalog_profile_call(
     dataset_manifest: str | Path,
     candidate_root: str | Path,
     scratch_output: str | Path,
-    call: Callable[[Path], dict[str, object]],
+    call: Callable[[Path | None], dict[str, object]],
 ) -> dict[str, object]:
-    """Run one audio-conditioned promotion operation with private catalog audio.
+    """Run promotion using the verified candidate modality and optional catalog audio.
 
     Candidates deliberately retain the hash of their transient training audio
     manifest, never that manifest or any host asset path.  Promotion must
@@ -4605,9 +4605,9 @@ def _chart_transform_catalog_profile_call(
     if not isinstance(dataset, dict):
         raise WorkerRequestError("chart-transform dataset manifest must be an object")
 
-    # Check the candidate before reopening private catalog assets.  Besides
-    # rejecting non-candidates, this guarantees catalog re-materialization is
-    # used only for an audio-conditioned transform candidate.
+    # The host may bind its known catalog root for every promotion job. The
+    # candidate's verified mode, not optional path presence, determines whether
+    # audio is needed. Underlying evaluation still verifies task-view lineage.
     from src.chart_transform_profile import (  # noqa: PLC0415
         ChartTransformPromotionError,
         _candidate,
@@ -4617,6 +4617,8 @@ def _chart_transform_catalog_profile_call(
         _bundle, _component_id, config = _candidate(candidate_root)
     except ChartTransformPromotionError as error:
         raise WorkerRequestError("chart-transform candidate failed verification") from error
+    if config.get("audio_feature_mode") == "none":
+        return call(None)
     if config.get("audio_feature_mode") != "rms_onset_v1":
         raise WorkerRequestError(
             "catalog audio re-materialization requires an audio-conditioned transform candidate"
@@ -4648,7 +4650,7 @@ def evaluate_catalog_chart_transform_candidate(
     output_path: str | Path,
     device: str = "cpu",
 ) -> dict[str, object]:
-    """Evaluate an audio candidate from its task view and private catalog.
+    """Evaluate a candidate, rematerializing catalog audio only when required.
 
     This is intentionally a worker-local route.  It accepts catalog and
     candidate identities but never serializes an audio manifest or catalog
@@ -4681,7 +4683,7 @@ def package_catalog_chart_transform_profile(
     profile_id: str,
     device: str = "cpu",
 ) -> dict[str, object]:
-    """Package an audio candidate after worker-local independent evaluation."""
+    """Package a candidate after modality-aware worker-local independent evaluation."""
     from src.chart_transform_profile import package_chart_transform_profile  # noqa: PLC0415
 
     return _chart_transform_catalog_profile_call(

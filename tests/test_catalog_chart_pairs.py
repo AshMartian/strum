@@ -330,13 +330,15 @@ def test_worker_trains_audio_conditioned_transform_from_private_catalog_assets(
     assert not list(tmp_path.glob(".strum-chart-audio-*"))
 
 
-def test_worker_promotes_audio_transform_from_private_catalog_assets(
+@pytest.mark.parametrize("audio_feature_mode", ["none", "rms_onset_v1"])
+def test_worker_promotes_transform_with_optional_private_catalog(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     request: pytest.FixtureRequest,
+    audio_feature_mode: str,
 ) -> None:
-    """Audio candidates can be admitted without retaining their train scratch manifest."""
+    """An optional host catalog binding must not change a candidate's modality."""
     # This verifies catalog-private audio materialization, not convergence on
     # the deliberately tiny fixture. Keep promotion evidence otherwise valid.
     monkeypatch.setattr(
@@ -358,7 +360,7 @@ def test_worker_promotes_audio_transform_from_private_catalog_assets(
             instrument="guitar",
             target_difficulty="Hard",
             split_seed=11,
-            audio_feature_mode="rms_onset_v1",
+            audio_feature_mode=audio_feature_mode,
         ),
     )
     manifest_path = prepared["manifest_path"]
@@ -393,6 +395,8 @@ def test_worker_promotes_audio_transform_from_private_catalog_assets(
     candidate_parent.chmod(original_mode & ~0o222)
     request.addfinalizer(lambda: candidate_parent.chmod(original_mode))
 
+    # Chart-only work does not open this optional location; audio work must.
+    promotion_catalog = tmp_path if audio_feature_mode == "rms_onset_v1" else tmp_path / "unused-catalog"
     evaluation = tmp_path / "held-out.json"
     monkeypatch.setattr(
         sys,
@@ -407,7 +411,7 @@ def test_worker_promotes_audio_transform_from_private_catalog_assets(
             "--dataset-manifest",
             str(manifest_path),
             "--catalog-root",
-            str(tmp_path),
+            str(promotion_catalog),
             "--output",
             str(evaluation),
         ],
@@ -416,7 +420,7 @@ def test_worker_promotes_audio_transform_from_private_catalog_assets(
     evaluation_result = json.loads(capsys.readouterr().out)
     report = json.loads(evaluation.read_text())
     assert evaluation_result["split"] == "test"
-    assert report["audio_manifest_sha256"]
+    assert bool(report["audio_manifest_sha256"]) == (audio_feature_mode == "rms_onset_v1")
     assert str(tmp_path) not in json.dumps(report)
     assert not list(tmp_path.glob(".strum-chart-audio-*"))
 
@@ -436,7 +440,7 @@ def test_worker_promotes_audio_transform_from_private_catalog_assets(
             "--dataset-manifest",
             str(manifest_path),
             "--catalog-root",
-            str(tmp_path),
+            str(promotion_catalog),
             "--output",
             str(profile),
             "--profile",
@@ -448,6 +452,39 @@ def test_worker_promotes_audio_transform_from_private_catalog_assets(
     assert package_result["status"] == "promoted"
     assert preflight_bundle(profile)["status"] == "ready"
     assert str(tmp_path) not in (profile / MANIFEST_FILENAME).read_text()
+    assert not list(tmp_path.glob(".strum-chart-audio-*"))
+
+
+    # Exercise OCTAVE's actual descriptor-driven promotion request shape too.
+    from src.worker import run_promotion_request
+
+    evaluation_request = tmp_path / "evaluate-request.json"
+    dispatched_evaluation = tmp_path / "dispatched-held-out.json"
+    evaluation_request.write_text(json.dumps({
+        "pipeline_id": "chart_transform.five_lane/v1",
+        "job_id": "chart-transform.profile-evaluate/v1",
+        "bundle_root": str(candidate),
+        "dataset_manifest": str(manifest_path),
+        "catalog_root": str(promotion_catalog),
+        "output": str(dispatched_evaluation),
+        "options": {"device": "cpu"},
+    }))
+    assert run_promotion_request(evaluation_request)["status"] == "completed"
+    assert json.loads(dispatched_evaluation.read_text()) == report
+    package_request = tmp_path / "package-request.json"
+    dispatched_profile = tmp_path / "dispatched-profile"
+    package_request.write_text(json.dumps({
+        "pipeline_id": "chart_transform.five_lane/v1",
+        "job_id": "chart-transform.profile-package/v1",
+        "experiment": str(candidate),
+        "evaluation": str(dispatched_evaluation),
+        "dataset_manifest": str(manifest_path),
+        "catalog_root": str(promotion_catalog),
+        "output": str(dispatched_profile),
+        "options": {"profile_id": "dispatched-transform", "device": "cpu"},
+    }))
+    assert run_promotion_request(package_request)["status"] == "completed"
+    assert preflight_bundle(dispatched_profile)["status"] == "ready"
     assert not list(tmp_path.glob(".strum-chart-audio-*"))
 
 
