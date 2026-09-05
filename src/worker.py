@@ -1179,8 +1179,8 @@ VOCALS_ACTIVITY_PREPARE_SCHEMA = _object_schema(
 PROFILE_EVALUATE_OPTIONS_SCHEMA = _object_schema(
     {
         "device": {"type": "string", "enum": ["cpu", "cuda", "mps"], "default": "cpu"},
-        "tolerance_ms": {"type": "number", "minimum": 1, "maximum": 1000, "default": 50},
-        "limit_songs": {"type": "integer", "minimum": 0, "default": 0},
+        "tolerance_ms": {"type": "number", "enum": [50], "default": 50},
+        "limit_songs": {"type": "integer", "enum": [0], "default": 0},
     }
 )
 PROFILE_PACKAGE_OPTIONS_SCHEMA = _object_schema(

@@ -10,6 +10,7 @@ import pytest
 import torch
 
 from src.bass_profile_packaging import BassProfilePackagingError, package_bass_profile
+from src.five_lane_runtime_admission import PROFILE_GRADE_ADMISSION
 from src.profile_quality_policy import profile_quality_policy, profile_quality_policy_sha256
 from src.inference.bass_neural_profile import (
     CAPABILITY,
@@ -130,6 +131,15 @@ def _bass_experiment(root: Path) -> tuple[Path, Path]:
         "lifecycle": "completed",
         "pipeline": {"id": "bass.onset-fret", "version": 1},
         "deployment_status": "requires_bass_profile_evaluation_and_packaging",
+        "task_view": {
+            "sha256": "a" * 64,
+            "profile_grade_admission": PROFILE_GRADE_ADMISSION,
+            "source_inputs": [
+                {"source_id": f"{split}-{j}", "split": split}
+                for split, count in (("train", 20), ("val", 5), ("test", 5))
+                for j in range(count)
+            ],
+        },
         "model_bundle": {"model_id": "catalog-bass-v1", "manifest_sha256": _sha256(manifest_path)},
     }
     (experiment / "experiment.json").write_text(json.dumps(experiment_data))
@@ -145,8 +155,8 @@ def _evaluation(bundle: Path, output: Path) -> Path:
                 "model_id": "catalog-bass-v1",
                 "bundle_manifest_sha256": _sha256(bundle / MANIFEST_FILENAME),
                 "task_view_sha256": "a" * 64,
-                "split": "val",
-                "records_evaluated": 2,
+                "split": "test",
+                "records_evaluated": 5,
                 "alignment_tolerance_ms": 50.0,
                 "quality_policy": profile_quality_policy(),
                 "quality_policy_sha256": profile_quality_policy_sha256(),

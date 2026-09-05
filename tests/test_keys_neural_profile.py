@@ -17,6 +17,7 @@ from src.inference.keys_neural_profile import (
     load_keys_neural_expert_profile,
 )
 from src.keys_profile_packaging import KeysProfilePackagingError, package_keys_profile
+from src.five_lane_runtime_admission import PROFILE_GRADE_ADMISSION
 from src.profile_quality_policy import profile_quality_policy, profile_quality_policy_sha256
 from src.model_bundle import MANIFEST_FILENAME, load_model_bundle
 from src.models.guitar_v1 import (
@@ -132,6 +133,15 @@ def _keys_experiment(root: Path) -> tuple[Path, Path]:
                 "lifecycle": "completed",
                 "pipeline": {"id": "keys.onset-fret", "version": 1},
                 "deployment_status": "requires_keys_profile_evaluation_and_packaging",
+                "task_view": {
+                    "sha256": "a" * 64,
+                    "profile_grade_admission": PROFILE_GRADE_ADMISSION,
+                    "source_inputs": [
+                        {"source_id": f"{split}-{j}", "split": split}
+                        for split, count in (("train", 20), ("val", 5), ("test", 5))
+                        for j in range(count)
+                    ],
+                },
                 "model_bundle": {
                     "model_id": "catalog-keys-v1",
                     "manifest_sha256": _sha256(manifest_path),
@@ -151,8 +161,8 @@ def _evaluation(bundle: Path, output: Path) -> Path:
                 "model_id": "catalog-keys-v1",
                 "bundle_manifest_sha256": _sha256(bundle / MANIFEST_FILENAME),
                 "task_view_sha256": "a" * 64,
-                "split": "val",
-                "records_evaluated": 2,
+                "split": "test",
+                "records_evaluated": 5,
                 "alignment_tolerance_ms": 50.0,
                 "quality_policy": profile_quality_policy(),
                 "quality_policy_sha256": profile_quality_policy_sha256(),

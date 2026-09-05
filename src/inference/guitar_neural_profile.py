@@ -267,12 +267,13 @@ def load_guitar_neural_expert_profile(
         or report.get("quality_policy_sha256") != profile_quality_policy_sha256()
         or not isinstance(report.get("task_view_sha256"), str)
         or len(report["task_view_sha256"]) != 64
-        or report.get("split") != "val"
+        or report.get("split") != policy["evaluation_split"]
         or not isinstance(report.get("records_evaluated"), int)
-        or report["records_evaluated"] < 1
+        or isinstance(report["records_evaluated"], bool)
+        or report["records_evaluated"] < policy["minimum_test_sources"]
         or not isinstance(report.get("alignment_tolerance_ms"), (int, float))
         or isinstance(report["alignment_tolerance_ms"], bool)
-        or not 1 <= report["alignment_tolerance_ms"] <= 1_000
+        or report["alignment_tolerance_ms"] != policy["alignment_tolerance_ms"]
         or not all(
             isinstance(metric_values.get(key), (int, float))
             and not isinstance(metric_values[key], bool)

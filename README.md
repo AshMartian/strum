@@ -1281,3 +1281,20 @@ Developed on NVIDIA DGX Spark (GB10 GPU, CUDA 12.8). Trained on ~5,000 human-aut
 ## License
 
 MIT
+
+### Five-lane Expert promotion policy V2 migration
+
+Guitar, Bass, and Keys promotion now uses `strum-five-lane-expert-profile/v2`.
+Prepare with `profile_grade: true`, then train a fresh candidate so its experiment
+retains the admitted task-view identity. Evaluation uses the complete **Test**
+partition from that same view, with the fixed 50 ms matching tolerance. Validation
+remains reserved for checkpoint selection. The existing admission policy requires
+20 / 5 / 5 distinct Train / Validation / Test sources with dedicated instrument
+audio; packaging verifies those partitions and the complete evaluated record count.
+Evaluation limits and alternative tolerances cannot produce promotion evidence.
+
+This intentionally rejects V1 validation-only reports and profiles, and candidates
+whose experiments lack profile-grade admission lineage. Re-prepare and retrain
+those candidates before evaluating and packaging. Passing the data gate does not
+relax the unchanged onset and fret F1 minima of 0.50. Historical smoke metrics
+remain historical evidence and must not be presented as V2 acceptance results.

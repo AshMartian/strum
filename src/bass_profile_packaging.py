@@ -31,7 +31,11 @@ from src.inference.bass_neural_profile import (
     load_bass_neural_candidate,
 )
 from src.model_bundle import MANIFEST_FILENAME, BundleValidationError, load_model_bundle
-from src.profile_quality_policy import profile_quality_policy, profile_quality_policy_sha256
+from src.profile_quality_policy import (
+    evaluation_matches_experiment,
+    profile_quality_policy,
+    profile_quality_policy_sha256,
+)
 
 _PROFILE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 
@@ -134,23 +138,34 @@ def evaluate_bass_candidate(
     limit_songs: int = 0,
 ) -> dict[str, object]:
     """Evaluate a Bass candidate on revalidated held-out ``PART BASS`` labels."""
-    if not 1 <= tolerance_ms <= 1_000:
+    if (
+        isinstance(tolerance_ms, bool)
+        or tolerance_ms != profile_quality_policy()["alignment_tolerance_ms"]
+    ):
         raise BassProfilePackagingError("Bass evaluation tolerance is invalid")
-    if not isinstance(limit_songs, int) or isinstance(limit_songs, bool) or limit_songs < 0:
+    if not isinstance(limit_songs, int) or isinstance(limit_songs, bool) or limit_songs != 0:
         raise BassProfilePackagingError("Bass evaluation limit_songs is invalid")
     if output_path.exists():
         raise BassProfilePackagingError("Bass evaluation output must not already exist")
     task_view = _read_json(task_view_path, "Bass task view")
     _require_bass_task_view(task_view)
+    # Promotion uses the same source-disjoint task view as training.
+    from src.five_lane_runtime_admission import PROFILE_GRADE_ADMISSION
+
+    if task_view.get("task", {}).get("profile_grade_admission") != PROFILE_GRADE_ADMISSION:
+        raise BassProfilePackagingError("Bass evaluation requires profile-grade preparation")
+    _, experiment = _require_candidate_experiment(bundle_root.parent)
+    if experiment.get("task_view", {}).get("sha256") != _sha256(task_view_path):
+        raise BassProfilePackagingError("Bass evaluation task view differs from training")
     songs = [
         song
         for song in resolve_catalog_task_manifest_songs(task_view, catalog_root)
-        if song["split"] == "val"
+        if song["split"] == "test"
     ]
-    if limit_songs:
-        songs = songs[:limit_songs]
-    if not songs:
-        raise BassProfilePackagingError("Bass evaluation requires at least one validation song")
+    if len(songs) < profile_quality_policy()["minimum_test_sources"]:
+        raise BassProfilePackagingError(
+            "Bass evaluation requires the complete profile-grade test split"
+        )
     charter = _candidate_charter(bundle_root, device)
     from scripts.preprocess_guitar_windows import load_audio_mono_22050, parse_onsets_from_manifest
 
@@ -189,7 +204,7 @@ def evaluate_bass_candidate(
         "model_id": bundle.model_id,
         "bundle_manifest_sha256": _sha256(bundle.manifest_path),
         "task_view_sha256": _sha256(task_view_path),
-        "split": "val",
+        "split": "test",
         "records_evaluated": len(songs),
         "alignment_tolerance_ms": tolerance_ms,
         "quality_policy": profile_quality_policy(),
@@ -232,9 +247,14 @@ def _require_candidate_experiment(experiment_dir: Path) -> tuple[Path, dict[str,
 
 
 def _require_deployment_evaluation(
-    report: dict[str, Any], *, model_id: str, bundle_manifest_sha256: str
+    report: dict[str, Any],
+    *,
+    model_id: str,
+    bundle_manifest_sha256: str,
+    experiment: dict[str, Any],
 ) -> dict[str, float]:
     """Validate the complete held-out report before a profile is written."""
+    policy = profile_quality_policy()
     metrics = report.get("metrics") if isinstance(report.get("metrics"), dict) else {}
     required = {
         "schema_version",
@@ -261,11 +281,12 @@ def _require_deployment_evaluation(
         or len(report["task_view_sha256"]) != 64
         or not isinstance(report.get("records_evaluated"), int)
         or isinstance(report["records_evaluated"], bool)
-        or report["records_evaluated"] < 1
-        or report.get("split") != "val"
+        or report["records_evaluated"] < policy["minimum_test_sources"]
+        or not evaluation_matches_experiment(report, experiment)
+        or report.get("split") != policy["evaluation_split"]
         or not isinstance(report.get("alignment_tolerance_ms"), (int, float))
         or isinstance(report["alignment_tolerance_ms"], bool)
-        or not 1 <= report["alignment_tolerance_ms"] <= 1_000
+        or report["alignment_tolerance_ms"] != policy["alignment_tolerance_ms"]
         or not all(
             isinstance(metrics.get(key), (int, float))
             and not isinstance(metrics[key], bool)
@@ -301,8 +322,12 @@ def package_bass_profile(
         report,
         model_id=bundle.model_id,
         bundle_manifest_sha256=_sha256(bundle.manifest_path),
+        experiment=experiment,
     )
-    if metrics["onset_f1"] < policy["minimum_onset_f1"] or metrics["fret_f1"] < policy["minimum_fret_f1"]:
+    if (
+        metrics["onset_f1"] < policy["minimum_onset_f1"]
+        or metrics["fret_f1"] < policy["minimum_fret_f1"]
+    ):
         raise BassProfilePackagingError(
             "Bass evaluation does not satisfy the requested deployment gate"
         )

@@ -367,6 +367,7 @@ def run_catalog_bass_training(
             if isinstance(lineage_info, dict)
             else None,
             "source_inputs": lineage,
+            "profile_grade_admission": task_view.get("task", {}).get("profile_grade_admission"),
         },
         "preprocessing": {
             "id": PREPROCESSING_ID,

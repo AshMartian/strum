@@ -349,6 +349,7 @@ def run_catalog_guitar_training(
             if isinstance(task_view.get("catalog"), dict)
             else None,
             "source_inputs": lineage,
+            "profile_grade_admission": task_view.get("task", {}).get("profile_grade_admission"),
         },
         "preprocessing": {
             "id": PREPROCESSING_ID,
