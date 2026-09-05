@@ -12,6 +12,7 @@ import hashlib
 import json
 import re
 import shutil
+import tempfile
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
@@ -304,6 +305,9 @@ def package_bass_profile(
     evaluation_path: Path,
     output_dir: Path,
     profile_id: str,
+    task_view_path: Path | None = None,
+    catalog_root: Path | None = None,
+    device: str = "cpu",
 ) -> dict[str, object]:
     """Copy an evaluated Bass experiment into an immutable Expert profile."""
     if not _PROFILE_ID.fullmatch(profile_id):
@@ -331,6 +335,22 @@ def package_bass_profile(
         raise BassProfilePackagingError(
             "Bass evaluation does not satisfy the requested deployment gate"
         )
+    if task_view_path is None or catalog_root is None:
+        raise BassProfilePackagingError(
+            "Bass packaging requires private task view and catalog inputs"
+        )
+    # Recompute using catalog-owned labels and exact candidate weights. A report
+    # is portable evidence, not authority to assert its own metric values.
+    with tempfile.TemporaryDirectory(prefix="strum-profile-verification-") as temporary:
+        recomputed = evaluate_bass_candidate(
+            bundle_root=bundle_root,
+            task_view_path=task_view_path,
+            catalog_root=catalog_root,
+            output_path=Path(temporary) / "evaluation.json",
+            device=device,
+        )
+    if recomputed != report:
+        raise BassProfilePackagingError("Bass evaluation differs from recomputed test evidence")
     inference = candidate["onset_inference"]
     configured_onset_threshold = policy["onset_threshold"]
     min_distance = inference.get("peak_min_distance_frames")
@@ -349,9 +369,11 @@ def package_bass_profile(
     ):
         raise BassProfilePackagingError("Bass inference thresholds are invalid")
     shutil.copytree(bundle_root, output_dir)
-    evaluation_destination = output_dir / "evaluations" / "validation.json"
+    evaluation_destination = output_dir / "evaluations" / "test.json"
     evaluation_destination.parent.mkdir(parents=True)
-    shutil.copy2(evaluation_path, evaluation_destination)
+    evaluation_destination.write_text(
+        json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
     profile_config = {
         "schema_version": 1,
         "format": FORMAT,
@@ -364,7 +386,7 @@ def package_bass_profile(
         "fret_thresholds": [float(value) for value in configured_fret_thresholds],
         "note_duration_ms": float(note_duration_ms),
         "evaluation": {
-            "artifact": "evaluations/validation.json",
+            "artifact": "evaluations/test.json",
             "sha256": _sha256(evaluation_destination),
             "source_bundle_manifest_sha256": _sha256(bundle.manifest_path),
             "minimum_onset_f1": float(policy["minimum_onset_f1"]),

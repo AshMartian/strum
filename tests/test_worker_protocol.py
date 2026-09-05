@@ -551,6 +551,8 @@ def test_profile_package_promotion_uses_canonical_policy_without_host_overrides(
                 "job_id": "guitar.profile-package/v1",
                 "experiment": "private-experiment",
                 "evaluation": "private-evaluation",
+                "task_view": "private-task-view",
+                "catalog_root": "private-catalog",
                 "output": "private-output",
                 "options": {"profile_id": "guitar-expert"},
             }
@@ -558,7 +560,7 @@ def test_profile_package_promotion_uses_canonical_policy_without_host_overrides(
         encoding="utf-8",
     )
     _, descriptor = _read_promotion_request(request)
-    assert set(descriptor.options_schema["properties"]) == {"profile_id"}
+    assert set(descriptor.options_schema["properties"]) == {"profile_id", "device"}
     calls: list[dict[str, object]] = []
 
     def package(**kwargs: object) -> dict[str, object]:
@@ -578,6 +580,9 @@ def test_profile_package_promotion_uses_canonical_policy_without_host_overrides(
         {
             "experiment_dir": Path("private-experiment"),
             "evaluation_path": Path("private-evaluation"),
+            "task_view_path": Path("private-task-view"),
+            "catalog_root": Path("private-catalog"),
+            "device": "cpu",
             "output_dir": Path("private-output"),
             "profile_id": "guitar-expert",
         }

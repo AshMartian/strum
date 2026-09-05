@@ -178,6 +178,8 @@ def _package(tmp_path: Path) -> Path:
     output = tmp_path / "deployable"
     result = package_keys_profile(
         experiment_dir=experiment,
+        task_view_path=tmp_path / "task-view.json",
+        catalog_root=tmp_path / "catalog",
         evaluation_path=_evaluation(bundle, tmp_path / "evaluation.json"),
         output_dir=output,
         profile_id="keys-v1-expert",
@@ -280,8 +282,18 @@ def test_keys_packaging_rejects_wrong_experiment_or_report(tmp_path: Path) -> No
     with pytest.raises(KeysProfilePackagingError, match="packageable"):
         package_keys_profile(
             experiment_dir=experiment,
+            task_view_path=tmp_path / "task-view.json",
+            catalog_root=tmp_path / "catalog",
             evaluation_path=_evaluation(bundle, tmp_path / "evaluation.json"),
             output_dir=tmp_path / "deployable",
             profile_id="keys-v1-expert",
         )
     assert not (tmp_path / "deployable").exists()
+
+
+@pytest.fixture(autouse=True)
+def _recomputed_fixture_evidence(monkeypatch: pytest.MonkeyPatch) -> None:
+    def evaluate(**kwargs: object) -> dict:
+        return json.loads(_evaluation(kwargs["bundle_root"], kwargs["output_path"]).read_text())
+
+    monkeypatch.setattr("src.keys_profile_packaging.evaluate_keys_candidate", evaluate)

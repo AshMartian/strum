@@ -76,3 +76,49 @@ def test_package_rejects_biased_or_unbound_evidence(
             profile_id=f"{instrument}-expert",
         )
     assert not (tmp_path / "profile").exists()
+
+
+@pytest.mark.parametrize("instrument", ["guitar", "bass", "keys"])
+def test_package_recomputes_metrics_before_publishing(
+    tmp_path: Path,
+    instrument: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = importlib.import_module(f"tests.test_{instrument}_neural_profile")
+    builder = getattr(
+        fixture,
+        {"guitar": "_worker_experiment", "bass": "_bass_experiment", "keys": "_keys_experiment"}[
+            instrument
+        ],
+    )
+    experiment, bundle = builder(tmp_path)
+    report_path = fixture._evaluation(bundle, tmp_path / "evaluation.json")
+    actual = json.loads(report_path.read_text())
+    actual["metrics"]["fret_f1"] = 0.2
+    claimed = json.loads(report_path.read_text())
+    claimed["metrics"]["fret_f1"] = 0.9
+    report_path.write_text(json.dumps(claimed))
+    calls = []
+
+    def evaluate(**kwargs: object) -> dict:
+        calls.append(kwargs)
+        return actual
+
+    module = importlib.import_module(f"src.{instrument}_profile_packaging")
+    monkeypatch.setattr(module, f"evaluate_{instrument}_candidate", evaluate)
+    with pytest.raises(
+        getattr(module, f"{instrument.title()}ProfilePackagingError"), match="recomputed"
+    ):
+        getattr(module, f"package_{instrument}_profile")(
+            experiment_dir=experiment,
+            evaluation_path=report_path,
+            output_dir=tmp_path / "profile",
+            profile_id=f"{instrument}-expert",
+            task_view_path=tmp_path / "task-view.json",
+            catalog_root=tmp_path / "catalog",
+        )
+    assert len(calls) == 1
+    assert calls[0]["bundle_root"] == bundle
+    assert calls[0]["task_view_path"] == tmp_path / "task-view.json"
+    assert calls[0]["catalog_root"] == tmp_path / "catalog"
+    assert not (tmp_path / "profile").exists()

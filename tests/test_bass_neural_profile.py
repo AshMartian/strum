@@ -172,6 +172,8 @@ def _package(tmp_path: Path) -> Path:
     output = tmp_path / "deployable"
     result = package_bass_profile(
         experiment_dir=experiment,
+        task_view_path=tmp_path / "task-view.json",
+        catalog_root=tmp_path / "catalog",
         evaluation_path=_evaluation(bundle, tmp_path / "evaluation.json"),
         output_dir=output,
         profile_id="bass-v1-expert",
@@ -275,6 +277,8 @@ def test_bass_packaging_rejects_wrong_experiment_semantics(tmp_path: Path) -> No
     with pytest.raises(BassProfilePackagingError, match="packageable"):
         package_bass_profile(
             experiment_dir=experiment,
+            task_view_path=tmp_path / "task-view.json",
+            catalog_root=tmp_path / "catalog",
             evaluation_path=_evaluation(bundle, tmp_path / "evaluation.json"),
             output_dir=tmp_path / "deployable",
             profile_id="bass-v1-expert",
@@ -292,8 +296,18 @@ def test_bass_packaging_rejects_malformed_held_out_report_before_copying(tmp_pat
     with pytest.raises(BassProfilePackagingError, match="verified held-out"):
         package_bass_profile(
             experiment_dir=experiment,
+            task_view_path=tmp_path / "task-view.json",
+            catalog_root=tmp_path / "catalog",
             evaluation_path=evaluation,
             output_dir=output,
             profile_id="bass-v1-expert",
         )
     assert not output.exists()
+
+
+@pytest.fixture(autouse=True)
+def _recomputed_fixture_evidence(monkeypatch: pytest.MonkeyPatch) -> None:
+    def evaluate(**kwargs: object) -> dict:
+        return json.loads(_evaluation(kwargs["bundle_root"], kwargs["output_path"]).read_text())
+
+    monkeypatch.setattr("src.bass_profile_packaging.evaluate_bass_candidate", evaluate)

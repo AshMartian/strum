@@ -1298,3 +1298,11 @@ whose experiments lack profile-grade admission lineage. Re-prepare and retrain
 those candidates before evaluating and packaging. Passing the data gate does not
 relax the unchanged onset and fret F1 minima of 0.50. Historical smoke metrics
 remain historical evidence and must not be presented as V2 acceptance results.
+
+Five-lane package jobs also require the registered private `task_view` and
+`catalog_root`, plus the evaluation device (CPU by default). Packaging reruns
+STRUM's evaluator against the candidate weights and revalidated catalog, compares
+the complete report, and only then publishes the bundle. Edited passing metrics
+cannot promote a failing candidate. Direct `guitar|bass|keys profile package`
+commands therefore require `--task-view` and `--catalog-root`; use `--device` to
+match the original evaluation when needed. These inputs remain worker-private.

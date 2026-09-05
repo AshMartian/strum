@@ -180,6 +180,8 @@ def test_worker_experiment_requires_evaluation_before_deployable_profile(tmp_pat
     with pytest.raises(GuitarProfilePackagingError, match="evaluation"):
         package_guitar_profile(
             experiment_dir=experiment,
+            task_view_path=tmp_path / "task-view.json",
+            catalog_root=tmp_path / "catalog",
             evaluation_path=tmp_path / "missing.json",
             output_dir=tmp_path / "deployable",
             profile_id="guitar-v1",
@@ -194,6 +196,8 @@ def test_packaged_profile_loads_real_worker_components_and_preflights(tmp_path: 
 
     result = package_guitar_profile(
         experiment_dir=experiment,
+        task_view_path=tmp_path / "task-view.json",
+        catalog_root=tmp_path / "catalog",
         evaluation_path=evaluation,
         output_dir=output,
         profile_id="guitar-v1-expert",
@@ -229,6 +233,8 @@ def test_profile_runtime_rejects_non_tensor_checkpoint_state(tmp_path: Path) -> 
     output = tmp_path / "deployable"
     package_guitar_profile(
         experiment_dir=experiment,
+        task_view_path=tmp_path / "task-view.json",
+        catalog_root=tmp_path / "catalog",
         evaluation_path=evaluation,
         output_dir=output,
         profile_id="guitar-v1-expert",
@@ -252,6 +258,8 @@ def test_chart_run_uses_only_typed_neural_profile(
     output_bundle = tmp_path / "deployable"
     package_guitar_profile(
         experiment_dir=experiment,
+        task_view_path=tmp_path / "task-view.json",
+        catalog_root=tmp_path / "catalog",
         evaluation_path=_evaluation(bundle, tmp_path / "evaluation.json"),
         output_dir=output_bundle,
         profile_id="guitar-v1-expert",
@@ -331,6 +339,8 @@ def test_chart_run_keeps_the_preflight_profile_during_same_bundle_profile_swap(
     output_bundle = tmp_path / "deployable"
     package_guitar_profile(
         experiment_dir=experiment,
+        task_view_path=tmp_path / "task-view.json",
+        catalog_root=tmp_path / "catalog",
         evaluation_path=_evaluation(bundle, tmp_path / "evaluation.json"),
         output_dir=output_bundle,
         profile_id="guitar-v1-expert-a",
@@ -412,3 +422,11 @@ def test_chart_run_keeps_the_preflight_profile_during_same_bundle_profile_swap(
 
     assert result["profile_id"] == "guitar-v1-expert-a"
     assert selected_profile_ids == ["guitar-v1-expert-a"]
+
+
+@pytest.fixture(autouse=True)
+def _recomputed_fixture_evidence(monkeypatch: pytest.MonkeyPatch) -> None:
+    def evaluate(**kwargs: object) -> dict:
+        return json.loads(_evaluation(kwargs["bundle_root"], kwargs["output_path"]).read_text())
+
+    monkeypatch.setattr("src.guitar_profile_packaging.evaluate_guitar_candidate", evaluate)

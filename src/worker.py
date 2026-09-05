@@ -1185,6 +1185,7 @@ PROFILE_EVALUATE_OPTIONS_SCHEMA = _object_schema(
 )
 PROFILE_PACKAGE_OPTIONS_SCHEMA = _object_schema(
     {
+        "device": {"type": "string", "enum": ["cpu", "cuda", "mps"], "default": "cpu"},
         "profile_id": {"type": "string"},
     },
     required=("profile_id",),
@@ -1238,7 +1239,7 @@ def _profile_promotion_jobs(instrument: str) -> tuple[PromotionJobDescriptor, ..
             kind="package",
             status="available",
             options_schema=PROFILE_PACKAGE_OPTIONS_SCHEMA,
-            private_request_fields=("experiment", "evaluation", "output"),
+            private_request_fields=("experiment", "evaluation", "task_view", "catalog_root", "output"),
             output_kind=f"{instrument}_expert_profile_bundle",
             deployment_scope="deployable_after_profile_validation",
         ),
@@ -5627,6 +5628,9 @@ def run_promotion_request(request_path: Path) -> dict[str, object]:
                 evaluation_path=Path(request["evaluation"]),
                 output_dir=Path(request["output"]),
                 profile_id=options["profile_id"],
+                task_view_path=Path(request["task_view"]),
+                catalog_root=Path(request["catalog_root"]),
+                device=options["device"],
             )
         elif job.id == "chart-transform.profile-evaluate/v1":
             if "catalog_root" in request:
@@ -5824,6 +5828,9 @@ def _parse_args() -> argparse.Namespace:
     guitar_package.add_argument("--evaluation", type=Path, required=True)
     guitar_package.add_argument("--output", type=Path, required=True)
     guitar_package.add_argument("--profile", required=True)
+    guitar_package.add_argument("--task-view", type=Path, required=True)
+    guitar_package.add_argument("--catalog-root", type=Path, required=True)
+    guitar_package.add_argument("--device", choices=("cpu", "cuda", "mps"), default="cpu")
     guitar_package.add_argument("--json", action="store_true")
     bass = commands.add_parser("bass", help="evaluate and package Bass V1 profiles")
     bass_commands = bass.add_subparsers(dest="bass_command", required=True)
@@ -5847,6 +5854,9 @@ def _parse_args() -> argparse.Namespace:
     bass_package.add_argument("--evaluation", type=Path, required=True)
     bass_package.add_argument("--output", type=Path, required=True)
     bass_package.add_argument("--profile", required=True)
+    bass_package.add_argument("--task-view", type=Path, required=True)
+    bass_package.add_argument("--catalog-root", type=Path, required=True)
+    bass_package.add_argument("--device", choices=("cpu", "cuda", "mps"), default="cpu")
     bass_package.add_argument("--json", action="store_true")
     keys = commands.add_parser("keys", help="evaluate and package Keys V1 profiles")
     keys_commands = keys.add_subparsers(dest="keys_command", required=True)
@@ -5870,6 +5880,9 @@ def _parse_args() -> argparse.Namespace:
     keys_package.add_argument("--evaluation", type=Path, required=True)
     keys_package.add_argument("--output", type=Path, required=True)
     keys_package.add_argument("--profile", required=True)
+    keys_package.add_argument("--task-view", type=Path, required=True)
+    keys_package.add_argument("--catalog-root", type=Path, required=True)
+    keys_package.add_argument("--device", choices=("cpu", "cuda", "mps"), default="cpu")
     keys_package.add_argument("--json", action="store_true")
     section = commands.add_parser(
         "section", help="calibrate and package SectionClassifier evaluation profiles"
@@ -6060,6 +6073,9 @@ def main() -> int:
                         evaluation_path=args.evaluation,
                         output_dir=args.output,
                         profile_id=args.profile,
+                        task_view_path=args.task_view,
+                        catalog_root=args.catalog_root,
+                        device=args.device,
                     )
                 )
             except GuitarProfilePackagingError as error:
@@ -6097,6 +6113,9 @@ def main() -> int:
                         evaluation_path=args.evaluation,
                         output_dir=args.output,
                         profile_id=args.profile,
+                        task_view_path=args.task_view,
+                        catalog_root=args.catalog_root,
+                        device=args.device,
                     )
                 )
             except BassProfilePackagingError as error:
@@ -6134,6 +6153,9 @@ def main() -> int:
                         evaluation_path=args.evaluation,
                         output_dir=args.output,
                         profile_id=args.profile,
+                        task_view_path=args.task_view,
+                        catalog_root=args.catalog_root,
+                        device=args.device,
                     )
                 )
             except KeysProfilePackagingError as error:
