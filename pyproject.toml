@@ -77,6 +77,8 @@ full = [
     "basic-pitch>=0.3.0",
 ]
 dev = [
+    "setuptools>=61.0",
+    "wheel",
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
     "ruff>=0.1.0",
@@ -95,7 +97,12 @@ strum-worker = "src.worker:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["src*"]
+include = ["src*", "scripts*", "configs*"]
+
+[tool.setuptools.package-data]
+# Worker handlers resolve these immutable defaults beside src in both a
+# checkout and an installed wheel. Never ship local dataset manifests.
+configs = ["*.yaml"]
 
 [tool.ruff]
 target-version = "py311"

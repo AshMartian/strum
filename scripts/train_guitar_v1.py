@@ -56,11 +56,10 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s",
                     datefmt="%H:%M:%S")
 log = logging.getLogger("train_guitar_v1")
 
-try:
-    import wandb
-    _WANDB = True
-except ImportError:                 # pragma: no cover
-    _WANDB = False
+# Tracking is opt-in. Local worker training must not import or initialize
+# telemetry packages (or their binary dependencies) merely to start a job.
+wandb = None
+_WANDB = False
 
 
 # ─────────────────────────── Datasets ───────────────────────────────────────
@@ -479,6 +478,7 @@ def train_fret(cfg: dict, args: argparse.Namespace) -> Path:
 
 # ─────────────────────────── CLI ────────────────────────────────────────────
 def main() -> int:
+    global wandb, _WANDB
     ap = argparse.ArgumentParser()
     ap.add_argument("stage", choices=["onset", "fret", "both"])
     ap.add_argument("--config", default="configs/guitar_v1.yaml")
@@ -494,12 +494,15 @@ def main() -> int:
     log.info("device=%s  config=%s", args.device, args.config)
 
     if args.wandb:
-        if not _WANDB:
-            log.warning("wandb not installed; ignoring --wandb")
-        else:
-            w = cfg["wandb"]
-            wandb.init(project=w["project"], entity=w["entity"],
-                       name=w["run_name"], tags=w["tags"], config=cfg)
+        try:
+            import wandb as tracking
+        except Exception as exc:
+            raise RuntimeError("The requested W&B tracking runtime is unavailable.") from exc
+        wandb = tracking
+        _WANDB = True
+        w = cfg["wandb"]
+        wandb.init(project=w["project"], entity=w["entity"],
+                   name=w["run_name"], tags=w["tags"], config=cfg)
 
     ck = Path(cfg["paths"]["checkpoint_dir"])
     ck.mkdir(parents=True, exist_ok=True)
