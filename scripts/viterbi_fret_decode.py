@@ -1,36 +1,3 @@
-"""Compatibility shim that re-exports `viterbi_decode` from the orphan
-.pyc cached under ``scripts/__pycache__/`` (the source ``.py`` was lost
-in an earlier cleanup). Restoring this thin module fixes a regression
-where the hybrid guitar pipeline silently dropped to no-op because the
-learned fret-mapper raised ``ModuleNotFoundError``.
-
-If anyone needs to swap in a fresh implementation, just delete this file
-and add a real ``viterbi_decode(P, times=None, fret_change_w=..., ...)``
-in its place.
-"""
-from __future__ import annotations
-
-import importlib.util
-from pathlib import Path
-
-_PYC = Path(__file__).resolve().parent / "__pycache__" / "viterbi_fret_decode.cpython-312.pyc"
-if not _PYC.exists():  # pragma: no cover
-    raise ImportError(
-        f"viterbi_fret_decode source is missing and the cached .pyc "
-        f"({_PYC}) is also gone. Restore one or remove the learned "
-        f"fret mapper from src/inference/guitar_hybrid_v2.py."
-    )
-
-_spec = importlib.util.spec_from_file_location("_viterbi_fret_decode_pyc", str(_PYC))
-_mod = importlib.util.module_from_spec(_spec)
-assert _spec.loader is not None
-_spec.loader.exec_module(_mod)
-
-viterbi_decode = _mod.viterbi_decode
-STATES = _mod.STATES
-STATE_VECS = _mod.STATE_VECS
-
-__all__ = ["viterbi_decode", "STATES", "STATE_VECS"]
 """Viterbi decoder for fret-subset sequences.
 
 Takes per-onset fret probabilities P (N, 5) from the MLP mapper and
@@ -41,6 +8,7 @@ State space: all single-fret states (5) + all adjacent 2-fret pairs (4) +
 all 3-fret runs (3) + a curated set of common chord shapes. Limiting the
 state space prevents the decoder from emitting nonsense like "GRYO".
 """
+
 from __future__ import annotations
 
 from itertools import combinations
@@ -88,8 +56,10 @@ def _emission_logp(P: np.ndarray) -> np.ndarray:
     logP = np.log(P)
     log1mP = np.log1p(-P)
     # (N, 1, 5) * (1, S, 5) → (N, S)
-    return (logP[:, None, :] * STATE_VECS[None, :, :]
-            + log1mP[:, None, :] * (1.0 - STATE_VECS[None, :, :])).sum(-1)
+    return (
+        logP[:, None, :] * STATE_VECS[None, :, :]
+        + log1mP[:, None, :] * (1.0 - STATE_VECS[None, :, :])
+    ).sum(-1)
 
 
 def _transition_cost_matrix(
@@ -141,8 +111,7 @@ def viterbi_decode(
         return []
     S = len(STATES)
     E = _emission_logp(P.astype(np.float32))
-    C = _transition_cost_matrix(fret_change_w, center_jump_w,
-                                chord_switch_w, same_state_bonus)
+    C = _transition_cost_matrix(fret_change_w, center_jump_w, chord_switch_w, same_state_bonus)
     # Trellis
     delta = np.full((N, S), -np.inf, dtype=np.float32)
     psi = np.zeros((N, S), dtype=np.int32)

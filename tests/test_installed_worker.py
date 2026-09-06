@@ -42,6 +42,12 @@ def test_installed_worker_includes_execution_modules_and_default_configs(tmp_pat
         [str(installed / "scripts" / "train_chart_transform.py"), "--help"],
         [str(installed / "scripts" / "preprocess_guitar_windows.py"), "--help"],
         [str(installed / "scripts" / "train_guitar_v1.py"), "--help"],
+        [
+            "-c",
+            "import sys; sys.path.insert(0, sys.argv[1]); import viterbi_fret_decode; "
+            "assert viterbi_fret_decode.STATES",
+            str(installed / "scripts"),
+        ],
     ]
     for command in commands:
         completed = subprocess.run(
