@@ -8,6 +8,11 @@ import mido
 import pytest
 
 import src.worker as worker_module
+from src.inference.drums_v14_runtime import DrumsV14Event
+from src.inference.guitar_bass import GuitarChart, GuitarNote
+from src.inference import guitar_hybrid_profile
+from src.inference import guitar_hybrid_v2
+from src.inference import drums_v14_runtime
 from src.model_bundle import BundleValidationError
 import src.profile_composition as composition_module
 from src.profile_composition import compose_profile_request
@@ -64,6 +69,139 @@ def _child_bundle(root: Path, *, instrument: str, capability: str) -> tuple[Path
         encoding="utf-8",
     )
     return root, profile_id
+
+
+def _typed_guitar_bundle(root: Path) -> tuple[Path, str]:
+    """Small but fully typed direct profile, with inference patched only at its edge."""
+    checkpoint = root / "weights" / "onset.pt"
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_bytes(b"verified onset")
+    model_config = root / "configs" / "guitar.yaml"
+    model_config.parent.mkdir()
+    model_config.write_text("onset: {}\n", encoding="utf-8")
+    configuration = root / "profiles" / "guitar-rule.json"
+    configuration.parent.mkdir()
+    configuration.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "format": "strum-guitar-hybrid-rule-profile/v1",
+                "onset_threshold": 0.4,
+                "latency_offset_ms": 25,
+                "min_pitch_amplitude": 0.3,
+                "min_pitch": 36,
+                "max_pitch": 88,
+                "snap_window_ms": 75,
+                "sustain_min_duration_ms": 400,
+                "max_chord_size": 3,
+                "voice_filter": True,
+                "basic_pitch_version": "0.4.0",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (root / "strum-model-bundle.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "model_id": "guitar-rule-fixture",
+                "compatibility": {"manifest_schema": 1, "strum_version": ">=0.1.0"},
+                "components": {
+                    "guitar.onset": {
+                        "checkpoint": "weights/onset.pt",
+                        "sha256": _sha256(checkpoint),
+                        "byte_length": checkpoint.stat().st_size,
+                        "config": "configs/guitar.yaml",
+                        "config_sha256": _sha256(model_config),
+                        "config_byte_length": model_config.stat().st_size,
+                        "architecture": "GuitarOnsetCRNN/v2",
+                    }
+                },
+                "profiles": {
+                    "guitar-rule": {
+                        "capability": "guitar.hybrid-v2-rule/v1",
+                        "instruments": ["guitar"],
+                        "required_components": ["guitar.onset"],
+                        "difficulty_policies": ["expert_only"],
+                        "configuration": "profiles/guitar-rule.json",
+                        "configuration_sha256": _sha256(configuration),
+                        "configuration_byte_length": configuration.stat().st_size,
+                    }
+                },
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    return root, "guitar-rule"
+
+
+def _typed_drums_bundle(root: Path) -> tuple[Path, str]:
+    checkpoint = root / "weights" / "v14.pt"
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_bytes(b"verified V14 checkpoint")
+    model_config = root / "configs" / "drums-v14.yaml"
+    model_config.parent.mkdir()
+    model_config.write_text("model: drums-v14\n", encoding="utf-8")
+    configuration = root / "profiles" / "drums-v14.json"
+    configuration.parent.mkdir()
+    configuration.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "format": "strum-drums-v14-expert-profile/v1",
+                "model_architecture": "TwoStageDrumsCRNN/v14",
+                "preprocessing": "drums-logmel-44100-2048-512-128-v1",
+                "segment_duration_seconds": 10,
+                "overlap": 0.5,
+                "onset_threshold": 0.4,
+                "class_thresholds": [0.3, 0.25, 0.35, 0.12, 0.28, 0.12, 0.35, 0.12],
+                "min_distance_ms": 20,
+                "postprocess": "none",
+                "class_to_midi": [96, 97, 98, 98, 99, 99, 100, 100],
+                "model_parameters": {
+                    "n_mels": 128, "conv_channels": [64, 128, 256, 512],
+                    "freq_subbands": [32, 64, 96, 128], "subband_proj_dim": 256,
+                    "lstm_hidden": 640, "lstm_layers": 3, "attention_heads": 10,
+                    "attention_type": "flash", "attention_window": 512, "dropout": 0.0,
+                    "onset_detector_hidden": 320, "classifier_hidden": 640,
+                    "num_classes": 8, "predict_velocity": True,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (root / "strum-model-bundle.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "model_id": "drums-v14-fixture",
+                "compatibility": {"manifest_schema": 1, "strum_version": ">=0.1.0"},
+                "components": {
+                    "drums.v14": {
+                        "checkpoint": "weights/v14.pt", "sha256": _sha256(checkpoint),
+                        "byte_length": checkpoint.stat().st_size,
+                        "config": "configs/drums-v14.yaml", "config_sha256": _sha256(model_config),
+                        "config_byte_length": model_config.stat().st_size,
+                        "architecture": "TwoStageDrumsCRNN/v14",
+                        "preprocessing": "drums-logmel-44100-2048-512-128-v1",
+                    }
+                },
+                "profiles": {
+                    "drums-v14-expert": {
+                        "capability": "drums.v14-expert/v1", "instruments": ["drums"],
+                        "required_components": ["drums.v14"], "difficulty_policies": ["expert_only"],
+                        "configuration": "profiles/drums-v14.json",
+                        "configuration_sha256": _sha256(configuration),
+                        "configuration_byte_length": configuration.stat().st_size,
+                    }
+                },
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    return root, "drums-v14-expert"
 
 
 def test_compose_profile_creates_discoverable_multitrack_bundle_without_child_leakage(
@@ -318,6 +456,84 @@ def test_composition_run_merges_every_selected_child_track(
     run_manifest = json.loads((result_dir / "run.json").read_text(encoding="utf-8"))
     assert run_manifest["difficulty"]["status"] == "succeeded"
     assert str(tmp_path) not in json.dumps(run_manifest)
+
+
+def test_composition_executes_real_typed_children_before_merging(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Exercise the outer recursion; inference itself is the only mocked layer."""
+    guitar_root, guitar_profile = _typed_guitar_bundle(tmp_path / "guitar")
+    drums_root, drums_profile = _typed_drums_bundle(tmp_path / "drums")
+    monkeypatch.setattr(guitar_hybrid_profile.importlib.util, "find_spec", lambda _: object())
+    monkeypatch.setattr(guitar_hybrid_profile.importlib.metadata, "version", lambda _: "0.4.0")
+    monkeypatch.setattr(
+        guitar_hybrid_v2,
+        "transcribe_guitar_hybrid",
+        lambda *_args, **_kwargs: GuitarChart(notes=[GuitarNote(time_ms=0, fret=0)]),
+    )
+
+    class FakeDrumsRuntime:
+        @classmethod
+        def from_profile(cls, *_args: object, **_kwargs: object) -> "FakeDrumsRuntime":
+            return cls()
+
+        def transcribe_audio_file(self, _audio: Path) -> list[DrumsV14Event]:
+            return [DrumsV14Event(time_ms=0, lane=0, midi_note=96, velocity=100)]
+
+    monkeypatch.setattr(drums_v14_runtime, "DrumsV14Runtime", FakeDrumsRuntime)
+    output = tmp_path / "composition"
+    compose_request = tmp_path / "compose.json"
+    compose_request.write_text(
+        json.dumps(
+            {
+                "output": str(output),
+                "profiles": [
+                    {"model_root": str(guitar_root), "profile_id": guitar_profile},
+                    {"model_root": str(drums_root), "profile_id": drums_profile},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    compose_profile_request(compose_request)
+    assert discover_model_bundles(output.parent)["candidates"][0]["profiles"][0]["execution"][
+        "status"
+    ] == "available"
+
+    audio = tmp_path / "audio.wav"
+    audio.write_bytes(b"fixture")
+    preflight = tmp_path / "preflight.json"
+    preflight.write_text(
+        json.dumps(
+            {
+                "model_root": str(output),
+                "profile_id": "five-lane-composition",
+                "difficulty_policy": "expert_only",
+                "instruments": ["drums", "guitar"],
+                "device": "cpu",
+            }
+        ),
+        encoding="utf-8",
+    )
+    result_dir = tmp_path / "result"
+    run_request = tmp_path / "run.json"
+    run_request.write_text(
+        json.dumps(
+            {
+                "preflight_request": str(preflight),
+                "audio_path": str(audio),
+                "output_dir": str(result_dir),
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = run_chart_request(run_request)
+
+    assert result["instrument_results"]["drums"]["status"] == "succeeded"
+    assert result["instrument_results"]["guitar"]["status"] == "succeeded"
+    assert result["instrument_event_counts"] == {"drums": 1, "guitar": 1}
+    midi = mido.MidiFile(result_dir / "notes.mid")
+    assert [track.name for track in midi.tracks] == ["PART DRUMS", "PART GUITAR"]
 
 
 def test_composition_rejects_selected_name_only_track(tmp_path: Path) -> None:
