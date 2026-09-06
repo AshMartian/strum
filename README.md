@@ -21,11 +21,14 @@
 STRUM is an audio-to-chart research runtime for Clone Hero / YARG. Its legacy
 batch scripts can assemble multi-instrument chart packages, while its versioned
 worker exposes only explicitly declared, bundle-validated inference profiles.
-Today those executable worker profiles are Expert Guitar (`guitar.hybrid-v2-rule/v1`),
-Expert Drums through the direct V14 interpreter (`drums.v14-expert/v1`), and
-learned five-lane difficulty transforms (`difficulty.transform/v1`). Bass,
-vocals, keys, and Pro-instrument behavior in the legacy scripts are not yet
-deployable worker capabilities.
+Today those executable worker profiles are Expert Guitar (`guitar.hybrid-v2-rule/v1`
+or an evaluated `guitar.neural-v1-expert/v1`), Expert Bass
+(`bass.neural-v1-expert/v1`), Expert Keys (`keys.neural-v1-expert/v1`), Expert
+Drums through the direct V14 interpreter (`drums.v14-expert/v1`), an explicit
+composition of two to four of those Expert profiles
+(`five-lane.composition/v1`), and learned five-lane difficulty transforms
+(`difficulty.transform/v1`). Vocals and Pro-instrument behavior in the legacy
+scripts are not yet deployable worker capabilities.
 
 The system includes a two-stage neural drum transcription pipeline, hybrid
 Guitar transcription, experimental legacy Bass/Vocals/Keys paths, and
@@ -382,6 +385,35 @@ Guitar/Bass/Keys/Drums/transform-specific configuration contract pass; a
 hash-valid experiment or a profile without a STRUM chart handler remains
 `not_deployable`. Selecting a candidate still requires `inference profile
 validate` and chart preflight for the explicit instruments and policy.
+
+### Expert five-lane composition
+
+After each Guitar, Bass, Keys, or Drums candidate has passed its own evaluation
+and profile-packaging gate, an operator may create one portable multi-instrument
+profile. The request is private because it names local child bundles; the output
+contains only copied child assets, relative references, and content hashes:
+
+```json
+{
+  "output": "/private/models/release-a/five-lane-band",
+  "profiles": [
+    {"model_root": "/private/models/guitar", "profile_id": "guitar-v1-expert"},
+    {"model_root": "/private/models/drums", "profile_id": "drums-v14-expert"}
+  ]
+}
+```
+
+```bash
+strum-worker checkpoint compose --request /private/compose-request.json --json-events
+```
+
+It rejects duplicate instruments, profile families without a direct typed
+executor, symlinked child bundles, unverified child hashes, and incomplete
+Expert-only profiles. A composed profile can be preflighted and run for any
+non-empty subset of the declared Guitar/Bass/Keys/Drums tracks; each selected
+child must produce one named track with playable Expert notes before the merged
+`notes.mid` is reported successful. Vocals and Pro instruments are not part of
+this composition capability.
 
 The current model-bundle validator recognizes `drums.v14_onset`,
 `drums.ensemble.v2` through `drums.ensemble.v17`, and `guitar.onset`.

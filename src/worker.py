@@ -135,7 +135,9 @@ MODEL_BUNDLE_INSPECTION_FORMAT = "strum-model-bundle-inspection/v1"
 # normal ``models/<release>/<bundle>`` layouts.
 MAX_MODEL_DISCOVERY_DEPTH = 8
 MAX_DISCOVERED_MODEL_MANIFESTS = 256
-MODEL_DISCOVERY_IGNORED_DIRECTORIES = frozenset({".git", ".venv", "venv", "__pycache__"})
+MODEL_DISCOVERY_IGNORED_DIRECTORIES = frozenset(
+    {".git", ".venv", "venv", "__pycache__", "_composition_assets"}
+)
 CATALOG_STORAGE_ESTIMATE_SEMANTICS = (
     "sum of distinct catalog input assets selected by the declared policy; "
     "excludes generated task views, preprocessing caches, checkpoints, and existing catalog storage"
@@ -1918,6 +1920,7 @@ def _runtime_payload() -> dict[str, object]:
         "checkpoint_discovery",
         "checkpoint_inspect",
         "checkpoint_package",
+        "checkpoint_composition",
     ]
     return {
         "protocol_version": PROTOCOL_VERSION,
@@ -2044,6 +2047,10 @@ def validate_inference_profile(
         )
 
         validate_promoted_chart_transform_profile(bundle, profile.profile_id)
+    elif profile.capability == "five-lane.composition/v1":
+        from src.profile_composition import load_composition_profile  # noqa: PLC0415
+
+        load_composition_profile(bundle, profile.profile_id)
     return {
         **plan,
         "profile_id": profile.profile_id,
@@ -2499,8 +2506,12 @@ def _resolved_profile_composition(
             or not isinstance(policies, list)
         ):
             raise AssertionError("validated profile composition has an invalid stage")
+        stage_instrument = stage.get("instrument")
         selected = not policies or policy in policies
-        if not selected:
+        if stage_instrument is not None and stage_instrument not in requested_instruments:
+            status = "not_requested"
+            reason = "instrument_not_selected"
+        elif not selected:
             status = "not_requested"
             reason = "difficulty_policy_not_selected"
         elif not required:
@@ -2601,6 +2612,8 @@ def _chart_execution_available(
     }
     if capability == "difficulty.transform/v1":
         return len(instruments) == 1 and difficulty_policy.startswith("learned:")
+    if capability == "five-lane.composition/v1":
+        return 1 <= len(instruments) <= 4 and difficulty_policy == "expert_only"
     required = expected.get(capability)
     return (
         required is not None
@@ -2667,6 +2680,10 @@ def _executable_profile_contract_is_valid(bundle: ModelBundle, profile: Inferenc
                 component.name,
                 requested_instruments=profile.instruments,
             )
+        elif profile.capability == "five-lane.composition/v1":
+            from src.profile_composition import load_composition_profile  # noqa: PLC0415
+
+            load_composition_profile(bundle, profile.profile_id)
         else:
             return False
     except (BundleValidationError, WorkerRequestError, OSError, ValueError):
@@ -2736,6 +2753,9 @@ def preflight_chart_request(request_path: Path) -> dict[str, object]:
     )
     if not set(instruments) <= set(plan["instruments"]):
         raise WorkerRequestError("profile does not cover requested instruments")
+    # A multi-instrument profile advertises every capability it carries, while
+    # this immutable preflight must bind the exact subset selected by OCTAVE.
+    plan = {**plan, "instruments": instruments}
     profile_configuration_sha256 = plan["profile_configuration_sha256"]
     transform_instrument = None
     transform_target_difficulty = None
@@ -2852,6 +2872,7 @@ def _read_chart_run_request(request_path: Path, capability: str) -> dict[str, An
         "bass.neural-v1-expert/v1",
         "keys.neural-v1-expert/v1",
         "drums.v14-expert/v1",
+        "five-lane.composition/v1",
     }:
         expected = {"preflight_request", "audio_path", "output_dir"}
     elif capability == "difficulty.transform/v1":
@@ -3052,6 +3073,136 @@ def _run_without_legacy_output(callback: Any) -> Any:
             os.close(saved_fd)
 
 
+def _merge_composition_midis(
+    child_midis: dict[str, Path], output_path: Path, *, instruments: Sequence[str]
+) -> None:
+    """Merge typed child chart tracks without altering their MIDI events."""
+    import mido  # noqa: PLC0415
+
+    expected_tracks = {
+        "guitar": "PART GUITAR",
+        "bass": "PART BASS",
+        "keys": "PART KEYS",
+        "drums": "PART DRUMS",
+    }
+    merged: mido.MidiFile | None = None
+    for instrument in instruments:
+        midi_path = child_midis.get(instrument)
+        if midi_path is None or not midi_path.is_file():
+            raise WorkerRequestError("composition child chart is unavailable")
+        child = mido.MidiFile(midi_path)
+        if merged is None:
+            merged = mido.MidiFile(type=1, ticks_per_beat=child.ticks_per_beat)
+        elif child.ticks_per_beat != merged.ticks_per_beat:
+            raise WorkerRequestError("composition child chart timing is incompatible")
+        tracks = [
+            track
+            for track in child.tracks
+            if any(
+                message.type == "track_name" and message.name == expected_tracks[instrument]
+                for message in track
+            )
+        ]
+        if len(tracks) != 1:
+            raise WorkerRequestError("composition child chart track identity is invalid")
+        if not any(
+            message.type == "note_on"
+            and message.velocity > 0
+            and 96 <= message.note <= 100
+            for message in tracks[0]
+        ):
+            raise WorkerRequestError("composition child chart has no playable Expert notes")
+        merged.tracks.append(mido.MidiTrack(message.copy() for message in tracks[0]))
+    if merged is None:
+        raise WorkerRequestError("composition has no selected instruments")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    merged.save(output_path)
+
+
+def _run_composition_chart(
+    *,
+    bundle: ModelBundle,
+    profile_id: str,
+    plan: dict[str, object],
+    request: dict[str, Any],
+    instrument_results: dict[str, object],
+    difficulty: dict[str, object],
+) -> tuple[dict[str, object], dict[str, object], dict[str, object]]:
+    """Run selected child profiles and assemble their tracks into one MIDI file."""
+    from src.profile_composition import load_composition_profile  # noqa: PLC0415
+
+    audio_path = Path(request["audio_path"])
+    if not audio_path.is_file():
+        raise WorkerRequestError("chart input audio is unavailable")
+    requested = plan.get("instruments")
+    if not isinstance(requested, list) or not all(isinstance(item, str) for item in requested):
+        raise WorkerRequestError("composition plan instruments are invalid")
+    children = load_composition_profile(bundle, profile_id)
+    output_dir = Path(request["output_dir"])
+    child_midis: dict[str, Path] = {}
+    child_events: dict[str, int] = {}
+    with tempfile.TemporaryDirectory(prefix="strum-composition-run-") as temporary:
+        root = Path(temporary)
+        for instrument in requested:
+            child = children.get(instrument)
+            if child is None:
+                raise WorkerRequestError("composition profile does not cover requested instrument")
+            child_bundle, child_profile = child
+            child_request = {
+                "model_root": str(child_bundle.root),
+                "profile_id": child_profile.profile_id,
+                "difficulty_policy": "expert_only",
+                "instruments": [instrument],
+                "device": plan["device"],
+            }
+            preflight_path = root / f"{instrument}-preflight.json"
+            preflight_path.write_text(
+                json.dumps(child_request, sort_keys=True) + "\n", encoding="utf-8"
+            )
+            child_plan = preflight_chart_request(preflight_path)
+            if child_plan.get("execution") != "available":
+                raise WorkerRequestError("composition child has no chart execution handler")
+            child_output = root / instrument
+            child_run_path = root / f"{instrument}-run.json"
+            child_run_path.write_text(
+                json.dumps(
+                    {
+                        "preflight_request": str(preflight_path),
+                        "audio_path": str(audio_path),
+                        "output_dir": str(child_output),
+                    },
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            child_result = run_chart_request(child_run_path)
+            result_map = child_result.get("instrument_results")
+            result = result_map.get(instrument) if isinstance(result_map, dict) else None
+            if not isinstance(result, dict) or result.get("status") != "succeeded":
+                raise WorkerRequestError("composition child chart did not succeed")
+            midi_path = child_output / "notes.mid"
+            child_midis[instrument] = midi_path
+            count = child_result.get("expert_event_count")
+            child_events[instrument] = count if isinstance(count, int) else 0
+        midi_path = output_dir / "notes.mid"
+        _merge_composition_midis(child_midis, midi_path, instruments=requested)
+    for instrument in requested:
+        _complete_chart_stage(
+            instrument_results,
+            difficulty,
+            instrument=instrument,
+            stage_name=f"chart-{instrument}",
+            artifact_ids=("notes_midi",),
+        )
+    difficulty["status"] = "succeeded"
+    return (
+        {"notes_midi": {"name": "notes.mid", "sha256": _sha256(output_dir / "notes.mid")}},
+        {"composition": {"status": "succeeded", "instrument_event_counts": child_events}},
+        {"output_name": "notes.mid", "instrument_event_counts": child_events},
+    )
+
+
 def run_chart_request(request_path: Path) -> dict[str, object]:
     """Execute a declared, bundle-backed chart profile with no legacy fallbacks."""
     try:
@@ -3077,7 +3228,16 @@ def run_chart_request(request_path: Path) -> dict[str, object]:
             raise BundleValidationError("; ".join(errors))
         profile_id, manifest_sha256 = _verified_chart_run_profile(bundle, plan)
         output_dir = Path(request["output_dir"])
-        if plan["capability"] == "guitar.hybrid-v2-rule/v1":
+        if plan["capability"] == "five-lane.composition/v1":
+            artifacts, stages, response = _run_composition_chart(
+                bundle=bundle,
+                profile_id=profile_id,
+                plan=plan,
+                request=request,
+                instrument_results=instrument_results,
+                difficulty=difficulty,
+            )
+        elif plan["capability"] == "guitar.hybrid-v2-rule/v1":
             audio = Path(request["audio_path"])
             if not audio.is_file():
                 raise WorkerRequestError("chart input audio is unavailable")
@@ -5979,6 +6139,12 @@ def _parse_args() -> argparse.Namespace:
     package.add_argument("--request", type=Path, required=True)
     package.add_argument("--json", action="store_true")
     package.add_argument("--json-events", action="store_true")
+    compose = checkpoint_commands.add_parser(
+        "compose", help="compose promoted Expert profiles into one portable chart bundle"
+    )
+    compose.add_argument("--request", type=Path, required=True)
+    compose.add_argument("--json", action="store_true")
+    compose.add_argument("--json-events", action="store_true")
     inference = commands.add_parser("inference", help="validate deployable inference profiles")
     inference_commands = inference.add_subparsers(dest="inference_command", required=True)
     profile = inference_commands.add_parser("profile", help="inspect one inference profile")
@@ -6281,6 +6447,17 @@ def main() -> int:
                     lambda: package_checkpoint_request(args.request),
                 )
             _print_json(package_checkpoint_request(args.request))
+            return 0
+        if args.command == "checkpoint" and args.checkpoint_command == "compose":
+            from src.profile_composition import compose_profile_request  # noqa: PLC0415
+
+            if args.json_events:
+                return _run_event_stream(
+                    args.request,
+                    "checkpoint_composition",
+                    lambda: compose_profile_request(args.request),
+                )
+            _print_json(compose_profile_request(args.request))
             return 0
         if (
             args.command == "inference"

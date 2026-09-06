@@ -35,7 +35,11 @@ def test_installed_worker_includes_execution_modules_and_default_configs(tmp_pat
         assert "configs/onset_classifier.yaml" in names
         assert not any(name.startswith("configs/") and name.endswith(".json") for name in names)
         wheel.extractall(installed)
-    environment = dict(os.environ, PYTHONPATH=str(installed), PYTHONNOUSERSITE="1")
+    # Run the package extracted from the wheel, while retaining the interpreter's
+    # installed runtime dependencies.  ``PYTHONNOUSERSITE`` would hide declared
+    # dependencies (such as soundfile) in this development environment and test
+    # an impossible no-dependencies installation rather than the wheel itself.
+    environment = dict(os.environ, PYTHONPATH=str(installed))
     commands = [
         ["-m", "src.worker", "probe", "--json"],
         ["-m", "src.worker", "pipeline", "list", "--json"],

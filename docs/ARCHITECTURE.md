@@ -14,7 +14,11 @@ fails closed to the profiles declared by a validated model bundle:
 | Capability | Worker status | Output boundary |
 | --- | --- | --- |
 | `guitar.hybrid-v2-rule/v1` | Executable | Expert Guitar only |
+| `guitar.neural-v1-expert/v1` | Executable after profile evaluation | Expert Guitar only |
+| `bass.neural-v1-expert/v1` | Executable after profile evaluation | Expert Bass only |
+| `keys.neural-v1-expert/v1` | Executable after profile evaluation | Expert Keys only |
 | `drums.v14-expert/v1` | Executable | Expert Drums only, direct V14 (no legacy ensemble/fallbacks) |
+| `five-lane.composition/v1` | Executable | One portable composition of two to four validated Guitar/Bass/Keys/Drums Expert profiles; request selects a non-empty subset |
 | `difficulty.transform/v1` | Executable | Learned five-lane Expert → Hard/Medium/Easy transform for Guitar, Bass, Keys, or Drums |
 | Guitar onset/fret | Worker-trainable; evaluated profile executable | Safe task views plus path-free experiment bundles; only an evaluated `guitar.neural-v1-expert/v1` profile writes Expert Guitar |
 | Bass onset/fret | Worker-trainable; evaluated profile executable | Revalidated `PART BASS` task views and distinct `bass.onset`/`bass.fret` components; only an evaluated `bass.neural-v1-expert/v1` profile writes Expert Bass |
